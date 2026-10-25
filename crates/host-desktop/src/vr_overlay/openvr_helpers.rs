@@ -207,3 +207,24 @@ mod tests {
         );
     }
 }
+
+/// Let the user point at this overlay with the SteamVR laser and click it.
+/// SteamVR routes those clicks to the overlay, which keeps the game from also
+/// acting on them (the main reason the panel felt like it fought VRChat).
+pub(super) fn set_overlay_interactive(handle: OverlayHandle) -> Result<(), String> {
+    let set_flag = load_overlay_fn_table()?
+        .SetOverlayFlag
+        .ok_or_else(|| "OpenVR SetOverlayFlag is unavailable".to_string())?;
+    let error = unsafe {
+        set_flag(
+            handle.0,
+            openvr_sys::VROverlayFlags_MakeOverlaysInteractiveIfVisible,
+            true,
+        )
+    };
+    if error == openvr_sys::EVROverlayError_VROverlayError_None {
+        Ok(())
+    } else {
+        Err(format!("set interactive overlay flag failed: {error}"))
+    }
+}

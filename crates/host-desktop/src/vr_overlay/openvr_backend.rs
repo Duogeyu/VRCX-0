@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use openvr::{
@@ -11,20 +12,20 @@ use openvr::{
     },
     system::event::{Event, EventInfo},
     tracked_device_index, ApplicationType, Context, Overlay, System, TrackedControllerRole,
-    TrackedDeviceClass, TrackedDeviceIndex, MAX_TRACKED_DEVICE_COUNT,
+    TrackedDeviceClass, TrackedDeviceIndex, TrackingUniverseOrigin, MAX_TRACKED_DEVICE_COUNT,
 };
 use vrcx_0_vr_overlay::{OverlaySurfaceId, RgbaFrame, MAIN_SURFACE_ID};
 
 use super::openvr_helpers::{
-    frame_fingerprint, load_overlay_fn_table, overlay_button_mask, set_overlay_premultiplied_alpha,
-    surface_transform, FrameFingerprint,
+    frame_fingerprint, load_overlay_fn_table, overlay_button_mask, set_overlay_interactive,
+    set_overlay_premultiplied_alpha, surface_transform, FrameFingerprint,
 };
 use super::{
     actor::{OverlayBackend, TickOutcome},
     policy::WristVisibilityPolicy,
     types::{
-        BackendStartError, OverlayActivationButton, OverlayPlacement, OverlaySurfaceConfig,
-        VrDeviceSnapshot,
+        BackendStartError, OverlayActivationButton, OverlayInputEvent, OverlayPlacement,
+        OverlaySurfaceConfig, VrDeviceSnapshot,
     },
 };
 use openvr_devices::{snapshot_openvr_devices, string_property, BatteryReadingState};
@@ -83,6 +84,7 @@ pub struct OpenVrOverlayBackend {
     hmd_battery_readings: HashMap<String, BatteryReadingState>,
     hmd_user_present: Option<bool>,
     outstanding_raw_frames: u64,
+    input_sink: Option<Arc<Mutex<VecDeque<OverlayInputEvent>>>>,
 }
 
 #[derive(Debug)]
@@ -110,6 +112,7 @@ struct OpenVrSurface {
     config: OverlaySurfaceConfig,
     transform_device: Option<TrackedDeviceIndex>,
     policy: WristVisibilityPolicy,
+    button_was_pressed: bool,
     visible: bool,
     active: bool,
     pending_frame: Option<PendingFrame>,
@@ -164,6 +167,7 @@ struct SurfaceUpdateCandidate {
     config: OverlaySurfaceConfig,
     transform_device: Option<TrackedDeviceIndex>,
     policy: WristVisibilityPolicy,
+    button_was_pressed: bool,
 }
 
 impl OpenVrOverlayBackend {
@@ -178,7 +182,15 @@ impl OpenVrOverlayBackend {
             hmd_battery_readings: HashMap::new(),
             hmd_user_present: None,
             outstanding_raw_frames: 0,
+            input_sink: None,
         }
+    }
+
+    /// Backend that also reports pointer input for interactive surfaces.
+    pub fn new_with_input(sink: Arc<Mutex<VecDeque<OverlayInputEvent>>>) -> Self {
+        let mut backend = Self::new();
+        backend.input_sink = Some(sink);
+        backend
     }
 }
 
@@ -193,8 +205,10 @@ impl OverlayBackend for OpenVrOverlayBackend {
         self.outstanding_raw_frames > 0
             || self.surfaces.values().any(|surface| {
                 surface.visible
-                    && surface.pending_frame.is_some()
-                    && visible_frame_upload_interval(surface) <= MAIN_VISIBLE_FRAME_UPLOAD_INTERVAL
+                    && (surface.config.min_upload_interval_ms.is_some()
+                        || (surface.pending_frame.is_some()
+                            && visible_frame_upload_interval(surface)
+                                <= MAIN_VISIBLE_FRAME_UPLOAD_INTERVAL))
             })
     }
 
@@ -255,6 +269,13 @@ impl OverlayBackend for OpenVrOverlayBackend {
                 )
                 .map_err(|error| format!("create overlay failed: {error:?}"))?;
             set_overlay_premultiplied_alpha(*handle)?;
+            if config.min_upload_interval_ms.is_some() {
+                // Interactive web panel: SteamVR's laser can point at it and the
+                // click is delivered to the overlay instead of the game.
+                if let Err(error) = set_overlay_interactive(*handle) {
+                    tracing::warn!(%error, "failed to mark overlay interactive");
+                }
+            }
         }
         self.surfaces.insert(
             surface_id,
@@ -265,6 +286,7 @@ impl OverlayBackend for OpenVrOverlayBackend {
                 config: config.clone(),
                 transform_device: None,
                 policy: WristVisibilityPolicy::default(),
+                button_was_pressed: false,
                 visible: false,
                 active: true,
                 pending_frame: None,
@@ -419,6 +441,9 @@ fn surface_uses_wrist_policy(config: &OverlaySurfaceConfig) -> bool {
 }
 
 fn visible_frame_upload_interval(surface: &OpenVrSurface) -> Duration {
+    if let Some(interval_ms) = surface.config.min_upload_interval_ms {
+        return Duration::from_millis(u64::from(interval_ms.max(16)));
+    }
     if surface.config.surface_id.as_str() == MAIN_SURFACE_ID {
         MAIN_VISIBLE_FRAME_UPLOAD_INTERVAL
     } else {
@@ -476,7 +501,11 @@ impl OpenVrOverlayBackend {
                 if !has_event {
                     break;
                 }
-                let event = EventInfo::from(unsafe { event.assume_init() });
+                let raw = unsafe { event.assume_init() };
+                if self.handle_pointer_event(&surface_id, &raw) {
+                    continue;
+                }
+                let event = EventInfo::from(raw);
                 if self.handle_overlay_event(&surface_id, handle, event) {
                     if let Some(system) = &self.system {
                         system.acknowledge_quit_exiting();
@@ -488,6 +517,72 @@ impl OpenVrOverlayBackend {
         false
     }
 
+    /// Pointer events SteamVR delivers for an interactive overlay (laser input).
+    /// SteamVR routes these to the overlay, so the game does not also act on the
+    /// same click.
+    fn handle_pointer_event(
+        &mut self,
+        surface_id: &OverlaySurfaceId,
+        raw: &openvr_sys::VREvent_t,
+    ) -> bool {
+        let Some(sink) = self.input_sink.clone() else {
+            return false;
+        };
+        let Some(surface) = self.surfaces.get(surface_id) else {
+            return false;
+        };
+        if surface.config.min_upload_interval_ms.is_none() {
+            return false;
+        }
+        let width = surface.config.size.width as f32;
+        let height = surface.config.size.height as f32;
+        // Scroll events carry no position of their own; anchor them at the
+        // panel centre rather than depending on the ray pointer's state.
+        let (cx, cy) = (width as i32 / 2, height as i32 / 2);
+
+        let event = unsafe {
+            match raw.eventType as i32 {
+                openvr_sys::EVREventType_VREvent_MouseMove => {
+                    let mouse = raw.data.mouse;
+                    OverlayInputEvent::PointerMove {
+                        x: (mouse.x * width).round() as i32,
+                        y: (mouse.y * height).round() as i32,
+                    }
+                }
+                openvr_sys::EVREventType_VREvent_MouseButtonDown => {
+                    let mouse = raw.data.mouse;
+                    OverlayInputEvent::PointerDown {
+                        x: (mouse.x * width).round() as i32,
+                        y: (mouse.y * height).round() as i32,
+                    }
+                }
+                openvr_sys::EVREventType_VREvent_MouseButtonUp => {
+                    let mouse = raw.data.mouse;
+                    OverlayInputEvent::PointerUp {
+                        x: (mouse.x * width).round() as i32,
+                        y: (mouse.y * height).round() as i32,
+                    }
+                }
+                openvr_sys::EVREventType_VREvent_ScrollDiscrete
+                | openvr_sys::EVREventType_VREvent_ScrollSmooth => {
+                    let scroll = raw.data.scroll;
+                    OverlayInputEvent::Wheel {
+                        x: cx,
+                        y: cy,
+                        delta: if scroll.ydelta >= 0.0 { 120 } else { -120 },
+                    }
+                }
+                _ => return false,
+            }
+        };
+        if let Ok(mut queue) = sink.lock() {
+            queue.push_back(event);
+            while queue.len() > 256 {
+                queue.pop_front();
+            }
+        }
+        true
+    }
     fn handle_overlay_event(
         &mut self,
         surface_id: &OverlaySurfaceId,
@@ -562,6 +657,7 @@ impl OpenVrOverlayBackend {
                 config: surface.config.clone(),
                 transform_device: surface.transform_device,
                 policy: surface.policy,
+                button_was_pressed: surface.button_was_pressed,
             })
             .collect::<Vec<_>>();
 
@@ -575,6 +671,7 @@ impl OpenVrOverlayBackend {
         for candidate in candidates {
             let mut transform_device = candidate.transform_device;
             let mut policy = candidate.policy;
+            let mut button_was_pressed = candidate.button_was_pressed;
 
             if let Ok(device) = resolve_device(system, &candidate.config.placement) {
                 if transform_device != Some(device) {
@@ -595,22 +692,32 @@ impl OpenVrOverlayBackend {
                     );
                 }
                 transform_device = Some(device);
-                if device_button_pressed(system, device, candidate.config.activation_button) {
-                    policy.open(now);
+                // Toggle on the press edge: one press opens, the next closes.
+                let pressed =
+                    device_button_pressed(system, device, candidate.config.activation_button);
+                if pressed && !candidate.button_was_pressed {
+                    policy.toggle(now);
                 }
+                button_was_pressed = pressed;
             }
 
             let device_present = transform_device.is_some();
             let visible = policy.evaluate(now, device_present)
                 || (candidate.config.force_visible && device_present);
-            surface_updates.push((candidate.surface_id.clone(), transform_device, policy));
+            surface_updates.push((
+                candidate.surface_id.clone(),
+                transform_device,
+                policy,
+                button_was_pressed,
+            ));
             visibility_updates.push((candidate.surface_id, visible));
         }
 
-        for (surface_id, transform_device, policy) in surface_updates {
+        for (surface_id, transform_device, policy, button_was_pressed) in surface_updates {
             if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                 surface.transform_device = transform_device;
                 surface.policy = policy;
+                surface.button_was_pressed = button_was_pressed;
             }
         }
         for (surface_id, visible) in visibility_updates {
