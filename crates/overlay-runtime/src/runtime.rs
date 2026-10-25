@@ -13,13 +13,16 @@ use vrcx_0_application_activity::{ActivityDelivery, ActivitySink, ActivitySnapsh
 use vrcx_0_application_core::{GameProcessEvent, GameProcessEventSink, TaskSupervisor};
 use vrcx_0_core::text::first_non_empty_owned;
 use vrcx_0_host_desktop::vr_overlay::{
-    OverlayActivationButton, OverlayPlacement, OverlaySurfaceConfig, VrDeviceSnapshot,
+    OverlayActivationButton, OverlayInputEvent, OverlayPlacement, OverlaySurfaceConfig,
+    VrDeviceSnapshot,
 };
 use vrcx_0_vr_overlay::{
     MainSurfaceModel, OverlaySize, OverlaySurfaceId, RgbaFrame, SlintHmdRenderer,
     SlintWristRenderer, WristSurfaceModel, MAIN_SURFACE_ID,
 };
+use vrcx_0_web_surface::{StaticServer, WebInputEvent, WebSurface, WebSurfaceConfig};
 
+use crate::web_overlay::{self, WebOverlaySettings};
 use crate::VrOverlayRuntimeServices;
 
 use super::{
@@ -42,6 +45,9 @@ pub use super::config::VR_OVERLAY_ENABLED_CONFIG_KEY;
 
 trait VrOverlayFrameProducer: Send {
     fn next_frame(&mut self, input: VrOverlayFrameInput) -> Result<RgbaFrame, String>;
+
+    /// Pointer input collected by the VR backend for an interactive surface.
+    fn handle_overlay_input(&mut self, _events: Vec<OverlayInputEvent>) {}
 }
 
 type VrOverlayFrameProducerFactory = Box<dyn Fn() -> Box<dyn VrOverlayFrameProducer> + Send + Sync>;
@@ -154,7 +160,7 @@ impl Default for HmdNotificationConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct VrOverlayRuntimeConfig {
+pub(crate) struct VrOverlayRuntimeConfig {
     pub(crate) start_mode: WristOverlayStartMode,
     pub(crate) backend: OverlayBackendPreference,
     pub(crate) button: OverlayActivationButton,
@@ -164,6 +170,19 @@ pub(super) struct VrOverlayRuntimeConfig {
     pub(crate) locale: OverlayLocale,
     pub(crate) dt_hour12: bool,
     pub(crate) show_instance_id_in_location: bool,
+    /// Present when the wrist surface shows a web page instead of the Slint panel.
+    pub(crate) web: Option<WebSurfaceDims>,
+}
+
+/// Size and physical width of the web wrist surface (Copy so the runtime
+/// config can stay `Copy`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WebSurfaceDims {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) physical_width_mm: u32,
+    /// Page refresh interval; also the minimum frame upload interval.
+    pub(crate) refresh_ms: u32,
 }
 
 impl Default for VrOverlayRuntimeConfig {
@@ -178,6 +197,7 @@ impl Default for VrOverlayRuntimeConfig {
             locale: OverlayLocale::default(),
             dt_hour12: false,
             show_instance_id_in_location: false,
+            web: None,
         }
     }
 }
@@ -190,6 +210,7 @@ impl VrOverlayRuntimeConfig {
             size: self.render.size,
             hmd_enabled: self.hmd.enabled,
             hmd_position: self.hmd.position,
+            web: self.web,
         }
     }
 
@@ -206,6 +227,7 @@ struct WristSurfaceRuntimeConfig {
     size: WristOverlaySizePreset,
     hmd_enabled: bool,
     hmd_position: HmdNotificationPosition,
+    web: Option<WebSurfaceDims>,
 }
 
 struct VrOverlayFrameInput {
@@ -298,6 +320,8 @@ pub struct VrOverlayRuntime {
     refresh_thread_id: Mutex<Option<ThreadId>>,
     frame_producer_factory: VrOverlayFrameProducerFactory,
     frame_producer: Mutex<Option<Box<dyn VrOverlayFrameProducer>>>,
+    /// Settings for the web wrist surface; shared with the frame producer.
+    web_settings: Arc<Mutex<Option<Arc<WebOverlaySettings>>>>,
 }
 
 #[derive(Clone)]
@@ -333,16 +357,21 @@ impl VrOverlayRuntime {
         S: VrOverlayRuntimeServices + 'static,
     {
         let config = load_runtime_config(services.as_ref());
+        let web = web_overlay::load(services.as_ref().config());
+        let web_settings = Arc::new(Mutex::new(web.map(Arc::new)));
         let services: Arc<dyn VrOverlayRuntimeServices> = services;
         let producer_services = Arc::clone(&services);
+        let producer_web = Arc::clone(&web_settings);
         Self::new_with_frame_producer_factory(
             HostVrOverlayService::backend_available(),
             Some(services.clone()),
             config,
+            web_settings,
             Box::new(move || {
-                Box::new(RuntimeWristFrameProducer::new(Arc::clone(
-                    &producer_services,
-                )))
+                Box::new(RuntimeWristFrameProducer::new(
+                    Arc::clone(&producer_services),
+                    Arc::clone(&producer_web),
+                ))
             }),
         )
     }
@@ -356,6 +385,7 @@ impl VrOverlayRuntime {
             backend_available,
             None,
             VrOverlayRuntimeConfig::default(),
+            Arc::new(Mutex::new(None)),
             Box::new(|| Box::<StaticWristFrameProducer>::default()),
         )
     }
@@ -364,6 +394,7 @@ impl VrOverlayRuntime {
         backend_available: bool,
         services: Option<Arc<dyn VrOverlayRuntimeServices>>,
         config: VrOverlayRuntimeConfig,
+        web_settings: Arc<Mutex<Option<Arc<WebOverlaySettings>>>>,
         frame_producer_factory: VrOverlayFrameProducerFactory,
     ) -> Self {
         let service_configs = Vec::new();
@@ -402,6 +433,7 @@ impl VrOverlayRuntime {
             avatar_bitmap_cache: Arc::new(AvatarBitmapCache::new()),
             frame_producer_factory,
             frame_producer: Mutex::new(None),
+            web_settings,
         }
     }
 
@@ -532,6 +564,12 @@ impl VrOverlayRuntime {
 
 impl VrOverlayRuntime {
     fn refresh_interval(&self) -> Duration {
+        // Web surfaces need a much faster refresh than the static Slint panel.
+        if let Ok(slot) = self.web_settings.lock() {
+            if let Some(settings) = slot.as_ref() {
+                return Duration::from_millis(settings.refresh_ms.max(33));
+            }
+        }
         match self.hmd_toast_refresh_hint(Instant::now()) {
             Some(hint) => WRIST_FRAME_REFRESH_INTERVAL.min(hint),
             None => WRIST_FRAME_REFRESH_INTERVAL,
@@ -791,6 +829,13 @@ impl VrOverlayRuntime {
             return;
         }
         *current_config = next_config;
+        // Reload the web overlay settings (URL / zoom / refresh) as well.
+        if let Some(services) = &self.services {
+            let next_web = web_overlay::load(services.as_ref().config()).map(Arc::new);
+            if let Ok(mut slot) = self.web_settings.lock() {
+                *slot = next_web;
+            }
+        }
         if clear_devices {
             if let Ok(mut devices) = self.devices.lock() {
                 devices.clear();
@@ -870,12 +915,17 @@ impl VrOverlayRuntime {
         let wrist_visible = wrist_surface_ids(config.hand)
             .iter()
             .any(|surface_id| manager.is_surface_visible(surface_id));
+        // Forward any pointer input the VR backend collected for the web panel.
+        let input_events = manager.take_input_events();
         let frame = match self
             .frame_producer
             .lock()
             .map_err(|_| "wrist frame producer lock poisoned".to_string())
             .and_then(|mut producer| {
                 let producer = producer.get_or_insert_with(|| (self.frame_producer_factory)());
+                if !input_events.is_empty() {
+                    producer.handle_overlay_input(input_events);
+                }
                 producer.next_frame(VrOverlayFrameInput {
                     config,
                     devices,
@@ -984,18 +1034,203 @@ impl GameProcessEventSink for VrOverlayRuntime {
     }
 }
 
+/// Solid background used while a web page has not produced its first frame.
+fn background_frame(width: u32, height: u32) -> Vec<u8> {
+    let pixels = (width as usize) * (height as usize);
+    let mut data = Vec::with_capacity(pixels * 4);
+    for _ in 0..pixels {
+        data.extend_from_slice(&[11, 14, 26, 255]);
+    }
+    data
+}
+
 struct RuntimeWristFrameProducer {
     services: Arc<dyn VrOverlayRuntimeServices>,
+    web_settings: Arc<Mutex<Option<Arc<WebOverlaySettings>>>>,
+    web: Option<WebRuntime>,
+    placeholder: Option<(u32, u32, Vec<u8>)>,
 }
 
 impl RuntimeWristFrameProducer {
-    fn new(services: Arc<dyn VrOverlayRuntimeServices>) -> Self {
-        Self { services }
+    fn placeholder_frame(&mut self, width: u32, height: u32) -> Vec<u8> {
+        if let Some((w, h, data)) = &self.placeholder {
+            if *w == width && *h == height {
+                return data.clone();
+            }
+        }
+        let data = background_frame(width, height);
+        self.placeholder = Some((width, height, data.clone()));
+        data
+    }
+}
+
+/// A running web page surface plus (optionally) the static server that hosts it.
+struct WebRuntime {
+    surface: WebSurface,
+    _server: Option<StaticServer>,
+    key: String,
+    /// Plugin page on disk (hot reload source).
+    watched: Option<std::path::PathBuf>,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl WebRuntime {
+    fn spawn(settings: &WebOverlaySettings) -> Result<Self, String> {
+        let (url, server) = match (&settings.url, &settings.plugin_root) {
+            (Some(url), _) => (url.clone(), None),
+            (None, Some(root)) => {
+                let server = StaticServer::spawn(root.clone())?;
+                let page = settings.page.trim_start_matches('/');
+                let url = format!("{}{page}", server.base_url());
+                (url, Some(server))
+            }
+            // No URL and no plugin directory: do not silently load an unrelated
+            // website. Report it and let the caller keep the placeholder frame.
+            (None, None) => {
+                return Err(format!(
+                    "web overlay: plugin \"{}\" has no page to serve",
+                    settings.plugin_id
+                ))
+            }
+        };
+        // Build through `from_plugin` when a manifest is present, so its
+        // presentation hints (zoom / UA / injected CSS and JS) actually apply.
+        let mut cfg = match &settings.plugin {
+            Some(plugin) => WebSurfaceConfig::from_plugin(
+                plugin,
+                Some(vrcx_0_web_surface::default_profile_dir()),
+            ),
+            None => {
+                let mut cfg = WebSurfaceConfig::new(url.clone());
+                cfg.profile_dir = Some(vrcx_0_web_surface::default_profile_dir());
+                cfg
+            }
+        };
+        cfg.url = url;
+        // Config values win over manifest hints: they are what the user edited.
+        cfg.width = settings.width;
+        cfg.height = settings.height;
+        cfg.zoom = settings.zoom();
+        cfg.refresh_ms = settings.refresh_ms;
+        let surface = WebSurface::spawn(cfg)?;
+        // Watch the plugin page so editing it reloads the overlay in place.
+        let watched = settings
+            .plugin_root
+            .as_ref()
+            .map(|root| root.join(settings.page.trim_start_matches('/')));
+        let modified = watched.as_deref().and_then(file_modified);
+        Ok(Self {
+            surface,
+            _server: server,
+            key: settings.key(),
+            watched,
+            modified,
+        })
+    }
+
+    /// Reload the page when its file changed on disk (plugin hot reload).
+    fn poll_file_change(&mut self) {
+        let Some(path) = &self.watched else {
+            return;
+        };
+        let current = file_modified(path);
+        if current.is_some() && current != self.modified {
+            if self.modified.is_some() {
+                tracing::info!(path = %path.display(), "web overlay: plugin changed, reloading");
+                self.surface.send(WebInputEvent::Reload);
+            }
+            self.modified = current;
+        }
+    }
+}
+
+fn file_modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+}
+
+impl RuntimeWristFrameProducer {
+    fn new(
+        services: Arc<dyn VrOverlayRuntimeServices>,
+        web_settings: Arc<Mutex<Option<Arc<WebOverlaySettings>>>>,
+    ) -> Self {
+        Self {
+            services,
+            web_settings,
+            web: None,
+            placeholder: None,
+        }
     }
 }
 
 impl VrOverlayFrameProducer for RuntimeWristFrameProducer {
+    fn handle_overlay_input(&mut self, events: Vec<OverlayInputEvent>) {
+        let Some(runtime) = &self.web else {
+            return;
+        };
+        for event in events {
+            let converted = match event {
+                OverlayInputEvent::PointerMove { x, y } => {
+                    vrcx_0_web_surface::WebInputEvent::PointerMove { x, y }
+                }
+                OverlayInputEvent::PointerDown { x, y } => {
+                    vrcx_0_web_surface::WebInputEvent::PointerDown { x, y }
+                }
+                OverlayInputEvent::PointerUp { x, y } => {
+                    vrcx_0_web_surface::WebInputEvent::PointerUp { x, y }
+                }
+                OverlayInputEvent::Wheel { x, y, delta } => {
+                    vrcx_0_web_surface::WebInputEvent::Wheel { x, y, delta }
+                }
+            };
+            runtime.surface.send(converted);
+        }
+    }
+
     fn next_frame(&mut self, input: VrOverlayFrameInput) -> Result<RgbaFrame, String> {
+        if let Some(settings) = self
+            .web_settings
+            .lock()
+            .map(|slot| slot.clone())
+            .unwrap_or(None)
+        {
+            let key = settings.key();
+            if self.web.as_ref().map(|web| web.key.as_str()) != Some(key.as_str()) {
+                self.web = None;
+                match WebRuntime::spawn(&settings) {
+                    Ok(runtime) => {
+                        tracing::info!(plugin = %settings.plugin_id, "web overlay: surface started");
+                        self.web = Some(runtime);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "web overlay: cannot start web surface");
+                    }
+                }
+            }
+            if let Some(runtime) = &mut self.web {
+                runtime.poll_file_change();
+                if let Some(frame) = runtime.surface.latest_frame() {
+                    let expected = u64::from(frame.width) * u64::from(frame.height) * 4;
+                    // `rgba` is already an `Arc<[u8]>`: hand it over instead of
+                    // copying ~1.6 MB on every frame.
+                    if frame.width > 0 && frame.height > 0 && frame.rgba.len() as u64 == expected {
+                        return Ok(RgbaFrame::new(
+                            OverlaySize::new(frame.width, frame.height),
+                            Arc::clone(&frame.rgba),
+                        ));
+                    }
+                }
+            }
+            // Page not ready yet: keep the surface at the web size with the
+            // panel background so the overlay does not change shape.
+            let data = self.placeholder_frame(settings.width, settings.height);
+            return Ok(RgbaFrame::new(
+                OverlaySize::new(settings.width, settings.height),
+                data,
+            ));
+        }
+
         let frame_input = if input.test_mode {
             test_wrist_frame_input(
                 input.config,
@@ -1092,6 +1327,18 @@ fn wrist_surface_configs(
     config: VrOverlayRuntimeConfig,
     force_visible: bool,
 ) -> Vec<OverlaySurfaceConfig> {
+    let (size, physical_width_meters, min_upload_interval_ms) = match config.web {
+        Some(web) => (
+            OverlaySize::new(web.width, web.height),
+            f32::from(web.physical_width_mm as u16) / 1000.0,
+            Some(web.refresh_ms.max(16)),
+        ),
+        None => (
+            config.render.size.overlay_size(),
+            config.render.size.physical_width_meters(),
+            None,
+        ),
+    };
     wrist_surface_ids(config.hand)
         .into_iter()
         .map(|surface_id| {
@@ -1103,9 +1350,11 @@ fn wrist_surface_configs(
             wrist_surface_config(
                 surface_id.as_str(),
                 device_hint,
-                config.render.size,
+                size,
+                physical_width_meters,
                 config.button,
                 force_visible,
+                min_upload_interval_ms,
             )
         })
         .collect()
@@ -1125,19 +1374,22 @@ fn wrist_surface_ids(hand: WristOverlayHand) -> Vec<OverlaySurfaceId> {
 fn wrist_surface_config(
     surface_id: &str,
     device_hint: &str,
-    size: WristOverlaySizePreset,
+    size: OverlaySize,
+    physical_width_meters: f32,
     button: OverlayActivationButton,
     force_visible: bool,
+    min_upload_interval_ms: Option<u32>,
 ) -> OverlaySurfaceConfig {
     OverlaySurfaceConfig {
         surface_id: OverlaySurfaceId::new(surface_id),
-        size: size.overlay_size(),
-        physical_width_meters: size.physical_width_meters(),
+        size,
+        physical_width_meters,
         placement: OverlayPlacement::TrackedDeviceRelative {
             device_hint: device_hint.to_string(),
         },
         activation_button: button,
         force_visible,
+        min_upload_interval_ms,
     }
 }
 
@@ -1172,6 +1424,7 @@ fn hmd_surface_config(
         },
         activation_button: OverlayActivationButton::Grip,
         force_visible: false,
+        min_upload_interval_ms: None,
     }
 }
 
