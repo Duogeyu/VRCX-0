@@ -22,6 +22,7 @@ use super::openvr_helpers::{
 };
 use super::{
     actor::{OverlayBackend, TickOutcome},
+    pointer_ray,
     policy::WristVisibilityPolicy,
     types::{
         BackendStartError, OverlayActivationButton, OverlayInputEvent, OverlayPlacement,
@@ -85,6 +86,15 @@ pub struct OpenVrOverlayBackend {
     hmd_user_present: Option<bool>,
     outstanding_raw_frames: u64,
     input_sink: Option<Arc<Mutex<VecDeque<OverlayInputEvent>>>>,
+    pointer: HashMap<OverlaySurfaceId, PointerState>,
+    last_pointer_poll: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PointerState {
+    x: f32,
+    y: f32,
+    trigger_down: bool,
 }
 
 #[derive(Debug)]
@@ -183,6 +193,8 @@ impl OpenVrOverlayBackend {
             hmd_user_present: None,
             outstanding_raw_frames: 0,
             input_sink: None,
+            pointer: HashMap::new(),
+            last_pointer_poll: Instant::now(),
         }
     }
 
@@ -417,6 +429,7 @@ impl OverlayBackend for OpenVrOverlayBackend {
         if let Err(error) = self.flush_pending_frames(Instant::now()) {
             tracing::warn!(error = %error, "failed to flush pending VR overlay frame");
         }
+        self.poll_web_pointer();
         TickOutcome::Continue
     }
 
@@ -464,6 +477,159 @@ impl OpenVrOverlayBackend {
             Some(state.button_pressed & (1u64 << button_id::PROXIMITY_SENSOR) != 0);
     }
 
+    /// Drive the pointer for interactive (web) surfaces from the opposite
+    /// controller: the touchpad moves the cursor, the trigger clicks.
+    fn poll_web_pointer(&mut self) {
+        let Some(sink) = self.input_sink.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        let dt = now
+            .saturating_duration_since(self.last_pointer_poll)
+            .as_secs_f32()
+            .min(0.2);
+        self.last_pointer_poll = now;
+        let Some(system) = self.system.as_ref() else {
+            return;
+        };
+
+        let targets = self
+            .surfaces
+            .iter()
+            .filter(|(_, surface)| {
+                surface.config.min_upload_interval_ms.is_some() && surface.visible && surface.active
+            })
+            .map(|(surface_id, surface)| (surface_id.clone(), surface.config.clone()))
+            .collect::<Vec<_>>();
+
+        let poses = system.device_to_absolute_tracking_pose(TrackingUniverseOrigin::Standing, 0.0);
+        let mut events = Vec::new();
+        for (surface_id, config) in targets {
+            let hint = match &config.placement {
+                OverlayPlacement::TrackedDeviceRelative { device_hint } => device_hint.clone(),
+                _ => continue,
+            };
+            let panel_is_left = hint.contains("left");
+            let (primary_role, fallback_role) = if panel_is_left {
+                (
+                    TrackedControllerRole::RightHand,
+                    TrackedControllerRole::LeftHand,
+                )
+            } else {
+                (
+                    TrackedControllerRole::LeftHand,
+                    TrackedControllerRole::RightHand,
+                )
+            };
+            // Prefer the opposite hand; fall back when only one controller is tracked.
+            let Some(device) = system
+                .tracked_device_index_for_controller_role(primary_role)
+                .or_else(|| system.tracked_device_index_for_controller_role(fallback_role))
+            else {
+                continue;
+            };
+            let Some((state, _pose)) =
+                system.controller_state_with_pose(TrackingUniverseOrigin::Standing, device)
+            else {
+                continue;
+            };
+            let Ok(panel_device) = resolve_device(system, &config.placement) else {
+                continue;
+            };
+
+            let width = config.size.width as f32;
+            let height = config.size.height as f32;
+            let panel_height_meters = config.physical_width_meters * (height / width.max(1.0));
+
+            // Panel plane in tracking space = panel device pose * surface transform.
+            let panel_world = poses
+                .get(panel_device.0 as usize)
+                .filter(|pose| pose.device_is_connected() && pose.pose_is_valid())
+                .map(|pose| {
+                    pointer_ray::compose(
+                        pose.device_to_absolute_tracking(),
+                        &surface_transform(&config.placement).0,
+                    )
+                });
+            let Some(panel_world) = panel_world else {
+                continue;
+            };
+            // Cursor follows the controller ray: no stick input, so the avatar
+            // does not walk while the panel is being used.
+            let hit = poses
+                .get(device.0 as usize)
+                .filter(|pose| pose.device_is_connected() && pose.pose_is_valid())
+                .and_then(|pose| {
+                    pointer_ray::ray_to_panel(
+                        pose.device_to_absolute_tracking(),
+                        &panel_world,
+                        config.physical_width_meters,
+                        panel_height_meters,
+                    )
+                });
+            let Some((u, v)) = hit else {
+                continue;
+            };
+            if !(-0.1..=1.1).contains(&u) || !(-0.1..=1.1).contains(&v) {
+                continue;
+            }
+
+            let pointer = self
+                .pointer
+                .entry(surface_id.clone())
+                .or_insert(PointerState {
+                    x: width * 0.5,
+                    y: height * 0.5,
+                    trigger_down: false,
+                });
+            let x = (u * width).round().clamp(0.0, (width - 1.0).max(0.0));
+            let y = (v * height).round().clamp(0.0, (height - 1.0).max(0.0));
+            let moved = (pointer.x - x).abs() > 0.75 || (pointer.y - y).abs() > 0.75;
+            pointer.x = x;
+            pointer.y = y;
+            let px = pointer.x.round() as i32;
+            let py = pointer.y.round() as i32;
+
+            // Click on the stick press (VRChat maps it to "run", which is inert
+            // while standing); trigger is left alone so it does not interact
+            // with the world.
+            let click = state.button_pressed & (1u64 << button_id::STEAM_VR_TOUCHPAD) != 0;
+            if moved || click != pointer.trigger_down {
+                events.push(OverlayInputEvent::PointerMove { x: px, y: py });
+            }
+            if click && !pointer.trigger_down {
+                events.push(OverlayInputEvent::PointerDown { x: px, y: py });
+            } else if !click && pointer.trigger_down {
+                events.push(OverlayInputEvent::PointerUp { x: px, y: py });
+            }
+            pointer.trigger_down = click;
+
+            // Edge scrolling: aim at the top/bottom band of the panel.
+            let scroll_delta = if v < 0.10 {
+                120
+            } else if v > 0.90 {
+                -120
+            } else {
+                0
+            };
+            if scroll_delta != 0 && dt > 0.0 {
+                events.push(OverlayInputEvent::Wheel {
+                    x: px,
+                    y: py,
+                    delta: scroll_delta,
+                });
+            }
+        }
+
+        if !events.is_empty() {
+            if let Ok(mut queue) = sink.lock() {
+                queue.extend(events);
+                while queue.len() > 256 {
+                    queue.pop_front();
+                }
+            }
+        }
+    }
     fn poll_runtime_quit(&self) -> bool {
         let Some(system) = &self.system else {
             return false;
@@ -665,7 +831,6 @@ impl OpenVrOverlayBackend {
             .overlay
             .as_mut()
             .ok_or_else(|| "OpenVR overlay is not started".to_string())?;
-        let now = Instant::now();
         let mut surface_updates = Vec::new();
         let mut visibility_updates = Vec::new();
         for candidate in candidates {
@@ -696,13 +861,13 @@ impl OpenVrOverlayBackend {
                 let pressed =
                     device_button_pressed(system, device, candidate.config.activation_button);
                 if pressed && !candidate.button_was_pressed {
-                    policy.toggle(now);
+                    policy.toggle();
                 }
                 button_was_pressed = pressed;
             }
 
             let device_present = transform_device.is_some();
-            let visible = policy.evaluate(now, device_present)
+            let visible = policy.evaluate(device_present)
                 || (candidate.config.force_visible && device_present);
             surface_updates.push((
                 candidate.surface_id.clone(),

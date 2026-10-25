@@ -7,6 +7,8 @@ mod openvr_backend;
 mod openvr_helpers;
 #[cfg(all(feature = "openxr-overlay", any(windows, target_os = "linux")))]
 mod openxr_backend;
+#[cfg(all(feature = "steamvr-overlay", any(windows, target_os = "linux")))]
+mod pointer_ray;
 #[cfg(all(
     any(feature = "steamvr-overlay", feature = "openxr-overlay"),
     any(windows, target_os = "linux")
