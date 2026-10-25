@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use vrcx_0_host_desktop::vr_overlay::{
-    OverlayActorHandle, OverlayCommandError, OverlayServiceCommand, OverlayServicePhase,
-    OverlaySurfaceConfig, VrDeviceSnapshot,
+    OverlayActorHandle, OverlayCommandError, OverlayInputEvent, OverlayServiceCommand,
+    OverlayServicePhase, OverlaySurfaceConfig, VrDeviceSnapshot,
 };
 use vrcx_0_vr_overlay::{OverlaySurfaceId, RgbaFrame};
 
@@ -113,6 +113,10 @@ pub trait VrOverlayServiceControl {
     }
     fn is_surface_visible(&self, _surface_id: &OverlaySurfaceId) -> bool {
         false
+    }
+    /// Pointer events produced by interactive surfaces since the last call.
+    fn take_input_events(&self) -> Vec<OverlayInputEvent> {
+        Vec::new()
     }
     fn should_stop_when_ineligible(&self) -> bool {
         self.is_running()
@@ -566,6 +570,13 @@ impl VrOverlayServiceControl for HostVrOverlayService {
         } else {
             None
         }
+    }
+
+    fn take_input_events(&self) -> Vec<OverlayInputEvent> {
+        self.actor
+            .as_ref()
+            .map(OverlayActorHandle::take_input_events)
+            .unwrap_or_default()
     }
 
     fn is_surface_visible(&self, surface_id: &OverlaySurfaceId) -> bool {

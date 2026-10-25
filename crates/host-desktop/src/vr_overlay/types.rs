@@ -53,6 +53,11 @@ pub struct OverlaySurfaceConfig {
     pub activation_button: OverlayActivationButton,
     #[serde(default)]
     pub force_visible: bool,
+    /// Optional lower bound for frame uploads while the surface is visible.
+    /// Web pages need a much faster cadence than the 1 Hz default of static
+    /// panels; `None` keeps the built-in interval.
+    #[serde(default)]
+    pub min_upload_interval_ms: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
@@ -92,4 +97,14 @@ pub enum VrDeviceStatus {
     Charging,
     TrackingWarning,
     Disconnected,
+}
+
+/// Pointer input produced by the VR backend for an interactive overlay
+/// surface (currently the web wrist panel).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OverlayInputEvent {
+    PointerMove { x: i32, y: i32 },
+    PointerDown { x: i32, y: i32 },
+    PointerUp { x: i32, y: i32 },
+    Wheel { x: i32, y: i32, delta: i32 },
 }

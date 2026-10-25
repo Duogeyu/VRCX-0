@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::{
     mpsc::{self, RecvTimeoutError},
     Arc, Mutex,
@@ -15,8 +16,15 @@ use super::{
     command::{OverlayCommandError, OverlayServiceCommand},
     noop::NoopOverlayBackend,
     status::{OverlayServicePhase, OverlayServiceStatus},
-    types::{BackendStartError, BackendStartErrorReason, OverlaySurfaceConfig, VrDeviceSnapshot},
+    types::{
+        BackendStartError, BackendStartErrorReason, OverlayInputEvent, OverlaySurfaceConfig,
+        VrDeviceSnapshot,
+    },
 };
+
+/// Capacity of the pointer-event queue. Bounds memory when the consumer is
+/// slower than the backend; the oldest events are dropped first.
+const INPUT_QUEUE_CAPACITY: usize = 256;
 
 const IDLE_OVERLAY_TICK_INTERVAL: Duration = Duration::from_millis(100);
 const HIGH_FREQUENCY_OVERLAY_TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -69,6 +77,7 @@ pub struct OverlayActorHandle {
     runtime_quit_at: Arc<Mutex<Option<Instant>>>,
     visible_surfaces: Arc<Mutex<Vec<OverlaySurfaceId>>>,
     hmd_user_present: Arc<Mutex<Option<bool>>>,
+    input_events: Arc<Mutex<VecDeque<OverlayInputEvent>>>,
 }
 
 enum OverlayActorMessage {
@@ -90,7 +99,18 @@ impl OverlayActorHandle {
 
     #[cfg(all(feature = "steamvr-overlay", any(windows, target_os = "linux")))]
     pub fn spawn_openvr() -> Self {
-        Self::spawn_with_backend(OpenVrOverlayBackend::new())
+        Self::spawn_openvr_with_input(None)
+    }
+
+    /// OpenVR actor that also forwards pointer input for interactive surfaces.
+    /// `input_events` is shared with the backend; the handle drains it.
+    #[cfg(all(feature = "steamvr-overlay", any(windows, target_os = "linux")))]
+    pub(crate) fn spawn_openvr_with_input(
+        input_events: Option<Arc<Mutex<VecDeque<OverlayInputEvent>>>>,
+    ) -> Self {
+        let queue = input_events.unwrap_or_else(new_input_queue);
+        let backend = OpenVrOverlayBackend::new_with_input(Arc::clone(&queue));
+        Self::spawn_with_backend_and_input(backend, queue)
     }
 
     #[cfg(all(feature = "openxr-overlay", any(windows, target_os = "linux")))]
@@ -107,6 +127,16 @@ impl OverlayActorHandle {
     }
 
     pub fn spawn_with_backend<B>(backend: B) -> Self
+    where
+        B: OverlayBackend,
+    {
+        Self::spawn_with_backend_and_input(backend, new_input_queue())
+    }
+
+    fn spawn_with_backend_and_input<B>(
+        backend: B,
+        input_events: Arc<Mutex<VecDeque<OverlayInputEvent>>>,
+    ) -> Self
     where
         B: OverlayBackend,
     {
@@ -138,7 +168,16 @@ impl OverlayActorHandle {
             runtime_quit_at,
             visible_surfaces,
             hmd_user_present,
+            input_events,
         }
+    }
+
+    /// Pointer events produced by interactive surfaces since the last call.
+    pub fn take_input_events(&self) -> Vec<OverlayInputEvent> {
+        let Ok(mut queue) = self.input_events.lock() else {
+            return Vec::new();
+        };
+        queue.drain(..).collect()
     }
 
     pub fn send(&self, command: OverlayServiceCommand) -> Result<(), OverlayCommandError> {
@@ -327,6 +366,10 @@ fn run_actor<B>(
         update_status(&status, OverlayServicePhase::Stopped, None);
     }
     publish_hmd_user_present(None, &hmd_user_present);
+}
+
+pub(crate) fn new_input_queue() -> Arc<Mutex<VecDeque<OverlayInputEvent>>> {
+    Arc::new(Mutex::new(VecDeque::with_capacity(INPUT_QUEUE_CAPACITY)))
 }
 
 fn publish_hmd_user_present(next: Option<bool>, hmd_user_present: &Mutex<Option<bool>>) {

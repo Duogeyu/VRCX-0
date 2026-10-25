@@ -156,6 +156,11 @@ where
         self.service.is_surface_visible(surface_id)
     }
 
+    /// Pointer events reported by interactive surfaces since the last call.
+    pub fn take_input_events(&self) -> Vec<vrcx_0_host_desktop::vr_overlay::OverlayInputEvent> {
+        self.service.take_input_events()
+    }
+
     pub fn hmd_user_present(&self) -> Option<bool> {
         self.service.hmd_user_present()
     }

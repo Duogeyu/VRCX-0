@@ -276,6 +276,7 @@ fn make_wrist_config() -> OverlaySurfaceConfig {
         },
         activation_button: OverlayActivationButton::Grip,
         force_visible: false,
+        min_upload_interval_ms: None,
     }
 }
 
