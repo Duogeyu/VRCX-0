@@ -84,6 +84,8 @@ webkit2gtk-nvidia-quirk = "2"
 
 [features]
 default = ["steamvr-overlay", "openxr-overlay"]
+# 生产构建：把前端资源打进二进制（tauri build 会自动加，手动 cargo build 必须显式加）
+custom-protocol = ["tauri/custom-protocol"]
 bindings-export = []
 devtools = ["tauri/devtools"]
 devkit = ["devtools"]
