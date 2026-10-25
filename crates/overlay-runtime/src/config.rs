@@ -5,9 +5,10 @@ use super::eligibility::WristOverlayStartMode;
 use super::localization::{OverlayLocale, OverlayLocalizer};
 use super::runtime::{
     HmdNotificationConfig, HmdNotificationPosition, HmdNotificationStyle, VrOverlayRuntimeConfig,
-    WristOverlayHand,
+    WebSurfaceDims, WristOverlayHand,
 };
 use super::service::OverlayBackendPreference;
+use super::web_overlay;
 use super::{WristOverlayRenderOptions, WristOverlaySizePreset};
 use vrcx_0_persistence::config::ConfigRepository;
 
@@ -171,5 +172,11 @@ pub(super) fn load_runtime_config(
         locale,
         dt_hour12,
         show_instance_id_in_location,
+        web: web_overlay::load(config).map(|settings| WebSurfaceDims {
+            width: settings.width,
+            height: settings.height,
+            physical_width_mm: settings.physical_width_mm,
+            refresh_ms: settings.refresh_ms.min(u32::MAX as u64) as u32,
+        }),
     }
 }

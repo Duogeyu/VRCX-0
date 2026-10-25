@@ -11,6 +11,7 @@ mod services;
 pub mod surfaces;
 mod test_preview;
 mod tracker_watch;
+mod web_overlay;
 
 pub use eligibility::{VrOverlayEligibility, WristOverlayStartMode};
 pub use manager::VrOverlayManager;

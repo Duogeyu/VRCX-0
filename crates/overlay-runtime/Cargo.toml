@@ -28,6 +28,7 @@ vrcx-0-host-desktop = { path = "../host-desktop" }
 vrcx-0-i18n = { path = "../i18n" }
 vrcx-0-persistence = { path = "../persistence" }
 vrcx-0-vr-overlay = { path = "../vr-overlay", features = ["slint-ui"] }
+vrcx-0-web-surface = { path = "../web-surface" }
 
 [dev-dependencies]
 vrcx-0-application-core = { path = "../application-core", features = ["test-utils"] }
