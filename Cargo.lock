@@ -9740,6 +9740,7 @@ dependencies = [
  "vrcx-0-i18n",
  "vrcx-0-persistence",
  "vrcx-0-vr-overlay",
+ "vrcx-0-web-surface",
  "windows-sys 0.61.2",
 ]
 
@@ -9861,6 +9862,18 @@ dependencies = [
  "url",
  "vrcx-0-contracts",
  "vrcx-0-core",
+]
+
+[[package]]
+name = "vrcx-0-web-surface"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "serde",
+ "serde_json",
+ "tracing",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]
