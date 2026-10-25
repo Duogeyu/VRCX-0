@@ -1,41 +1,27 @@
-use std::time::{Duration, Instant};
-
-const DEFAULT_VISIBLE_DURATION: Duration = Duration::from_secs(10);
-
-#[derive(Clone, Copy, Debug)]
+/// Visibility rule for the wrist panel: a single button press toggles it, so it
+/// stays on screen until the user closes it. There is deliberately no idle
+/// timeout — one used to close the panel mid-interaction.
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct WristVisibilityPolicy {
-    visible_duration: Duration,
-    opened_until: Option<Instant>,
-}
-
-impl Default for WristVisibilityPolicy {
-    fn default() -> Self {
-        Self::new(DEFAULT_VISIBLE_DURATION)
-    }
+    opened: bool,
 }
 
 impl WristVisibilityPolicy {
-    pub fn new(visible_duration: Duration) -> Self {
-        Self {
-            visible_duration,
-            opened_until: None,
-        }
+    /// Flip open/closed; used by the activation button edge detection.
+    pub fn toggle(&mut self) {
+        self.opened = !self.opened;
     }
 
-    pub fn open(&mut self, now: Instant) {
-        self.opened_until = Some(now + self.visible_duration);
+    pub fn open(&mut self) {
+        self.opened = true;
     }
 
     pub fn close(&mut self) {
-        self.opened_until = None;
+        self.opened = false;
     }
 
-    pub fn evaluate(&mut self, now: Instant, device_present: bool) -> bool {
-        let open = self.opened_until.is_some_and(|until| now <= until);
-        if !open {
-            self.opened_until = None;
-        }
-        device_present && open
+    pub fn evaluate(&self, device_present: bool) -> bool {
+        device_present && self.opened
     }
 }
 
@@ -43,40 +29,37 @@ impl WristVisibilityPolicy {
 mod tests {
     use super::*;
 
-    const VISIBLE: Duration = Duration::from_secs(10);
-
     #[test]
     fn closed_by_default() {
-        let mut policy = WristVisibilityPolicy::new(VISIBLE);
-        assert!(!policy.evaluate(Instant::now(), true));
+        let policy = WristVisibilityPolicy::default();
+        assert!(!policy.evaluate(true));
     }
 
     #[test]
-    fn open_keeps_surface_visible_until_window_expires() {
-        let mut policy = WristVisibilityPolicy::new(VISIBLE);
-        let now = Instant::now();
-        policy.open(now);
-        assert!(policy.evaluate(now, true));
-        assert!(policy.evaluate(now + VISIBLE, true));
-        assert!(!policy.evaluate(now + VISIBLE + Duration::from_millis(1), true));
-        assert!(!policy.evaluate(now, true));
+    fn toggle_opens_and_stays_open() {
+        let mut policy = WristVisibilityPolicy::default();
+        policy.toggle();
+        assert!(policy.evaluate(true));
+        // No idle timeout: still visible on any later evaluation.
+        assert!(policy.evaluate(true));
+        policy.toggle();
+        assert!(!policy.evaluate(true));
     }
 
     #[test]
-    fn missing_device_hides_surface_without_clearing_window() {
-        let mut policy = WristVisibilityPolicy::new(VISIBLE);
-        let now = Instant::now();
-        policy.open(now);
-        assert!(!policy.evaluate(now, false));
-        assert!(policy.evaluate(now, true));
+    fn missing_device_hides_surface_but_keeps_state() {
+        let mut policy = WristVisibilityPolicy::default();
+        policy.toggle();
+        assert!(!policy.evaluate(false));
+        // The device coming back restores the panel without another press.
+        assert!(policy.evaluate(true));
     }
 
     #[test]
     fn close_hides_immediately() {
-        let mut policy = WristVisibilityPolicy::new(VISIBLE);
-        let now = Instant::now();
-        policy.open(now);
+        let mut policy = WristVisibilityPolicy::default();
+        policy.open();
         policy.close();
-        assert!(!policy.evaluate(now, true));
+        assert!(!policy.evaluate(true));
     }
 }

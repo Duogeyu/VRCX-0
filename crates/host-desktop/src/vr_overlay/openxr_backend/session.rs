@@ -284,7 +284,6 @@ impl SessionContext {
             tracing::debug!(error = %error, "xrSyncActions failed");
         }
 
-        let now = Instant::now();
         for surface in self.surfaces.values_mut() {
             match surface.attachment {
                 Attachment::Head => {
@@ -296,12 +295,12 @@ impl SessionContext {
                         hand,
                         surface.config.activation_button,
                     ) {
-                        surface.policy.open(now);
+                        surface.policy.toggle();
                     }
                     let present = self
                         .input
                         .hand_located(hand, &self.local_space, display_time);
-                    surface.visible = surface.policy.evaluate(now, present)
+                    surface.visible = surface.policy.evaluate(present)
                         || (surface.config.force_visible && present);
                 }
             }
@@ -383,7 +382,7 @@ impl SessionContext {
             SessionCommand::Show { surface_id } => {
                 if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                     surface.requested_visible = true;
-                    surface.policy.open(Instant::now());
+                    surface.policy.open();
                 }
             }
             SessionCommand::Hide { surface_id } => {
