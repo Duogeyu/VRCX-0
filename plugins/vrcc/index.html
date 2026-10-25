@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<title>星遇同频 · 腕表</title>
+<style>
+  :root {
+    --bg: #0b0e1a;
+    --panel: #141a2e;
+    --panel-2: #1b2340;
+    --text: #e8ecff;
+    --dim: #8b95c0;
+    --accent: #7c9cff;
+    --accent-2: #b48cff;
+    --ok: #4adfa0;
+    --warn: #ffcc66;
+    --bad: #ff6b81;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; padding: 14px 14px 10px; gap: 10px; overflow: hidden; }
+
+  header { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .logo { width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); flex: 0 0 auto;
+    display: grid; place-items: center; font-weight: 700; font-size: 17px; color: #0b0e1a; }
+  h1 { font-size: 19px; margin: 0; font-weight: 650; letter-spacing: .5px; }
+  .sub { font-size: 12px; color: var(--dim); margin-top: 1px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin-left: auto; flex: 0 0 auto; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .dot.err { background: var(--bad); }
+
+  nav { display: flex; gap: 8px; flex: 0 0 auto; }
+  nav button { flex: 1; padding: 11px 6px; font-size: 15px; border-radius: 12px; border: 1px solid #2a3456;
+    background: var(--panel); color: var(--dim); font-weight: 600; }
+  nav button.active { background: linear-gradient(180deg, #24304f, #1a2238); color: var(--text);
+    border-color: var(--accent); }
+
+  main { flex: 1 1 auto; overflow: hidden; position: relative; }
+  section { position: absolute; inset: 0; overflow-y: auto; display: none; padding-right: 2px; }
+  section.active { display: block; }
+  section::-webkit-scrollbar { width: 6px; }
+  section::-webkit-scrollbar-thumb { background: #2a3456; border-radius: 3px; }
+
+  .row { display: flex; align-items: center; gap: 11px; padding: 11px 12px; border-radius: 14px;
+    background: var(--panel); margin-bottom: 9px; border: 1px solid #232c4a; }
+  .rank { font-size: 20px; font-weight: 700; width: 34px; text-align: center; color: var(--accent); flex: 0 0 auto; }
+  .rank.top { color: var(--warn); }
+  .info { flex: 1 1 auto; min-width: 0; }
+  .name { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta { font-size: 12px; color: var(--dim); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .score { font-size: 17px; font-weight: 700; color: var(--ok); flex: 0 0 auto; }
+
+  .card { background: var(--panel-2); border-radius: 16px; padding: 16px; margin-bottom: 10px; border: 1px solid #2a3456; }
+  .card h2 { font-size: 15px; margin: 0 0 8px; color: var(--dim); font-weight: 600; }
+  .big { font-size: 30px; font-weight: 800; letter-spacing: 1px; }
+  .kbd { font-size: 26px; letter-spacing: 6px; font-weight: 800; color: var(--accent); text-align: center;
+    padding: 16px; border-radius: 14px; background: #0e1428; border: 1px dashed #3a4570; }
+  .btn { display: block; width: 100%; padding: 14px; margin-top: 10px; font-size: 16px; font-weight: 700;
+    border-radius: 14px; border: 0; color: #0b0e1a;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  .btn.ghost { background: transparent; color: var(--dim); border: 1px solid #2a3456; }
+  .hint { font-size: 12px; color: var(--dim); line-height: 1.6; margin-top: 8px; }
+  .empty { color: var(--dim); font-size: 14px; text-align: center; padding: 30px 10px; line-height: 1.8; }
+  .toast { position: fixed; left: 14px; right: 14px; bottom: 14px; padding: 11px 14px; border-radius: 12px;
+    background: #2a1f33; color: #ffd9e1; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .notif { padding: 10px 12px; border-radius: 13px; background: var(--panel); margin-bottom: 8px; border-left: 3px solid var(--accent); }
+  .notif .t { font-size: 14px; }
+  .notif .m { font-size: 12px; color: var(--dim); margin-top: 3px; }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 20px; background: #24304f; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">星</div>
+  <div>
+    <h1>星遇同频</h1>
+    <div class="sub" id="who">VRCC 腕表面板 · 第三方客户端</div>
+  </div>
+  <div class="dot" id="dot"></div>
+</header>
+
+<nav>
+  <button id="tab-maps" class="active">地图榜</button>
+  <button id="tab-noti">提醒</button>
+  <button id="tab-me">我的</button>
+</nav>
+
+<main>
+  <section id="sec-maps" class="active"></section>
+
+  <section id="sec-noti">
+    <div id="noti-box"></div>
+  </section>
+
+  <section id="sec-me">
+    <div id="me-box"></div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  "use strict";
+  const API = "https://vrcc.cc/api/v1/";
+  const DEFAULT_CLIENT = "dev-vrcx0-wrist";
+  const TOKEN_KEY = "vrcc_token";
+  const CLIENT_KEY = "vrcc_client";
+  const STAR_KEY = "vrcc_star";
+
+  const client = () => localStorage.getItem(CLIENT_KEY) || DEFAULT_CLIENT;
+  const token = () => localStorage.getItem(TOKEN_KEY) || "";
+  const api = (path) => API + path.replace(/^\//, "");
+
+  const el = (id) => document.getElementById(id);
+  const dot = el("dot");
+
+  function toast(msg) {
+    const t = el("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove("show"), 2600);
+  }
+
+  function setStatus(ok, text) {
+    dot.className = "dot" + (ok ? " on" : "");
+    if (text) el("who").textContent = text;
+  }
+
+  async function call(path, opts = {}) {
+    const headers = Object.assign({ "X-Client": client() }, opts.headers || {});
+    if (token() && !headers.Authorization) headers.Authorization = "Bearer " + token();
+    if (opts.body) headers["Content-Type"] = "application/json";
+    const res = await fetch(api(path), {
+      method: opts.method || "GET",
+      headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      cache: "no-store",
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+    if (!res.ok) {
+      const error = new Error((data && (data.error || data.message)) || ("HTTP " + res.status));
+      error.status = res.status;
+      error.data = data;
+      throw error;
+    }
+    return data;
+  }
+
+  // ---------- tabs ----------
+  const tabs = { maps: el("tab-maps"), noti: el("tab-noti"), me: el("tab-me") };
+  const sections = { maps: el("sec-maps"), noti: el("sec-noti"), me: el("sec-me") };
+  function showTab(name) {
+    for (const key of Object.keys(tabs)) {
+      tabs[key].classList.toggle("active", key === name);
+      sections[key].classList.toggle("active", key === name);
+    }
+    if (name === "maps") loadMaps();
+    if (name === "noti") loadNoti();
+    if (name === "me") renderMe();
+  }
+  for (const key of Object.keys(tabs)) tabs[key].addEventListener("click", () => showTab(key));
+
+  // ---------- maps ----------
+  let mapsCache = null;
+  let mapsAt = 0;
+  async function loadMaps(force) {
+    if (!force && mapsCache && Date.now() - mapsAt < 300000) { renderMaps(); return; }
+    sections.maps.innerHTML = '<div class="empty">正在加载地图榜…</div>';
+    try {
+      const data = await call("boards/maps?limit=20");
+      mapsCache = data;
+      mapsAt = Date.now();
+      renderMaps();
+    } catch (e) {
+      sections.maps.innerHTML = '<div class="empty">地图榜加载失败<br>' + escapeHtml(String(e.message)) + "</div>";
+    }
+  }
+  function renderMaps() {
+    const maps = (mapsCache && mapsCache.maps) || [];
+    if (!maps.length) { sections.maps.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+    sections.maps.innerHTML = maps.map((m) => {
+      const rank = m.rank || 0;
+      return '<div class="row">' +
+        '<div class="rank' + (rank <= 3 ? " top" : "") + '">' + rank + '</div>' +
+        '<div class="info"><div class="name">' + escapeHtml(m.name || "") + '</div>' +
+        '<div class="meta">' + escapeHtml(m.author || "") +
+        (m.hot && m.hot.text ? " · " + escapeHtml(m.hot.text) : "") + '</div></div>' +
+        '<div class="score">' + (m.avg != null ? Number(m.avg).toFixed(1) : "-") + '</div></div>';
+    }).join("");
+  }
+
+  // ---------- notifications ----------
+  async function loadNoti() {
+    if (!token()) {
+      sections.noti.innerHTML = '<div class="empty">还没有连接星遇同频<br>点「我的」里的连接按钮</div>';
+      return;
+    }
+    sections.noti.innerHTML = '<div class="empty">正在加载提醒…</div>';
+    try {
+      const data = await call("me/notifications/recent?mark=1");
+      const items = (data && (data.items || data.notifications)) || [];
+      if (!items.length) { sections.noti.innerHTML = '<div class="empty">暂时没有新提醒</div>'; return; }
+      sections.noti.innerHTML = items.map((n) => {
+        const title = n.title || n.text || n.kind || "提醒";
+        const body = n.body || n.content || "";
+        return '<div class="notif"><div class="t">' + escapeHtml(String(title)) + '</div>' +
+          (body ? '<div class="m">' + escapeHtml(String(body)) + '</div>' : "") + '</div>';
+      }).join("");
+    } catch (e) {
+      if (e.status === 401) { clearToken(); }
+      sections.noti.innerHTML = '<div class="empty">提醒加载失败<br>' + escapeHtml(String(e.message)) + "</div>";
+    }
+  }
+
+  // ---------- me / login ----------
+  function clearToken() {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(STAR_KEY);
+    setStatus(false);
+  }
+
+  function renderMe() {
+    const box = el("me-box");
+    if (token()) {
+      const star = localStorage.getItem(STAR_KEY);
+      box.innerHTML =
+        '<div class="card"><h2>已连接</h2>' +
+        '<div class="big">' + (star ? "#" + escapeHtml(star) : "星遇同频") + '</div>' +
+        '<div class="hint">客户端：' + escapeHtml(client()) + "</div></div>" +
+        '<button class="btn ghost" id="btn-disconnect">断开连接</button>' +
+        '<div class="hint">断开后令牌立即失效，可随时重新连接。</div>' +
+        '<div class="hint">第三方客户端 · 数据来自星遇同频（vrcc.cc），令牌只保存在本机。</div>';
+      el("btn-disconnect").addEventListener("click", disconnect);
+      return;
+    }
+    box.innerHTML =
+      '<div class="card"><h2>连接星遇同频</h2>' +
+      '<div class="hint">用手机或电脑打开下面的链接，登录并在同意页选择「同意连接」，这里会自动连上。</div>' +
+      '<button class="btn" id="btn-login">开始连接</button></div>' +
+      '<div id="login-flow"></div>' +
+      '<div class="hint">第三方客户端 · 不是星遇同频官方；连接、断开都由你自己操作。</div>';
+    el("btn-login").addEventListener("click", startLogin);
+  }
+
+  let pollTimer = null;
+  async function startLogin() {
+    const flow = el("login-flow");
+    flow.innerHTML = '<div class="card"><div class="empty">正在申请连接码…</div></div>';
+    try {
+      const data = await call("device/code", { method: "POST", body: {} });
+      const complete = data.verification_uri_complete || data.verification_uri;
+      const code = data.user_code || "";
+      flow.innerHTML =
+        '<div class="card"><h2>在浏览器里打开</h2>' +
+        '<div class="hint">' + escapeHtml(complete || "") + "</div>" +
+        '<div class="hint">或者手动输入连接码：</div>' +
+        '<div class="kbd">' + escapeHtml(code) + "</div>" +
+        '<div class="hint">等待同意中…（10 分钟内有效）</div></div>';
+      setStatus(false, "等待玩家同意…");
+      pollDeviceToken(data.device_code, Math.max(3, Number(data.interval) || 5) * 1000);
+      // 自动把链接丢到系统浏览器（WebView2 会拦截 window.open 到外部）
+      try { window.open(complete, "_blank"); } catch {}
+    } catch (e) {
+      flow.innerHTML = '<div class="card"><div class="empty">申请连接码失败<br>' + escapeHtml(String(e.message)) + "</div></div>";
+    }
+  }
+
+  async function pollDeviceToken(deviceCode, intervalMs) {
+    clearTimeout(pollTimer);
+    const tick = async () => {
+      try {
+        const data = await call("device/token", { method: "POST", body: { device_code: deviceCode } });
+        localStorage.setItem(TOKEN_KEY, data.access_token);
+        if (data.me && data.me.star != null) localStorage.setItem(STAR_KEY, String(data.me.star));
+        setStatus(true, "已连接 · 星遇同频");
+        toast("连接成功");
+        renderMe();
+        loadNoti();
+      } catch (e) {
+        if (e.data && e.data.error === "authorization_pending") { pollTimer = setTimeout(tick, intervalMs); return; }
+        if (e.data && (e.data.error === "access_denied" || e.data.error === "expired_token")) {
+          toast(e.data.error === "access_denied" ? "玩家取消了连接" : "连接码已过期");
+          setStatus(false); renderMe(); return;
+        }
+        pollTimer = setTimeout(tick, intervalMs);
+      }
+    };
+    pollTimer = setTimeout(tick, intervalMs);
+  }
+
+  async function disconnect() {
+    try { await call("disconnect", { method: "POST", body: {} }); } catch {}
+    clearToken();
+    renderMe();
+    toast("已断开");
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // ---------- boot ----------
+  setStatus(!!token(), token() ? "已连接 · 星遇同频" : "未连接 · 点「我的」连接");
+  renderMe();
+  loadMaps();
+
+  // periodic refresh
+  setInterval(() => { if (sections.noti.classList.contains("active")) loadNoti(); }, 60000);
+  setInterval(() => { if (sections.maps.classList.contains("active")) loadMaps(); }, 300000);
+})();
+</script>
+</body>
+</html>

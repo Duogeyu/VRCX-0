@@ -1,0 +1,12 @@
+{
+  "id": "vrcc",
+  "name": "星遇同频 VRCC",
+  "description": "VRChat 中文社区（星遇同频）腕表面板：地图榜、提醒、我的星卡。",
+  "author": "VRCX-0 web overlay sample",
+  "url": "index.html",
+  "width": 640,
+  "height": 640,
+  "zoom": 1.0,
+  "refresh_ms": 250,
+  "scopes": ["profile", "notifications", "maps"]
+}
