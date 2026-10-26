@@ -144,6 +144,9 @@ export function VrccNotificationsPanel({
 /**
  * 网页上几处红点的数字。连向我、星轨相交、私聊在网页「连向我」那一页；
  * 通知就在本页签的「通知」里。
+ *
+ * 服务器没给的那一项不显示：令牌没有 `crossings` 权限时没有 `cross` 这个键，
+ * 显示成 0 会让人以为是「没有新的」。
  */
 function UnreadCounts({
     unread,
@@ -166,7 +169,8 @@ function UnreadCounts({
     return (
         <div className="ml-auto flex items-center gap-3 text-xs">
             {items.map(({ key, href }) => {
-                const count = unread[key] ?? 0;
+                const count = unread[key];
+                if (count == null) return null;
                 const content = (
                     <>
                         {t(`vrcc.unread.${key}`)}{' '}

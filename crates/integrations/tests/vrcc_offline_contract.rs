@@ -34,6 +34,19 @@ fn boards_parse_old_new_and_week_shapes() {
     );
     assert_eq!(week.sort.as_deref(), Some("week"));
     assert_eq!(week.maps[0].week, Some(2));
+
+    // 本周榜只按本周的打分排，`rank` 照旧是总榜名次：列表第一张可以是总榜第 7。
+    let reordered: VrccBoard = parse(
+        r#"{"board":"maps","sort":"week","min":1,"maps":[{"world":"wrld_aaaaaaaa-0000-4000-8000-0000000000a7","rank":7,"week":5},{"world":"wrld_aaaaaaaa-0000-4000-8000-0000000000a1","rank":1,"week":2}],"at":1793038216765}"#,
+    );
+    assert_eq!(
+        reordered
+            .maps
+            .iter()
+            .map(|map| map.rank)
+            .collect::<Vec<_>>(),
+        vec![Some(7), Some(1)]
+    );
     assert_eq!(
         week.maps[0]
             .hot
@@ -127,7 +140,13 @@ fn star_cards_parse_with_and_without_vibe() {
 #[test]
 fn unread_notes_and_announcements_parse() {
     let unread: VrccUnread = parse(r#"{"inbox":2,"cross":1,"chats":1,"notes":2}"#);
+    assert_eq!(unread.cross, Some(1));
     assert_eq!(unread.total(), 6);
+    // 令牌没有 `crossings`（比如 `dev-` 标识）：服务器不给 `cross` 这个键，
+    // 要和「有、但是 0」分开。
+    let no_cross: VrccUnread = parse(r#"{"inbox":2,"chats":1,"notes":2}"#);
+    assert_eq!(no_cross.cross, None);
+    assert_eq!(no_cross.total(), 5);
     // 以后多一处红点也不该坏。
     let more: VrccUnread = parse(r#"{"inbox":0,"cross":0,"chats":0,"notes":0,"later":9}"#);
     assert_eq!(more.total(), 0);

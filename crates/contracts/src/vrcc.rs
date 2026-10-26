@@ -92,6 +92,9 @@ pub struct VrccBoardMap {
     #[serde(default)]
     pub raters: Option<i64>,
     /// 总榜名次，1 起；新上榜里还没人评分的是 `null`。
+    ///
+    /// 本周榜里也是总榜名次：本周榜只按本周的打分重新排顺序，本周的名次是
+    /// 它在列表里的位置。
     #[serde(default)]
     pub rank: Option<i64>,
     /// 多小咕实测的轻重：`light` / `mid` / `heavy`，没测过是 `null`。
@@ -606,12 +609,15 @@ pub struct VrccUnread {
     #[serde(default)]
     pub inbox: i64,
     /// 星轨相交里还没看过的。
+    ///
+    /// 只在令牌有 `crossings` 权限时才有这个键（16–17 岁没有星轨相交，恒为 0
+    /// 就能看出星池）。没有时是 `None`，界面不显示这一项，而不是显示 0。
     #[serde(default)]
-    pub cross: i64,
+    pub cross: Option<i64>,
     /// 私聊未读的消息。
     #[serde(default)]
     pub chats: i64,
-    /// 通知中心里未读的（只算 `me/notes` 给的那几类）。
+    /// 通知中心里未读的：`me/notes` 给的那些里玩家还没看过的。
     #[serde(default)]
     pub notes: i64,
 }
@@ -619,7 +625,7 @@ pub struct VrccUnread {
 impl VrccUnread {
     /// 几处加起来。
     pub fn total(&self) -> i64 {
-        [self.inbox, self.cross, self.chats, self.notes]
+        [self.inbox, self.cross.unwrap_or(0), self.chats, self.notes]
             .into_iter()
             .map(|count| count.max(0))
             .sum()
@@ -632,7 +638,7 @@ impl VrccUnread {
 pub struct VrccNote {
     #[serde(default)]
     pub id: i64,
-    /// `link` / `mutual` / `gift` / `invite` / `yq` / `map` / `about` / `photo`，
+    /// `link` / `mutual` / `gift` / `invite` / `yq` / `map` / `about`，
     /// 以后可能加新的：不认识的照样显示 `text`。
     #[serde(default)]
     pub kind: Option<String>,

@@ -141,7 +141,7 @@ fn wrist_prefers_the_unread_counts_over_recent() {
     // 有了 `me/unread`：腕表显示几处红点的合计。
     let counts = VrccUnread {
         inbox: 1,
-        cross: 1,
+        cross: Some(1),
         chats: 2,
         notes: 3,
     };
