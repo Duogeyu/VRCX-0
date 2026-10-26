@@ -256,11 +256,11 @@ impl DesktopVrccRuntime {
                                     changed = outcome.changed,
                                     "vrcc: background poll round finished"
                                 );
-                                if outcome.changed {
-                                    // 只发一个「变了」的信号，具体数据前端自己拉。
-                                    // 不在事件里带提醒正文：那会把玩家内容写进
-                                    // 事件经手的所有层，多一条泄露面。
-                                    event_sink.emit(VRCC_NOTICES_CHANGED_EVENT, json!({}));
+                                // 只发一个「变了」的信号，具体数据前端自己拉。
+                                // 不在事件里带提醒正文：那会把玩家内容写进
+                                // 事件经手的所有层，多一条泄露面。
+                                if let Some(event) = outcome.event_to_emit() {
+                                    event_sink.emit(event, json!({}));
                                 }
                             }
                             Err(error) => {
@@ -300,6 +300,21 @@ struct PollOutcome {
     toast_attempted: usize,
     /// 是否需要让前端刷新。
     changed: bool,
+}
+
+impl PollOutcome {
+    /// 该给前端发哪个事件；`None` 表示这一轮没有变化，不必打扰前端。
+    ///
+    /// 抽成方法而不是在循环里写 `if outcome.changed`：这是「要不要通知前端」
+    /// 的唯一判断点，值得单独钉住——写反了会导致界面永远不刷新（静默），
+    /// 或者每轮都刷新（浪费）。
+    fn event_to_emit(&self) -> Option<&'static str> {
+        if self.changed {
+            Some(VRCC_NOTICES_CHANGED_EVENT)
+        } else {
+            None
+        }
+    }
 }
 
 /// 一次轮询：拉最近提醒，把「还没弹过」的发成系统通知。
@@ -668,5 +683,101 @@ mod tests {
         assert_eq!(outcome.toast_attempted, MAX_NOTIFIED_PER_POLL);
         assert_eq!(notifier.count(), MAX_NOTIFIED_PER_POLL);
         assert!(outcome.changed);
+    }
+
+    // -- 跨轮次行为：轮流跑多遍会发生什么 --------------------------------
+
+    /// 同一个提醒在两轮之间不该被重复弹。
+    ///
+    /// 实现方式是通过 `read` 游标：第一轮弹过之后，服务端会把游标推过去
+    /// （或玩家在网页上读了），下一轮它就不再是未读。这条测试模拟的就是
+    /// 那个游标推进，确认不会重复。
+    #[test]
+    fn a_notice_is_not_notified_twice_across_rounds() {
+        let notifier = RecordingNotifier::default();
+        let items = vec![item(1, Some("提醒"), Some("正文"))];
+
+        // 第一轮：游标 0，全都未读 → 弹一次。
+        let first = handle_recent_notices(&recent(Some(0), items.clone()), &notifier);
+        assert_eq!(first.toast_attempted, 1);
+        assert!(first.changed);
+
+        // 第二轮：游标已推到 1，同一条不再未读 → 不再弹。
+        let second = handle_recent_notices(&recent(Some(1), items), &notifier);
+        assert_eq!(second.toast_attempted, 0);
+        assert!(!second.changed);
+        // 累计仍只有第一次那一条。
+        assert_eq!(notifier.count(), 1);
+    }
+
+    /// 游标没推进时（例如服务端还没更新 read），会重复弹。
+    ///
+    /// 这个行为值得记录成测试：它说明「去重靠的是服务端游标，不是本地状态」。
+    /// 如果哪天发现玩家被重复打扰，原因就在这里，而不是本地逻辑写错。
+    #[test]
+    fn same_notice_repeats_when_the_cursor_does_not_advance() {
+        let notifier = RecordingNotifier::default();
+        let items = vec![item(7, None, None)];
+
+        handle_recent_notices(&recent(Some(0), items.clone()), &notifier);
+        handle_recent_notices(&recent(Some(0), items), &notifier);
+
+        assert_eq!(notifier.count(), 2);
+    }
+
+    /// 新提醒陆续到来：每轮只弹新增的那些。
+    #[test]
+    fn each_round_notifies_only_the_new_arrivals() {
+        let notifier = RecordingNotifier::default();
+
+        let round1 =
+            handle_recent_notices(&recent(Some(0), vec![item(1, Some("A"), None)]), &notifier);
+        assert_eq!(round1.toast_attempted, 1);
+
+        // 第二轮：多了 id=2，游标还停在 1。
+        let round2 = handle_recent_notices(
+            &recent(
+                Some(1),
+                vec![item(1, Some("A"), None), item(2, Some("B"), None)],
+            ),
+            &notifier,
+        );
+        assert_eq!(round2.toast_attempted, 1);
+        let shown = notifier.shown.lock().unwrap().clone();
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].0, "A");
+        assert_eq!(shown[1].0, "B");
+    }
+
+    // -- event_to_emit：要不要通知前端 ------------------------------------
+
+    #[test]
+    fn changed_outcome_emits_the_notices_event() {
+        let outcome = PollOutcome {
+            unread: 1,
+            toast_attempted: 1,
+            changed: true,
+        };
+        assert_eq!(outcome.event_to_emit(), Some(VRCC_NOTICES_CHANGED_EVENT));
+    }
+
+    #[test]
+    fn unchanged_outcome_emits_nothing() {
+        // 没有变化时绝不能发事件：否则前端每轮都白刷新一次。
+        let outcome = PollOutcome {
+            unread: 0,
+            toast_attempted: 0,
+            changed: false,
+        };
+        assert_eq!(outcome.event_to_emit(), None);
+    }
+
+    /// 事件名必须和前端订阅的一致，否则前端永远收不到。
+    ///
+    /// 这条钉的是跨语言契约：Rust 侧常量改名而前端没跟上时，编译和类型检查
+    /// 都不会报错，只会表现为「界面不刷新」，极难定位。
+    #[test]
+    fn notices_event_name_matches_the_frontend_contract() {
+        assert_eq!(VRCC_NOTICES_CHANGED_EVENT, "vrccNoticesChanged");
     }
 }
