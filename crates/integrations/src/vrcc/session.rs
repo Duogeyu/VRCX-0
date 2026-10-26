@@ -22,6 +22,8 @@ pub struct VrccSessionState {
     pub notifications_cursor: Option<i64>,
     /// 官方建议的轮询间隔（秒）。
     pub poll_every_secs: i64,
+    /// 上一个令牌被服务器判了失效（`404 gone`）后清掉的。
+    pub expired: bool,
 }
 
 impl VrccSessionState {
@@ -74,6 +76,7 @@ impl VrccSession {
             last_poll_at: state.last_poll_at,
             notifications_cursor: state.notifications_cursor,
             poll_every_secs: state.poll_every_secs,
+            expired: state.expired,
         }
     }
 
@@ -99,6 +102,7 @@ impl VrccSession {
         state.star = star;
         state.vrc_name = vrc_name;
         state.scope = scope;
+        state.expired = false;
         // 换了授权，游标作废，下次从头问。
         state.notifications_cursor = None;
         state.last_poll_at = None;
@@ -108,6 +112,17 @@ impl VrccSession {
     pub fn disconnect(&self) {
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         *state = default_state();
+    }
+
+    /// 令牌被服务器判了失效（`404 gone`）：清掉本地状态，并记下是这个原因。
+    ///
+    /// 和玩家自己点「断开」分开记，界面才能说清楚「连接已失效，请重新连接」。
+    pub fn expire(&self) {
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        *state = VrccSessionState {
+            expired: true,
+            ..default_state()
+        };
     }
 
     /// 记录一次成功的提醒轮询。
@@ -162,6 +177,7 @@ pub struct VrccSessionSnapshot {
     pub last_poll_at: Option<i64>,
     pub notifications_cursor: Option<i64>,
     pub poll_every_secs: i64,
+    pub expired: bool,
 }
 
 impl From<VrccSessionSnapshot> for VrccConnectionSnapshot {
@@ -169,6 +185,7 @@ impl From<VrccSessionSnapshot> for VrccConnectionSnapshot {
         let client_is_dev = snapshot.client.trim().starts_with("dev-");
         VrccConnectionSnapshot {
             connected: snapshot.connected,
+            expired: snapshot.expired,
             star: snapshot.star,
             vrc_name: snapshot.vrc_name,
             scope: snapshot.scope,
@@ -230,6 +247,28 @@ mod tests {
         assert_eq!(session.snapshot().poll_every_secs, 25);
         session.note_poll(2_000, None, Some(90));
         assert_eq!(session.snapshot().poll_every_secs, 90);
+    }
+
+    #[test]
+    fn expiring_clears_the_token_and_says_why() {
+        let session = VrccSession::new("dev-test");
+        session.connect("tok".into(), Some(77), None, Some("profile".into()));
+        session.note_poll(1_000, Some(42), Some(60));
+
+        session.expire();
+        let snapshot = session.snapshot();
+        assert!(!snapshot.connected);
+        assert!(snapshot.expired);
+        assert!(session.token().is_none());
+        assert_eq!(snapshot.notifications_cursor, None);
+
+        // 重新连上后不再提示失效。
+        session.connect("tok2".into(), None, None, None);
+        assert!(!session.snapshot().expired);
+
+        // 玩家自己点断开，不算失效。
+        session.disconnect();
+        assert!(!session.snapshot().expired);
     }
 
     #[test]

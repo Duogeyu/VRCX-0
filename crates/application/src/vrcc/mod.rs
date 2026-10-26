@@ -6,15 +6,28 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use vrcx_0_application_core::Result;
 use vrcx_0_contracts::vrcc::{
-    VrccBoard, VrccConnectionSnapshot, VrccMutuals, VrccMyMap, VrccRecentNotifications, VrccStatus,
-    VrccToday, VrccUsageSnapshot, VrccWristSummary,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccMutuals, VrccMyMap,
+    VrccNotes, VrccRecentNotifications, VrccStatus, VrccToday, VrccUnread, VrccUsageSnapshot,
+    VrccWristSummary,
 };
-use vrcx_0_integrations::vrcc::{
-    VrccClient, VrccError, VrccSession, PERSONAL_DAILY_LIMIT, WINDOW_LIMIT,
-};
+use vrcx_0_integrations::vrcc::{VrccClient, VrccError, VrccSession, WINDOW_LIMIT};
+
+/// 服务器回答 `me/unread` 是 `404 not_found`（还没更新到 1.13.0）之后，
+/// 多久再试一次。服务器更新了，客户端不用重启也能接上。
+const UNREAD_RETRY_AFTER_NOT_FOUND: Duration = Duration::from_secs(3600);
+
+/// 未读数的缓存。
+#[derive(Debug, Default)]
+struct UnreadCache {
+    /// 最近一次 `me/unread` 的结果；还没问过、服务器没有这个接口时为 `None`。
+    counts: Option<VrccUnread>,
+    /// 服务器说没有这个接口时，到这个时刻之前不再问。
+    skip_until: Option<Instant>,
+}
 
 /// 令牌仓库端口。实现留在 outbound-adapters。
 pub trait VrccTokenStore: Send + Sync {
@@ -47,7 +60,10 @@ pub fn classify_vrcc_error(error: &VrccError) -> (VrccErrorKind, Option<String>)
         VrccError::RateLimited(_) | VrccError::QuotaExhausted(_) | VrccError::TooSoon { .. } => {
             VrccErrorKind::Throttled
         }
-        VrccError::Transport(_) | VrccError::Decode(_) => VrccErrorKind::Transport,
+        // 停站维护：令牌没事，等一会儿就好，和网络问题一样处理。
+        VrccError::Transport(_) | VrccError::Decode(_) | VrccError::Paused { .. } => {
+            VrccErrorKind::Transport
+        }
         VrccError::TokenMissing => VrccErrorKind::NeedsReauth,
         VrccError::Api { need, .. } if need.is_some() && error.needs_reauth() => {
             VrccErrorKind::MissingScope
@@ -93,6 +109,9 @@ pub enum VrccDeviceAuthStep {
     Terminal(String),
 }
 
+/// 地图榜缓存：world 映射到（名次，均分 ×10）。
+type BoardRanks = HashMap<String, (i64, Option<i64>)>;
+
 /// 星遇同频服务。
 pub struct VrccService {
     store: Arc<dyn VrccTokenStore>,
@@ -101,8 +120,9 @@ pub struct VrccService {
     /// 腕表摘要的缓存。
     ///
     /// 腕表每帧都会读它，所以这里必须是纯内存读取——不能在这里发请求。
-    /// 内容由页面会发的那两个请求顺手填充：`recent_notifications` 提供未读数，
-    /// `boards` 提供地图名次（开放数据，不占个人额度）。
+    /// 内容由本来就会发的请求顺手填充：后台轮询的 `me/unread`（旧服务器上是
+    /// `recent_notifications`）提供未读数，`boards` 提供地图名次（开放数据，
+    /// 不占个人额度）。
     ///
     /// `None` 表示"还没拿到任何数据"，和"未读 0 条"是两件事：前者不该在腕表
     /// 上显示一个数字，后者才该显示 0。
@@ -111,7 +131,9 @@ pub struct VrccService {
     ///
     /// 缓存整个榜单而不是只缓存"当前地图"：玩家随时换图，而榜单是开放数据，
     /// 一次请求就能覆盖上百张图，按图缓存没有意义。
-    boards: Arc<RwLock<HashMap<String, (i64, Option<i64>)>>>,
+    boards: Arc<RwLock<BoardRanks>>,
+    /// 最近一次 `me/unread`。后台轮询填，页面和腕表读。
+    unread: Arc<RwLock<UnreadCache>>,
 }
 
 impl VrccService {
@@ -161,6 +183,7 @@ impl VrccService {
             client,
             wrist: Arc::new(RwLock::new(None)),
             boards: Arc::new(RwLock::new(HashMap::new())),
+            unread: Arc::new(RwLock::new(UnreadCache::default())),
         }
     }
 
@@ -189,12 +212,72 @@ impl VrccService {
     /// 拿到 `recent` 结果后更新未读数。
     ///
     /// 顺手把缓存从 `None` 变成 `Some`：这已经是真实数据了，腕表可以显示。
+    ///
+    /// 服务器有 `me/unread` 时，腕表显示的是那几处红点的合计，这里就不覆盖它；
+    /// 只有旧服务器（没有 `me/unread`）才用「最近的提醒」里 `id > read` 的条数。
     fn note_recent(&self, unread: u32) {
+        if self.cached_unread().is_some() {
+            return;
+        }
         let Ok(mut wrist) = self.wrist.write() else {
             return;
         };
         let entry = wrist.get_or_insert_with(VrccWristSummary::default);
         entry.unread = unread;
+    }
+
+    /// 拿到 `me/unread` 后更新缓存和腕表。返回和上一次比有没有变。
+    fn note_unread(&self, counts: &VrccUnread) -> bool {
+        let changed = {
+            let Ok(mut cache) = self.unread.write() else {
+                return false;
+            };
+            let changed = cache.counts.as_ref() != Some(counts);
+            cache.counts = Some(counts.clone());
+            cache.skip_until = None;
+            changed
+        };
+        if let Ok(mut wrist) = self.wrist.write() {
+            let entry = wrist.get_or_insert_with(VrccWristSummary::default);
+            entry.unread = u32::try_from(counts.total()).unwrap_or(u32::MAX);
+        }
+        changed
+    }
+
+    /// 断开或令牌失效后，未读数不再属于任何人：清掉，腕表回到 0。
+    fn forget_unread(&self) {
+        if let Ok(mut cache) = self.unread.write() {
+            cache.counts = None;
+        }
+        if let Ok(mut wrist) = self.wrist.write() {
+            if let Some(entry) = wrist.as_mut() {
+                entry.unread = 0;
+            }
+        }
+    }
+
+    /// 最近一次 `me/unread` 的结果，纯内存读取。
+    pub fn cached_unread(&self) -> Option<VrccUnread> {
+        self.unread.read().ok()?.counts.clone()
+    }
+
+    /// 收拾一个错误：`404 gone` 表示令牌已经失效，清掉它。
+    ///
+    /// 官方的要求是「收到 `404 gone` 就停下轮询，让玩家重新授权」。不清的话，
+    /// 后台轮询会拿着一个死令牌每分钟问一次，界面上也一直显示「已连接」。
+    /// 1.10.0 起「90 天没调用过任何接口」也会这样，所以这不是罕见情况。
+    fn settle(&self, error: VrccError) -> VrccError {
+        if error.is_gone() {
+            tracing::info!(
+                "vrcc: token is gone (disconnected on the site, re-authorized elsewhere, or unused for 90 days); dropping it"
+            );
+            if let Err(clear_error) = self.store.clear() {
+                tracing::warn!(%clear_error, "vrcc: failed to clear the dead token");
+            }
+            self.session.expire();
+            self.forget_unread();
+        }
+        error
     }
 
     /// 拿到地图榜后更新名次缓存。
@@ -225,15 +308,29 @@ impl VrccService {
         self.session.snapshot().into()
     }
 
-    /// 本地用量快照。
+    /// 服务器建议的提醒轮询间隔（秒，不低于 25），后台轮询用。
+    pub fn poll_every_secs(&self) -> i64 {
+        self.session.snapshot().poll_every_secs
+    }
+
+    /// `me/notifications` 的游标；连上以后还没问过时为 `None`。
+    pub fn notifications_cursor(&self) -> Option<i64> {
+        self.session.snapshot().notifications_cursor
+    }
+
+    /// 用量快照。
     ///
-    /// 口径：只说「本客户端今日已用」多少。官方没有查询剩余额度的接口，
-    /// 服务器按令牌计数，我们看不到那个数字，所以不能显示「剩余」。
+    /// 口径：说「今日已用」多少。服务器回过 `RateLimit-*`（1.11.0 起）就是
+    /// 服务器按这个授权算的准数，否则是本客户端自己记的；`personal_from_server`
+    /// 告诉界面是哪一种。
     pub fn usage(&self) -> VrccUsageSnapshot {
         let usage = self.client.local_usage();
         VrccUsageSnapshot {
             personal_used_today: usage.personal_used_today,
-            personal_daily_limit: PERSONAL_DAILY_LIMIT,
+            personal_daily_limit: usage.personal_daily_limit,
+            personal_from_server: usage.personal_from_server,
+            unread_used_today: usage.unread.map(|(used, _)| used),
+            unread_daily_limit: usage.unread.map(|(_, limit)| limit),
             device_code_used_today: usage.device_code_used_today,
             device_code_daily_limit: vrcx_0_integrations::vrcc::DEVICE_CODE_DAILY_LIMIT,
             window_used: usage.window_used as i64,
@@ -246,16 +343,37 @@ impl VrccService {
     // -- 开放数据 ----------------------------------------------------------
 
     /// 地图榜。不需要连接，也不计个人额度。
-    pub async fn boards(&self, limit: u32) -> std::result::Result<VrccBoard, VrccError> {
-        let board = self.client.boards(limit).await?;
+    ///
+    /// `sort` 是本周榜或新上榜、而回答里没有 `sort` 时，说明服务器还不认
+    /// 这个参数、回的是总榜：照样返回，由界面判断「还不支持」。
+    pub async fn boards(
+        &self,
+        limit: u32,
+        sort: VrccBoardSort,
+    ) -> std::result::Result<VrccBoard, VrccError> {
+        let board = self.client.boards(limit, sort).await?;
         // 顺手填充腕表的排名缓存：这次请求本来就要发，不额外花额度。
-        self.note_boards(&board);
+        // 只用总榜：名次指的是总榜名次，本周榜和新上榜只列一部分地图。
+        if sort == VrccBoardSort::Top || board.sort.is_none() {
+            self.note_boards(&board);
+        }
         Ok(board)
     }
 
     /// 服务状态。
     pub async fn status(&self) -> std::result::Result<VrccStatus, VrccError> {
         self.client.status().await
+    }
+
+    /// 公告和停站（1.12.0 起）。不需要连接。
+    ///
+    /// 旧服务器没有这个接口（`404 not_found`）时返回 `None`，界面就不显示。
+    pub async fn announcements(&self) -> std::result::Result<Option<VrccAnnouncements>, VrccError> {
+        match self.client.announcements().await {
+            Ok(announcements) => Ok(Some(announcements)),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     // -- 设备授权 ----------------------------------------------------------
@@ -323,6 +441,7 @@ impl VrccService {
             .clear()
             .map_err(|error| VrccError::Transport(format!("清除令牌失败：{error}")))?;
         self.session.disconnect();
+        self.forget_unread();
         match revoke {
             Ok(()) => Ok(()),
             // 令牌本来就无效，等于已经断开了。
@@ -345,7 +464,11 @@ impl VrccService {
         mark: bool,
     ) -> std::result::Result<VrccRecentNotifications, VrccError> {
         self.ensure_connected()?;
-        let result = self.client.recent_notifications(mark).await?;
+        let result = self
+            .client
+            .recent_notifications(mark)
+            .await
+            .map_err(|error| self.settle(error))?;
         // 未读数按官方语义算：id 大于 read 的算未读。`read` 缺省时（账号上
         // 还没记过已读），把返回的条目都当作未读——这是唯一诚实的解读。
         //
@@ -373,7 +496,11 @@ impl VrccService {
             return Ok(None);
         }
         self.ensure_connected()?;
-        let map = self.client.my_map(&world).await?;
+        let map = self
+            .client
+            .my_map(&world)
+            .await
+            .map_err(|error| self.settle(error))?;
         if !map.is_visible() {
             tracing::debug!(
                 world = %world,
@@ -384,17 +511,69 @@ impl VrccService {
         Ok(Some(map))
     }
 
+    /// 问一次几处未读数（`me/unread`，1.13.0 起），结果进缓存。
+    ///
+    /// 返回 `(结果, 和上次比变没变)`。旧服务器没有这个接口（`404 not_found`）
+    /// 时返回 `None`，之后一小时内不再问——服务器更新以后不用重启就能接上。
+    pub async fn refresh_unread(
+        &self,
+    ) -> std::result::Result<Option<(VrccUnread, bool)>, VrccError> {
+        self.ensure_connected()?;
+        let skip = self
+            .unread
+            .read()
+            .ok()
+            .and_then(|cache| cache.skip_until)
+            .is_some_and(|until| Instant::now() < until);
+        if skip {
+            return Ok(None);
+        }
+        match self.client.unread().await {
+            Ok(counts) => {
+                let changed = self.note_unread(&counts);
+                Ok(Some((counts, changed)))
+            }
+            Err(error) if error.is_not_found() => {
+                tracing::debug!("vrcc: me/unread is not on this server yet");
+                if let Ok(mut cache) = self.unread.write() {
+                    cache.counts = None;
+                    cache.skip_until = Some(Instant::now() + UNREAD_RETRY_AFTER_NOT_FOUND);
+                }
+                Ok(None)
+            }
+            Err(error) => Err(self.settle(error)),
+        }
+    }
+
+    /// 通知中心（`me/notes`，1.13.0 起，第二份读）。读了不标已读。
+    ///
+    /// 旧服务器没有这个接口时返回 `None`，界面就不显示这一块。
+    pub async fn notes(&self) -> std::result::Result<Option<VrccNotes>, VrccError> {
+        self.ensure_connected()?;
+        match self.client.notes().await {
+            Ok(notes) => Ok(Some(notes)),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(self.settle(error)),
+        }
+    }
+
     /// 增量轮询。游标与建议间隔都自动维护。
+    ///
+    /// 这是官方给桌面客户端设计的轮询方式：两次之间至少 25 秒，**没有每天
+    /// 上限**，每次只给 `since` 之后的新提醒。后台轮询就用它来弹系统通知。
     ///
     /// 响应里的 `dot` 是「星轨相交尚未查看的新人数」，**不是未读提醒数**，
     /// 所以这里不拿它更新腕表的 `unread`——两者混用会显示错误的数字。
-    /// 未读数只由 `recent_notifications` 按 `read` 游标算。
     pub async fn poll_notifications(
         &self,
     ) -> std::result::Result<vrcx_0_contracts::vrcc::VrccNotifications, VrccError> {
         self.ensure_connected()?;
         let cursor = self.session.snapshot().notifications_cursor;
-        let result = self.client.notifications(cursor).await?;
+        let result = self
+            .client
+            .notifications(cursor)
+            .await
+            .map_err(|error| self.settle(error))?;
         self.session.note_poll(
             vrcx_0_integrations::vrcc::now_millis(),
             result.last,
@@ -408,7 +587,10 @@ impl VrccService {
     /// 今天这一轮 + 轮次进度（需要 `today` 敏感权限）。
     pub async fn today(&self) -> std::result::Result<VrccToday, VrccError> {
         self.ensure_connected()?;
-        self.client.today().await
+        self.client
+            .today()
+            .await
+            .map_err(|error| self.settle(error))
     }
 
     /// 「互相连上」的星友列表（需要 `mutuals` 敏感权限）。
@@ -418,7 +600,10 @@ impl VrccService {
     /// 原生界面里自己点。
     pub async fn mutuals(&self) -> std::result::Result<VrccMutuals, VrccError> {
         self.ensure_connected()?;
-        self.client.mutuals().await
+        self.client
+            .mutuals()
+            .await
+            .map_err(|error| self.settle(error))
     }
 
     fn ensure_connected(&self) -> std::result::Result<(), VrccError> {

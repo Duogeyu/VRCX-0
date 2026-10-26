@@ -8,21 +8,28 @@
 //!   保证令牌不可能被发到第三方地址；
 //! - 写操作（打分、连线、私聊）只由玩家点击触发，本层不做队列、不重试、不批处理；
 //! - 令牌只发给 `vrcc.cc`。
+//!
+//! 限流照开放接口 1.14.0：
+//! - 所有 `429` 都带 `Retry-After`（1.9.0 起），按它等；旧服务器没给时退回指数退避；
+//! - 带每天次数的接口回答 `RateLimit-*`（1.11.0 起），用它代替本地猜的用量；
+//! - 某一份额度当天用完，只停那一份，不让别的接口跟着退避。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use reqwest::header::HeaderMap;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use vrcx_0_contracts::vrcc::{
-    VrccBoard, VrccDeviceCode, VrccErrorBody, VrccMapDetail, VrccMutuals, VrccMyMap,
-    VrccNotifications, VrccRecentNotifications, VrccStatus, VrccToday, VrccTokenResponse,
-    VRCC_API_BASE, VRCC_DEFAULT_CLIENT,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccDeviceCode, VrccErrorBody, VrccMapDetail,
+    VrccMutuals, VrccMyMap, VrccNotes, VrccNotifications, VrccRecentNotifications, VrccStatus,
+    VrccToday, VrccTokenResponse, VrccUnread, VRCC_API_BASE, VRCC_DEFAULT_CLIENT,
 };
 use vrcx_0_core::proxy::with_remote_dns;
 
 use super::throttle::{
-    backoff_for, DailyUsage, RateLimiter, NOTIFICATIONS_MIN_GAP, PERSONAL_DAILY_LIMIT,
+    backoff_for, DailyUsage, RateLimiter, MAX_BACKOFF, NOTIFICATIONS_MIN_GAP, PERSONAL_DAILY_LIMIT,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -47,6 +54,15 @@ pub enum VrccError {
     TooSoon { retry_after_secs: u64 },
     #[error("星遇同频额度已用尽：{0}")]
     QuotaExhausted(String),
+    /// `503 stop`：停站维护。令牌没事，等到 `until` 以后再试。
+    ///
+    /// 只有「网页上的动作」那一批（今天的星等）会这样回答；提醒、星卡、
+    /// 地图榜停站时照常。
+    #[error("星遇同频停站维护中{}", stop_suffix(.say))]
+    Paused {
+        say: Option<String>,
+        until: Option<i64>,
+    },
     #[error("星遇同频接口返回 HTTP {status}（{error}）")]
     Api {
         status: u16,
@@ -60,12 +76,21 @@ pub enum VrccError {
     Decode(String),
 }
 
+fn stop_suffix(say: &Option<String>) -> String {
+    match say.as_deref().map(str::trim).filter(|say| !say.is_empty()) {
+        Some(say) => format!("：{say}"),
+        None => String::new(),
+    }
+}
+
 impl VrccError {
     /// 官方错误码表里的 `404 gone`：**令牌失效**（玩家断开了、同一个客户端又
-    /// 授权了一次、星被删除）。要停下轮询并让玩家重新授权。
+    /// 授权了一次、星被删除，1.10.0 起还有「90 天没调用过任何接口自动断开」）。
+    /// 要停下轮询并让玩家重新授权。
     ///
-    /// 注意区分 `star_gone`（连线/私聊的对方不在了，令牌没事）和
-    /// `not_found`（查的地图不在榜上），这两个**不该**触发重新授权。
+    /// 注意区分 `star_gone`（连线/私聊的对方不在了，令牌没事）、`expired`
+    /// （1.9.0 起签名图片失效用这个码，原来也叫 `gone`）和 `not_found`
+    /// （查的地图不在榜上、或旧服务器还没有这个接口），这些都**不该**触发重新授权。
     pub fn is_gone(&self) -> bool {
         matches!(
             self,
@@ -74,6 +99,21 @@ impl VrccError {
                 error,
                 ..
             } if error == "gone"
+        )
+    }
+
+    /// `404 not_found`：没有这个接口，或查的东西不在。
+    ///
+    /// 新接口（`me/unread`、`me/notes`、`announcements`）在还没更新的服务器上
+    /// 就是这样回答的，调用方据此安静地不显示，而不是报错。
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            VrccError::Api {
+                status: 404,
+                error,
+                ..
+            } if error == "not_found"
         )
     }
 
@@ -140,6 +180,84 @@ impl VrccError {
     }
 }
 
+/// 带每天次数的接口各自算在哪一份额度里（官方《频率限制》）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum QuotaBucket {
+    /// 第一份读：最近的提醒、星轨相交、互相连上、所在的地图、我打过分的地图。
+    Reads,
+    /// 第二份读：今天的星、通知中心等，和第一份分开算。
+    MoreReads,
+    /// `me/unread` 自己的一份。
+    Unread,
+}
+
+/// 服务器在 `RateLimit-*` 里说的一份额度。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerQuota {
+    /// `RateLimit-Limit`：每天上限。
+    pub limit: i64,
+    /// `RateLimit-Remaining`：今天还剩几次（算上这一次之后）。
+    pub remaining: i64,
+    /// `RateLimit-Reset`：几秒后重置（北京时间零点）；没给时为 0。
+    pub reset_secs: u64,
+}
+
+impl ServerQuota {
+    pub fn used(&self) -> i64 {
+        (self.limit - self.remaining).max(0)
+    }
+}
+
+/// 一次回答里和限流有关的响应头。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RateHeaders {
+    /// `Retry-After`（秒）。1.9.0 起所有 `429` 都带。
+    pub retry_after_secs: Option<u64>,
+    /// `RateLimit-Limit` / `-Remaining` / `-Reset`。1.11.0 起带每天次数的接口给。
+    pub quota: Option<ServerQuota>,
+}
+
+impl RateHeaders {
+    /// 从响应头里读。缺的、写坏的一律当没有，不让一个头把请求弄失败。
+    ///
+    /// `Retry-After` 按 RFC 9110 也可以是日期，但官方只给秒数，这里只认秒数。
+    pub fn from_headers(headers: &HeaderMap) -> Self {
+        let number = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<i64>().ok())
+        };
+        let retry_after_secs = number("retry-after")
+            .filter(|secs| *secs >= 0)
+            .map(|secs| secs as u64);
+        let quota = match (number("ratelimit-limit"), number("ratelimit-remaining")) {
+            (Some(limit), Some(remaining)) if limit > 0 => Some(ServerQuota {
+                limit,
+                remaining: remaining.clamp(0, limit),
+                reset_secs: number("ratelimit-reset")
+                    .filter(|secs| *secs > 0)
+                    .map(|secs| secs as u64)
+                    .unwrap_or(0),
+            }),
+            _ => None,
+        };
+        Self {
+            retry_after_secs,
+            quota,
+        }
+    }
+}
+
+/// 服务器最近一次说的某份额度，带作废时间。
+#[derive(Clone, Copy, Debug)]
+struct SeenQuota {
+    limit: i64,
+    remaining: i64,
+    /// 到这个时刻（服务器的重置时间）这份数就作废了。
+    until: Instant,
+}
+
 /// 客户端共享状态：限流器与用量计数。
 #[derive(Debug, Default)]
 pub struct VrccClientState {
@@ -149,6 +267,8 @@ pub struct VrccClientState {
     backoff_until: Option<Instant>,
     /// 连续 429 次数，用于指数退避。
     backoff_attempt: u32,
+    /// 服务器在 `RateLimit-*` 里说的各份额度。
+    quotas: HashMap<QuotaBucket, SeenQuota>,
 }
 
 impl VrccClientState {
@@ -169,15 +289,27 @@ impl VrccClientState {
     pub fn device_code_used_today(&self) -> i64 {
         self.usage.device_code_used()
     }
+
+    /// 还没到重置时间的那份服务器额度；没拿到过或已经过了零点时为 `None`。
+    fn live_quota(&self, bucket: QuotaBucket, now: Instant) -> Option<SeenQuota> {
+        self.quotas
+            .get(&bucket)
+            .copied()
+            .filter(|quota| quota.until > now)
+    }
 }
 
-/// 客户端本地用量快照。
-///
-/// 口径是「**已用**多少」，不是「还剩」多少。官方没有查询剩余额度的接口，
-/// 服务器按令牌计数，我们只看得到自己发过多少次。命名里刻意不带 remaining。
+/// 客户端用量快照。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VrccLocalUsage {
+    /// 第一份读今天已用多少。拿到过服务器的 `RateLimit-*` 就是服务器的数。
     pub personal_used_today: i64,
+    /// 第一份读每天的上限：服务器给的，没给时是 [`PERSONAL_DAILY_LIMIT`]。
+    pub personal_daily_limit: i64,
+    /// 上面两个数是不是服务器给的。
+    pub personal_from_server: bool,
+    /// `me/unread` 的（已用，上限），只有服务器给过响应头时才有。
+    pub unread: Option<(i64, i64)>,
     pub device_code_used_today: i64,
     pub window_used: usize,
     pub backoff_remaining: Duration,
@@ -188,14 +320,28 @@ pub struct VrccLocalUsage {
 /// 日配额计数的持久化端口。
 ///
 /// `integrations` 不依赖数据库，所以这里只定接口，实现在 `outbound-adapters`。
-/// 需要落盘的原因是：日配额是**按天**算的，重启后清零会让本地预扣完全失效，
-/// 玩家可能在毫不知情的情况下把 300 次 / 30 个码用完（服务器会回 `too_many`，
-/// 但要等到那一步才知道）。
+/// 需要落盘的原因是：日配额是**按天**算的，旧服务器不回 `RateLimit-*` 时，
+/// 重启后清零会让本地预扣完全失效。服务器给了头以后，落盘的是服务器的准数。
 pub trait DailyUsageStore: Send + Sync {
     /// 读取上次保存的计数。没有记录或读失败时返回 `None`。
     fn load(&self) -> Option<DailyUsage>;
     /// 保存计数。失败只该记日志，不该让请求失败。
     fn save(&self, usage: &DailyUsage);
+}
+
+/// 一次请求的全部参数。
+struct Call<'a> {
+    method: &'static str,
+    path: &'a str,
+    body: Option<serde_json::Value>,
+    /// 是否带 `Bearer`。
+    authed: bool,
+    /// 本地限流用的接口标识。
+    key: &'a str,
+    /// 同一个接口两次之间至少隔多久。
+    min_gap: Duration,
+    /// 算在哪一份每天的额度里；`None` 是没有每天上限的接口。
+    bucket: Option<QuotaBucket>,
 }
 
 /// 一个可克隆的客户端句柄。
@@ -256,9 +402,8 @@ impl VrccClient {
 
     /// 接上日配额的落盘端口，并把上次的计数恢复进内存。
     ///
-    /// 不恢复的后果是真的：日配额按天算，重启清零等于本地预扣形同虚设，
-    /// 玩家可能在界面上看到 `0/300` 而服务器那边早就用掉大半，
-    /// 直到撞上 `too_many` 才暴露——那时只能等第二天。
+    /// 不恢复的后果是真的：旧服务器不回 `RateLimit-*` 时，重启清零等于本地
+    /// 预扣形同虚设，直到撞上 `too_many` 才暴露——那时只能等第二天。
     ///
     /// 恢复时会把日期一起带进来，`roll_to` 会在下次取用量时判断是否跨天，
     /// 所以跨天重启不会把昨天的数字带到今天。
@@ -284,7 +429,7 @@ impl VrccClient {
         &self.client_id
     }
 
-    /// 读本地用量计数。
+    /// 读用量。
     ///
     /// 会顺带把跨天的计数清零——调用方通常是界面，正好一天看一次。
     pub fn local_usage(&self) -> VrccLocalUsage {
@@ -292,8 +437,15 @@ impl VrccClient {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.usage.roll_to(&today);
+        let reads = state.live_quota(QuotaBucket::Reads, now);
+        let unread = state
+            .live_quota(QuotaBucket::Unread, now)
+            .map(|quota| ((quota.limit - quota.remaining).max(0), quota.limit));
         VrccLocalUsage {
             personal_used_today: state.personal_used_today(),
+            personal_daily_limit: reads.map_or(PERSONAL_DAILY_LIMIT, |quota| quota.limit),
+            personal_from_server: reads.is_some(),
+            unread,
             device_code_used_today: state.device_code_used_today(),
             window_used: state.window_used(now),
             backoff_remaining: state.backoff_remaining(now),
@@ -338,9 +490,18 @@ impl VrccClient {
         Ok(())
     }
 
+    /// 旧服务器的 429 没有 `Retry-After`：按指数退避猜。
     fn note_rate_limited(&self) -> Duration {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let wait = backoff_for(state.backoff_attempt);
+        state.backoff_attempt = state.backoff_attempt.saturating_add(1);
+        state.backoff_until = Some(Instant::now() + wait);
+        wait
+    }
+
+    /// 服务器给了 `Retry-After`：照它等，不自己加码。
+    fn note_retry_after(&self, wait: Duration) -> Duration {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.backoff_attempt = state.backoff_attempt.saturating_add(1);
         state.backoff_until = Some(Instant::now() + wait);
         wait
@@ -352,12 +513,78 @@ impl VrccClient {
         state.backoff_until = None;
     }
 
-    /// 扣一次个人接口额度；额度不足直接返回 `QuotaExhausted`，不发请求。
-    fn spend_personal(&self) -> Result<(), VrccError> {
+    /// 记下服务器在 `RateLimit-*` 里说的一份额度。
+    ///
+    /// 第一份读还会把本地计数改成服务器的准数并落盘：这就是「用服务器的数
+    /// 代替自己落盘猜的数」。
+    fn note_quota(&self, bucket: QuotaBucket, quota: ServerQuota) {
+        let now = Instant::now();
+        let reset = if quota.reset_secs > 0 {
+            quota.reset_secs
+        } else {
+            secs_until_beijing_midnight()
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.quotas.insert(
+            bucket,
+            SeenQuota {
+                limit: quota.limit,
+                remaining: quota.remaining,
+                until: now + Duration::from_secs(reset),
+            },
+        );
+        if bucket != QuotaBucket::Reads {
+            return;
+        }
+        state.usage.roll_to(&super::throttle::local_date_today());
+        state.usage.set_personal(quota.used());
+        let snapshot = state.usage.clone();
+        drop(state);
+        self.persist_usage(&snapshot);
+    }
+
+    /// 某一份额度今天用完了：在重置之前，这一份的请求不再发出去。
+    fn mark_exhausted(&self, bucket: QuotaBucket, wait: Duration) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let limit = state.quotas.get(&bucket).map_or(0, |quota| quota.limit);
+        state.quotas.insert(
+            bucket,
+            SeenQuota {
+                limit,
+                remaining: 0,
+                until: Instant::now() + wait,
+            },
+        );
+    }
+
+    /// 发请求前扣一次额度；已知用完时直接返回 `QuotaExhausted`，不发请求。
+    ///
+    /// 服务器给过 `RateLimit-*` 的，以服务器的余量为准；第一份读在没拿到过
+    /// 服务器的数时，退回本地计数（上限 [`PERSONAL_DAILY_LIMIT`]）。
+    fn spend(&self, bucket: QuotaBucket) -> Result<(), VrccError> {
         let today = super::throttle::local_date_today();
+        let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.usage.roll_to(&today);
-        if !state.usage.spend_personal(1) {
+        let live = state.live_quota(bucket, now);
+        if let Some(quota) = live {
+            if quota.remaining <= 0 {
+                return Err(VrccError::QuotaExhausted(format!(
+                    "今天的次数用完了，约 {} 后恢复",
+                    human_wait(quota.until.saturating_duration_since(now).as_secs())
+                )));
+            }
+            // 先扣着，免得两次响应之间连发越界；下一个响应头会覆盖它。
+            if let Some(seen) = state.quotas.get_mut(&bucket) {
+                seen.remaining -= 1;
+            }
+        }
+        if bucket != QuotaBucket::Reads {
+            return Ok(());
+        }
+        if live.is_some() {
+            state.usage.add_personal(1);
+        } else if !state.usage.spend_personal(1) {
             return Err(VrccError::QuotaExhausted(format!(
                 "本客户端今日个人接口已用满 {PERSONAL_DAILY_LIMIT} 次"
             )));
@@ -393,36 +620,86 @@ impl VrccClient {
         }
     }
 
-    /// 核心请求。`authed` 决定是否带 `Bearer`。
-    async fn request<T: DeserializeOwned>(
+    /// 把一个 `429` 变成错误，顺带决定要不要退避、退避多久。
+    ///
+    /// 官方的 `429` 分几种，处理完全不同：
+    /// - `too_soon`：两次轮询间隔不到 25 秒。等 `Retry-After` 秒（旧服务器
+    ///   没给就用 `every`）再问就行，**不该**触发长时间退避。
+    /// - 每天的次数用完（`RateLimit-Remaining` 是 0，或 `Retry-After` 长到
+    ///   只能是「到北京时间零点」）：只停这一份额度，不让别的接口跟着停。
+    /// - 其余（每分钟的限制）：照 `Retry-After` 全局退避；旧服务器没给头时
+    ///   按指数退避猜。
+    fn on_too_many(
         &self,
-        method: &str,
-        path: &str,
-        body: Option<serde_json::Value>,
-        authed: bool,
-        key: &str,
-        min_gap: Duration,
-    ) -> Result<T, VrccError> {
-        Self::validate_path(path)?;
-        self.acquire(key, min_gap).await?;
+        error: &str,
+        body: &VrccErrorBody,
+        rate: RateHeaders,
+        bucket: Option<QuotaBucket>,
+    ) -> VrccError {
+        if error == "too_soon" {
+            let gap = rate
+                .retry_after_secs
+                .filter(|secs| *secs > 0)
+                .or_else(|| {
+                    body.every
+                        .filter(|every| *every > 0)
+                        .map(|every| every as u64)
+                })
+                .unwrap_or(NOTIFICATIONS_MIN_GAP.as_secs());
+            return VrccError::TooSoon {
+                retry_after_secs: gap,
+            };
+        }
+        let daily = rate.quota.is_some_and(|quota| quota.remaining <= 0)
+            || rate
+                .retry_after_secs
+                .is_some_and(|secs| Duration::from_secs(secs) > MAX_BACKOFF);
+        if daily {
+            let wait = rate
+                .retry_after_secs
+                .or(rate.quota.map(|quota| quota.reset_secs))
+                .filter(|secs| *secs > 0)
+                .unwrap_or_else(secs_until_beijing_midnight);
+            if let Some(bucket) = bucket {
+                self.mark_exhausted(bucket, Duration::from_secs(wait));
+            }
+            return VrccError::QuotaExhausted(format!(
+                "{error}，今天的次数用完了，约 {} 后恢复",
+                human_wait(wait)
+            ));
+        }
+        let wait = match rate.retry_after_secs {
+            Some(secs) => self.note_retry_after(Duration::from_secs(secs.max(1))),
+            None => self.note_rate_limited(),
+        };
+        VrccError::RateLimited(format!("{error}，退避 {} 秒", wait.as_secs()))
+    }
+
+    /// 核心请求。
+    async fn request<T: DeserializeOwned>(&self, call: Call<'_>) -> Result<T, VrccError> {
+        Self::validate_path(call.path)?;
+        if let Some(bucket) = call.bucket {
+            self.spend(bucket)?;
+        }
+        self.acquire(call.key, call.min_gap).await?;
 
         let mut builder = self
             .http
             .request(
-                method
-                    .parse()
-                    .map_err(|_| VrccError::Transport(format!("不支持的请求方法 {method}")))?,
-                format!("{}{path}", self.base),
+                call.method.parse().map_err(|_| {
+                    VrccError::Transport(format!("不支持的请求方法 {}", call.method))
+                })?,
+                format!("{}{}", self.base, call.path),
             )
             .header("X-Client", &self.client_id)
             .header("Accept", "application/json");
 
-        if authed {
+        if call.authed {
             let token = (self.token)().ok_or(VrccError::TokenMissing)?;
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
 
-        if let Some(payload) = body {
+        if let Some(payload) = call.body {
             let text = payload.to_string();
             if text.len() > MAX_BODY_BYTES {
                 return Err(VrccError::BodyTooLarge);
@@ -437,10 +714,28 @@ impl VrccClient {
             .await
             .map_err(|error| VrccError::Transport(error.to_string()))?;
         let status = response.status();
+        let rate = RateHeaders::from_headers(response.headers());
+        if let Some(sunset) = response
+            .headers()
+            .get("sunset")
+            .and_then(|value| value.to_str().ok())
+        {
+            // 1.14.0 起，带着弃用字段的回答有 `Deprecation` / `Sunset` 头。
+            // 契约层已经不读那些字段，这里只留个线索，方便以后核对。
+            tracing::debug!(
+                key = call.key,
+                sunset,
+                "vrcc: response carries deprecated fields"
+            );
+        }
         let text = response
             .text()
             .await
             .map_err(|error| VrccError::Transport(error.to_string()))?;
+
+        if let (Some(bucket), Some(quota)) = (call.bucket, rate.quota) {
+            self.note_quota(bucket, quota);
+        }
 
         if status.is_success() {
             self.note_success();
@@ -456,25 +751,13 @@ impl VrccClient {
                 .clone()
                 .unwrap_or_else(|| format!("http_{code}"));
             if code == 429 {
-                // 官方把 429 分成两种，含义完全不同：
-                // - `too_soon`：两次轮询间隔不到 25 秒。等一会儿再问就行，
-                //   **不该**触发长时间退避，否则下一次正常轮询也会被自己拖慢。
-                // - `too_many`：频率或当日额度用完。要退避。
-                if error == "too_soon" {
-                    let gap = parsed
-                        .every
-                        .filter(|every| *every > 0)
-                        .map(|every| every as u64)
-                        .unwrap_or(NOTIFICATIONS_MIN_GAP.as_secs());
-                    return Err(VrccError::TooSoon {
-                        retry_after_secs: gap,
-                    });
-                }
-                let wait = self.note_rate_limited();
-                return Err(VrccError::RateLimited(format!(
-                    "{error}，退避 {} 秒",
-                    wait.as_secs()
-                )));
+                return Err(self.on_too_many(&error, &parsed, rate, call.bucket));
+            }
+            if code == 503 && error == "stop" {
+                return Err(VrccError::Paused {
+                    say: parsed.say,
+                    until: parsed.until,
+                });
             }
             Err(VrccError::Api {
                 status: code,
@@ -486,43 +769,71 @@ impl VrccClient {
     }
 
     // -- 开放数据（不需要令牌） --------------------------------------------
+
     /// 地图榜。官方说明服务器最多 5 分钟更新一次，问得再勤也是同一份。
-    pub async fn boards(&self, limit: u32) -> Result<VrccBoard, VrccError> {
+    ///
+    /// `sort`（1.13.0 起）：总榜、本周榜、新上榜。旧服务器不认 `sort`、照旧
+    /// 回总榜，这时回答里没有 `sort` 字段，调用方据此判断「还不支持」。
+    pub async fn boards(&self, limit: u32, sort: VrccBoardSort) -> Result<VrccBoard, VrccError> {
         let limit = limit.clamp(1, 100);
-        self.request(
-            "GET",
-            &format!("boards/maps?limit={limit}"),
-            None,
-            false,
-            "boards",
-            Duration::from_secs(60),
-        )
+        self.request(Call {
+            method: "GET",
+            path: &boards_path(limit, sort),
+            body: None,
+            authed: false,
+            // 每种排序各算各的间隔：切到别的排序不用等上一种的 60 秒。
+            key: match sort {
+                VrccBoardSort::Top => "boards",
+                VrccBoardSort::Week => "boards_week",
+                VrccBoardSort::New => "boards_new",
+            },
+            min_gap: Duration::from_secs(60),
+            bucket: None,
+        })
         .await
     }
 
     /// 服务探活。不需要 client 标识，也不计入个人额度。
     pub async fn status(&self) -> Result<VrccStatus, VrccError> {
-        self.request(
-            "GET",
-            "status",
-            None,
-            false,
-            "status",
-            Duration::from_secs(30),
-        )
+        self.request(Call {
+            method: "GET",
+            path: "status",
+            body: None,
+            authed: false,
+            key: "status",
+            min_gap: Duration::from_secs(30),
+            bucket: None,
+        })
         .await
     }
 
     /// 单张地图详情。未上榜或未过审返回 `404 not_found`。
     pub async fn map(&self, world: &str) -> Result<VrccMapDetail, VrccError> {
-        self.request(
-            "GET",
-            &format!("maps/{world}"),
-            None,
-            false,
-            "map",
-            Duration::from_secs(30),
-        )
+        self.request(Call {
+            method: "GET",
+            path: &format!("maps/{world}"),
+            body: None,
+            authed: false,
+            key: "map",
+            min_gap: Duration::from_secs(30),
+            bucket: None,
+        })
+        .await
+    }
+
+    /// 公告和停站（1.12.0 起）。不用令牌，停站时也能问，服务器缓存 1 分钟。
+    ///
+    /// 旧服务器没有这个接口，回答 `404 not_found`。
+    pub async fn announcements(&self) -> Result<VrccAnnouncements, VrccError> {
+        self.request(Call {
+            method: "GET",
+            path: "announcements",
+            body: None,
+            authed: false,
+            key: "announcements",
+            min_gap: Duration::from_secs(30),
+            bucket: None,
+        })
         .await
     }
 
@@ -531,16 +842,10 @@ impl VrccClient {
     /// 申请连接码。
     ///
     /// 官方定义（`POST /api/v1/device/code`）：正文可以不带；要指定权限就带
-    /// `scope`。正文也认表单，`scope` 也可以放查询串，**正文里有时以正文为准**。
-    /// 不写 `scope` 时按客户端登记状态取默认值（`dev-` 是
+    /// `scope`。不写 `scope` 时按客户端登记状态取默认值（`dev-` 是
     /// `profile notifications maps`，`profile` 总会加上）。
     ///
     /// 所以这里传 `None` 表示「用官方默认」，而不是「不要权限」。
-    /// 申请连接码。
-    ///
-    /// 官方定义（`POST /api/v1/device/code`）：正文可以不带；要指定权限就带
-    /// `scope`。不写 `scope` 时按客户端登记状态取默认值（`dev-` 是
-    /// `profile notifications maps`，`profile` 总会加上）。
     ///
     /// **`scope` 走查询串，不走 JSON 正文。** 这一点是实测出来的，和官方
     /// `openapi.yaml` 不一致：
@@ -562,133 +867,220 @@ impl VrccClient {
             Some(scope) => format!("device/code?scope={}", encode_query_value(scope)),
             None => "device/code".to_string(),
         };
-        self.request(
-            "POST",
-            &path,
-            None,
-            false,
-            "device_code",
-            Duration::from_secs(5),
-        )
+        self.request(Call {
+            method: "POST",
+            path: &path,
+            body: None,
+            authed: false,
+            key: "device_code",
+            min_gap: Duration::from_secs(5),
+            bucket: None,
+        })
         .await
     }
 
     /// 用设备码换令牌。玩家还没点同意时返回 `authorization_pending`，
     /// 调用方应按 `interval` 秒后再问；`access_denied` / `expired_token` 要停下。
     pub async fn device_token(&self, device_code: &str) -> Result<VrccTokenResponse, VrccError> {
-        let body = json!({ "device_code": device_code });
-        self.request(
-            "POST",
-            "device/token",
-            Some(body),
-            false,
-            "device_token",
-            Duration::from_secs(5),
-        )
+        self.request(Call {
+            method: "POST",
+            path: "device/token",
+            body: Some(json!({ "device_code": device_code })),
+            authed: false,
+            key: "device_token",
+            min_gap: Duration::from_secs(5),
+            bucket: None,
+        })
         .await
     }
 
     /// 断开：让服务器吊销当前令牌。
     pub async fn disconnect(&self) -> Result<(), VrccError> {
         let _: serde_json::Value = self
-            .request(
-                "POST",
-                "disconnect",
-                None,
-                true,
-                "disconnect",
-                Duration::from_secs(5),
-            )
+            .request(Call {
+                method: "POST",
+                path: "disconnect",
+                body: None,
+                authed: true,
+                key: "disconnect",
+                min_gap: Duration::from_secs(5),
+                bucket: None,
+            })
             .await?;
         Ok(())
     }
 
-    // -- 个人接口（计每日额度） --------------------------------------------
+    // -- 个人接口 ----------------------------------------------------------
 
     /// 增量轮询提醒。首次不传 `since`，之后回传上次的 `last`。
     ///
-    /// 官方硬性要求两次之间至少 25 秒，这里在限流层强制。
+    /// 官方硬性要求两次之间至少 25 秒，这里在限流层强制。它**没有每天上限**
+    /// （官方《频率限制》），所以不扣任何一份额度——后台轮询就靠它。
     pub async fn notifications(&self, since: Option<i64>) -> Result<VrccNotifications, VrccError> {
-        self.spend_personal()?;
         let path = match since {
             Some(cursor) => format!("me/notifications?since={cursor}"),
             None => "me/notifications".to_string(),
         };
-        self.request(
-            "GET",
-            &path,
-            None,
-            true,
-            "notifications",
-            NOTIFICATIONS_MIN_GAP,
-        )
+        self.request(Call {
+            method: "GET",
+            path: &path,
+            body: None,
+            authed: true,
+            key: "notifications",
+            min_gap: NOTIFICATIONS_MIN_GAP,
+            bucket: None,
+        })
         .await
     }
 
-    /// 最近一天的最后几条提醒。
+    /// 最近一天的最后几条提醒（第一份读）。
     pub async fn recent_notifications(
         &self,
         mark: bool,
     ) -> Result<VrccRecentNotifications, VrccError> {
-        self.spend_personal()?;
-        let path = if mark {
-            "me/notifications/recent?mark=1"
-        } else {
-            "me/notifications/recent"
-        };
-        self.request("GET", path, None, true, "recent", Duration::from_secs(10))
-            .await
+        self.request(Call {
+            method: "GET",
+            path: recent_path(mark),
+            body: None,
+            authed: true,
+            key: "recent",
+            min_gap: Duration::from_secs(10),
+            bucket: Some(QuotaBucket::Reads),
+        })
+        .await
     }
 
-    /// 当前所在地图在地图榜上的状态与我自己的评分。
+    /// 几处未读数（1.13.0 起，`notifications` 权限）。读了不标已读。
+    ///
+    /// 每个授权每天 1500 次，单独计数，官方建议 1–2 分钟问一次。旧服务器没有
+    /// 这个接口，回答 `404 not_found`。
+    pub async fn unread(&self) -> Result<VrccUnread, VrccError> {
+        self.request(Call {
+            method: "GET",
+            path: "me/unread",
+            body: None,
+            authed: true,
+            key: "unread",
+            min_gap: Duration::from_secs(25),
+            bucket: Some(QuotaBucket::Unread),
+        })
+        .await
+    }
+
+    /// 通知中心（1.13.0 起，`notifications` 权限，第二份读）。读了不标已读。
+    pub async fn notes(&self) -> Result<VrccNotes, VrccError> {
+        self.request(Call {
+            method: "GET",
+            path: "me/notes",
+            body: None,
+            authed: true,
+            key: "notes",
+            min_gap: Duration::from_secs(10),
+            bucket: Some(QuotaBucket::MoreReads),
+        })
+        .await
+    }
+
+    /// 当前所在地图在地图榜上的状态与我自己的评分（第一份读）。
     ///
     /// 需要 `maps`（普通权限，`dev-` 就能用）。这是官方插件「所在地图」那块
-    /// 的数据来源：能看分、看人数、看自己打了几分、现在能不能打分。
+    /// 的数据来源：能看分、看人数、看自己打了几分。
     ///
     /// `world` 只能是 `wrld_…`，不要带房间实例号。
     pub async fn my_map(&self, world: &str) -> Result<VrccMyMap, VrccError> {
-        self.spend_personal()?;
-        self.request(
-            "GET",
-            &format!("me/maps/{world}"),
-            None,
-            true,
-            "my_map",
-            Duration::from_secs(10),
-        )
+        self.request(Call {
+            method: "GET",
+            path: &format!("me/maps/{world}"),
+            body: None,
+            authed: true,
+            key: "my_map",
+            min_gap: Duration::from_secs(10),
+            bucket: Some(QuotaBucket::Reads),
+        })
         .await
     }
 
     /// 今天这一轮路过的星 + 轮次进度。需要 `today` 权限（敏感，要审核）。
+    ///
+    /// 它是「网页上的动作」，算第二份读；停站时回答 `503 stop`。
     pub async fn today(&self) -> Result<VrccToday, VrccError> {
-        self.spend_personal()?;
-        self.request(
-            "GET",
-            "me/today",
-            None,
-            true,
-            "today",
-            Duration::from_secs(30),
-        )
+        self.request(Call {
+            method: "GET",
+            path: "me/today",
+            body: None,
+            authed: true,
+            key: "today",
+            min_gap: Duration::from_secs(30),
+            bucket: Some(QuotaBucket::MoreReads),
+        })
         .await
     }
 
-    /// 「互相连上」的星友列表。需要 `mutuals` 权限（敏感，要审核）。
+    /// 「互相连上」的星友列表（第一份读）。需要 `mutuals` 权限（敏感，要审核）。
     ///
     /// 条目里的 `vrcUser` 是对方的 VRChat 用户 ID，只在对方验证过且公开
     /// 「已验证」标志时才有。客户端拿它只能打开自己的玩家详情页，
     /// **不得代玩家发好友请求**——这条是官方的硬性合规要求。
     pub async fn mutuals(&self) -> Result<VrccMutuals, VrccError> {
-        self.spend_personal()?;
-        self.request(
-            "GET",
-            "me/mutuals",
-            None,
-            true,
-            "mutuals",
-            Duration::from_secs(30),
-        )
+        self.request(Call {
+            method: "GET",
+            path: "me/mutuals",
+            body: None,
+            authed: true,
+            key: "mutuals",
+            min_gap: Duration::from_secs(30),
+            bucket: Some(QuotaBucket::Reads),
+        })
         .await
+    }
+}
+
+/// 地图榜的路径。总榜不带 `sort`，和旧服务器上的写法一模一样。
+fn boards_path(limit: u32, sort: VrccBoardSort) -> String {
+    match sort {
+        VrccBoardSort::Top => format!("boards/maps?limit={limit}"),
+        other => format!("boards/maps?limit={limit}&sort={}", other.as_query()),
+    }
+}
+
+/// 「最近的提醒」的路径。
+///
+/// 1.9.0 起 `?mark` 按字面算：只有 `1` / `true` 才标已读，`?mark=0` 不标。
+/// 这里本来就只在要标的时候带 `?mark=1`，不标的时候整个参数都不带，新旧
+/// 服务器上都对。
+fn recent_path(mark: bool) -> &'static str {
+    if mark {
+        "me/notifications/recent?mark=1"
+    } else {
+        "me/notifications/recent"
+    }
+}
+
+/// 离北京时间下一个零点还有几秒。服务器每天的次数都在这时重置。
+fn secs_until_beijing_midnight() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    secs_until_beijing_midnight_from(now)
+}
+
+fn secs_until_beijing_midnight_from(unix_secs: u64) -> u64 {
+    const DAY: u64 = 86_400;
+    let beijing = unix_secs + 8 * 3600;
+    (DAY - beijing % DAY).max(1)
+}
+
+/// 给人看的等待时长：`3 小时 20 分钟`、`5 分钟`、`40 秒`。
+fn human_wait(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{secs} 秒");
+    }
+    let total_minutes = secs.div_ceil(60);
+    match (total_minutes / 60, total_minutes % 60) {
+        (0, minutes) => format!("{minutes} 分钟"),
+        (hours, 0) => format!("{hours} 小时"),
+        (hours, minutes) => format!("{hours} 小时 {minutes} 分钟"),
     }
 }
 
@@ -959,7 +1351,7 @@ mod tests {
             state.usage.roll_to(&today);
             assert!(state.usage.spend_personal(PERSONAL_DAILY_LIMIT));
         }
-        let error = client.spend_personal().unwrap_err();
+        let error = client.spend(QuotaBucket::Reads).unwrap_err();
         assert!(matches!(error, VrccError::QuotaExhausted(_)));
     }
 
@@ -968,5 +1360,311 @@ mod tests {
         // 官方限制 POST 正文 2 KB，客户端在发送前就拦。
         let big = "x".repeat(MAX_BODY_BYTES + 1);
         assert!(big.len() > MAX_BODY_BYTES);
+    }
+
+    // -- 1.9.0–1.14.0：限流响应头、错误码、按字面算的 mark ----------------
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    fn api_error(status: u16, code: &str) -> VrccError {
+        VrccError::Api {
+            status,
+            error: code.to_string(),
+            need: None,
+            why: None,
+        }
+    }
+
+    #[test]
+    fn rate_headers_are_read_when_present() {
+        let rate = RateHeaders::from_headers(&headers(&[
+            ("Retry-After", "42"),
+            ("RateLimit-Limit", "1000"),
+            ("RateLimit-Remaining", "588"),
+            ("RateLimit-Reset", "3600"),
+        ]));
+        assert_eq!(rate.retry_after_secs, Some(42));
+        assert_eq!(
+            rate.quota,
+            Some(ServerQuota {
+                limit: 1000,
+                remaining: 588,
+                reset_secs: 3600
+            })
+        );
+        assert_eq!(rate.quota.unwrap().used(), 412);
+    }
+
+    #[test]
+    fn missing_or_broken_rate_headers_mean_nothing() {
+        // 旧服务器（1.8.x）什么都不给。
+        assert_eq!(
+            RateHeaders::from_headers(&HeaderMap::new()),
+            RateHeaders::default()
+        );
+        // 写坏的头不该让请求失败，也不该被当成「用完了」。
+        let rate = RateHeaders::from_headers(&headers(&[
+            ("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
+            ("RateLimit-Limit", "lots"),
+            ("RateLimit-Remaining", "1"),
+        ]));
+        assert_eq!(rate, RateHeaders::default());
+        // 只有上限、没有余量，等于没说。
+        let half = RateHeaders::from_headers(&headers(&[("RateLimit-Limit", "1000")]));
+        assert_eq!(half.quota, None);
+    }
+
+    #[test]
+    fn too_soon_waits_for_retry_after_over_every() {
+        let client = client();
+        let body = VrccErrorBody {
+            every: Some(60),
+            ..Default::default()
+        };
+        let rate = RateHeaders {
+            retry_after_secs: Some(7),
+            quota: None,
+        };
+        // 1.9.0 起 `Retry-After` 是 25 秒间隔还剩的秒数，比 `every` 准。
+        match client.on_too_many("too_soon", &body, rate, None) {
+            VrccError::TooSoon { retry_after_secs } => assert_eq!(retry_after_secs, 7),
+            other => panic!("expected TooSoon, got {other:?}"),
+        }
+        // 旧服务器没有头：退回 `every`。
+        match client.on_too_many("too_soon", &body, RateHeaders::default(), None) {
+            VrccError::TooSoon { retry_after_secs } => assert_eq!(retry_after_secs, 60),
+            other => panic!("expected TooSoon, got {other:?}"),
+        }
+        // too_soon 不触发全局退避。
+        assert!(client.local_usage().backoff_remaining.is_zero());
+    }
+
+    #[test]
+    fn minute_limit_backs_off_exactly_as_told() {
+        let client = client();
+        let rate = RateHeaders {
+            retry_after_secs: Some(60),
+            quota: None,
+        };
+        let error = client.on_too_many("too_many", &VrccErrorBody::default(), rate, None);
+        assert!(matches!(error, VrccError::RateLimited(_)), "{error:?}");
+        let backoff = client.local_usage().backoff_remaining;
+        assert!(backoff > Duration::from_secs(55) && backoff <= Duration::from_secs(60));
+        // 第二次照样按服务器说的等，不再自己翻倍。
+        client.on_too_many("too_many", &VrccErrorBody::default(), rate, None);
+        assert!(client.local_usage().backoff_remaining <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn old_server_429_without_retry_after_still_backs_off() {
+        let client = client();
+        let error = client.on_too_many(
+            "too_many",
+            &VrccErrorBody::default(),
+            RateHeaders::default(),
+            None,
+        );
+        assert!(matches!(error, VrccError::RateLimited(_)));
+        assert!(client.local_usage().backoff_remaining > Duration::from_secs(55));
+    }
+
+    #[test]
+    fn a_used_up_day_stops_only_that_quota() {
+        let client = client();
+        // 第二份读今天用完了：服务器回 429，余量 0，`Retry-After` 到北京时间零点。
+        let rate = RateHeaders {
+            retry_after_secs: Some(5 * 3600),
+            quota: Some(ServerQuota {
+                limit: 1000,
+                remaining: 0,
+                reset_secs: 5 * 3600,
+            }),
+        };
+        let error = client.on_too_many(
+            "too_many",
+            &VrccErrorBody::default(),
+            rate,
+            Some(QuotaBucket::MoreReads),
+        );
+        assert!(matches!(error, VrccError::QuotaExhausted(_)), "{error:?}");
+        assert!(error.to_string().contains("5 小时"), "{error}");
+        // 不让所有接口一起退避五个小时。
+        assert!(client.local_usage().backoff_remaining.is_zero());
+        // 这一份在零点前不再发请求……
+        assert!(matches!(
+            client.spend(QuotaBucket::MoreReads),
+            Err(VrccError::QuotaExhausted(_))
+        ));
+        // ……别的几份照常。
+        assert!(client.spend(QuotaBucket::Reads).is_ok());
+        assert!(client.spend(QuotaBucket::Unread).is_ok());
+    }
+
+    #[test]
+    fn long_retry_after_without_quota_headers_is_a_daily_limit() {
+        // `device/code` 每个网络地址每天 30 个：429 只带 `Retry-After`（到零点）。
+        let client = client();
+        let rate = RateHeaders {
+            retry_after_secs: Some(8 * 3600),
+            quota: None,
+        };
+        let error = client.on_too_many("too_many", &VrccErrorBody::default(), rate, None);
+        assert!(matches!(error, VrccError::QuotaExhausted(_)), "{error:?}");
+        assert!(client.local_usage().backoff_remaining.is_zero());
+    }
+
+    #[test]
+    fn server_quota_replaces_the_local_count() {
+        let client = client();
+        // 本地先记了 3 次（比如重启前的落盘数）。
+        for _ in 0..3 {
+            client.spend(QuotaBucket::Reads).unwrap();
+        }
+        let before = client.local_usage();
+        assert_eq!(before.personal_used_today, 3);
+        assert!(!before.personal_from_server);
+        assert_eq!(before.personal_daily_limit, PERSONAL_DAILY_LIMIT);
+
+        // 服务器说这个授权今天已经用了 412 次。
+        client.note_quota(
+            QuotaBucket::Reads,
+            ServerQuota {
+                limit: 1000,
+                remaining: 588,
+                reset_secs: 3600,
+            },
+        );
+        let after = client.local_usage();
+        assert_eq!(after.personal_used_today, 412);
+        assert_eq!(after.personal_daily_limit, 1000);
+        assert!(after.personal_from_server);
+        // 未读数那一份还没拿到过头，不显示。
+        assert_eq!(after.unread, None);
+
+        client.note_quota(
+            QuotaBucket::Unread,
+            ServerQuota {
+                limit: 1500,
+                remaining: 1400,
+                reset_secs: 3600,
+            },
+        );
+        assert_eq!(client.local_usage().unread, Some((100, 1500)));
+    }
+
+    #[test]
+    fn server_quota_lets_a_raised_limit_through() {
+        // 本地兜底上限是 1000；服务器哪天把上限调高了，不能被本地数拦住。
+        let client = client();
+        {
+            let today = super::super::throttle::local_date_today();
+            let mut state = client.state.lock().unwrap();
+            state.usage.roll_to(&today);
+            assert!(state.usage.spend_personal(PERSONAL_DAILY_LIMIT));
+        }
+        client.note_quota(
+            QuotaBucket::Reads,
+            ServerQuota {
+                limit: 2000,
+                remaining: 1000,
+                reset_secs: 3600,
+            },
+        );
+        assert!(client.spend(QuotaBucket::Reads).is_ok());
+    }
+
+    #[test]
+    fn server_saying_none_left_stops_before_the_request() {
+        let client = client();
+        client.note_quota(
+            QuotaBucket::Unread,
+            ServerQuota {
+                limit: 1500,
+                remaining: 0,
+                reset_secs: 600,
+            },
+        );
+        assert!(matches!(
+            client.spend(QuotaBucket::Unread),
+            Err(VrccError::QuotaExhausted(_))
+        ));
+    }
+
+    #[test]
+    fn expired_method_and_star_gone_are_not_token_loss() {
+        // 1.9.0：签名图片失效改成 `404 expired`，`gone` 只表示令牌失效。
+        // 1.11.0：方法不对是 `405 method`（原来是 `404 not_found`）。
+        for (status, code) in [
+            (404u16, "expired"),
+            (405, "method"),
+            (404, "star_gone"),
+            (404, "map_gone"),
+            (404, "yq_gone"),
+            (404, "not_found"),
+        ] {
+            let error = api_error(status, code);
+            assert!(!error.is_gone(), "{status} {code}");
+            assert!(!error.needs_reauth(), "{status} {code}");
+        }
+        assert!(api_error(404, "not_found").is_not_found());
+        assert!(!api_error(404, "gone").is_not_found());
+        assert!(!api_error(405, "method").is_not_found());
+    }
+
+    #[test]
+    fn stop_reads_as_maintenance_not_as_reauth() {
+        let paused = VrccError::Paused {
+            say: Some("升级数据库，约半小时".to_string()),
+            until: Some(1_793_000_000_000),
+        };
+        assert!(!paused.needs_reauth());
+        assert_eq!(
+            paused.to_string(),
+            "星遇同频停站维护中：升级数据库，约半小时"
+        );
+        let silent = VrccError::Paused {
+            say: None,
+            until: None,
+        };
+        assert_eq!(silent.to_string(), "星遇同频停站维护中");
+    }
+
+    #[test]
+    fn mark_is_only_sent_when_marking() {
+        // 1.9.0 起 `?mark=0` 不再标已读；这里不标时干脆不带这个参数。
+        assert_eq!(recent_path(true), "me/notifications/recent?mark=1");
+        assert_eq!(recent_path(false), "me/notifications/recent");
+        assert!(!recent_path(false).contains("mark"));
+    }
+
+    #[test]
+    fn board_paths_keep_the_old_form_for_the_top_board() {
+        assert_eq!(boards_path(20, VrccBoardSort::Top), "boards/maps?limit=20");
+        assert_eq!(
+            boards_path(20, VrccBoardSort::Week),
+            "boards/maps?limit=20&sort=week"
+        );
+        assert_eq!(
+            boards_path(5, VrccBoardSort::New),
+            "boards/maps?limit=5&sort=new"
+        );
+    }
+
+    #[test]
+    fn beijing_midnight_and_waits_read_right() {
+        // 2026-10-27 00:00 北京 = 2026-10-26 16:00 UTC。
+        let midnight_utc = 1_793_030_400;
+        assert_eq!(secs_until_beijing_midnight_from(midnight_utc - 60), 60);
+        assert_eq!(secs_until_beijing_midnight_from(midnight_utc), 86_400);
+        assert_eq!(human_wait(40), "40 秒");
+        assert_eq!(human_wait(300), "5 分钟");
+        assert_eq!(human_wait(3599), "1 小时");
+        assert_eq!(human_wait(5 * 3600 + 20 * 60), "5 小时 20 分钟");
     }
 }

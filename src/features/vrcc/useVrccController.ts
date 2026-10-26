@@ -10,13 +10,17 @@ import { toast } from '@/services/toastService';
 import {
     vrccApi,
     VrccError,
+    type VrccAnnouncements,
     type VrccBoard,
+    type VrccBoardSort,
     type VrccConnection,
     type VrccDeviceAuthPrompt,
     type VrccMutuals,
     type VrccMyMap,
+    type VrccNotes,
     type VrccRecentNotifications,
     type VrccStatus,
+    type VrccUnread,
     type VrccUsage
 } from './vrccApi';
 
@@ -26,14 +30,47 @@ import {
  */
 const VRCC_NOTICES_CHANGED_EVENT = 'vrccNoticesChanged';
 
+/**
+ * 令牌被服务器判了失效（`404 gone`）、后端已经清掉它时发出的事件名，
+ * 与 Rust 侧 `VRCC_CONNECTION_CHANGED_EVENT` 必须一致。
+ */
+const VRCC_CONNECTION_CHANGED_EVENT = 'vrccConnectionChanged';
+
+/**
+ * 同一种排序的地图榜多久内不重新请求。
+ *
+ * 服务器最多 5 分钟更新一次；后端对同一种排序还有 60 秒的最小间隔（不到
+ * 60 秒再问会等着）。切回刚看过的排序直接用手上的，不让玩家干等。
+ */
+const BOARD_REUSE_MS = 60_000;
+
 export type VrccTab = 'maps' | 'notifications' | 'mutuals' | 'me';
+
+/** 「提醒」页签里看哪一个：最近的提醒，还是通知中心。 */
+export type VrccNotificationsView = 'recent' | 'notes';
 
 type State = {
     tab: VrccTab;
     connection: VrccConnection | null;
     usage: VrccUsage | null;
     boards: VrccBoard | null;
+    /** 正在看的地图榜排序。 */
+    boardSort: VrccBoardSort;
+    /**
+     * 服务器认不认 `sort`（1.13.0 起）。要了本周榜却拿回没有 `sort` 的总榜时
+     * 为 false，界面藏起切换。
+     */
+    boardSortSupported: boolean;
     recent: VrccRecentNotifications | null;
+    /** 几处未读数；null 表示还没拿到，或服务器还没有 `me/unread`。 */
+    unread: VrccUnread | null;
+    notificationsView: VrccNotificationsView;
+    /** 通知中心；null 表示还没拉过，或服务器还没有 `me/notes`。 */
+    notes: VrccNotes | null;
+    /** 服务器有没有通知中心；还不知道时为 null。 */
+    notesSupported: boolean | null;
+    /** 公告和停站；null 表示没拉到，或服务器还没有这个接口。 */
+    announcements: VrccAnnouncements | null;
     /** 当前所在地图在榜上的状态；null 表示不显示（未连接、无地图、或被隐藏）。 */
     myMap: VrccMyMap | null;
     /** 「互相连上」的星友；null 表示还没拉过或没权限。 */
@@ -60,7 +97,14 @@ const initialState: State = {
     connection: null,
     usage: null,
     boards: null,
+    boardSort: 'top',
+    boardSortSupported: true,
     recent: null,
+    unread: null,
+    notificationsView: 'recent',
+    notes: null,
+    notesSupported: null,
+    announcements: null,
     myMap: null,
     mutuals: null,
     mutualsError: null,
@@ -82,6 +126,12 @@ export function useVrccController() {
     const [state, setState] = useState<State>(initialState);
     const authTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mounted = useRef(true);
+    /** 各种排序最近拿到的地图榜，切回来时直接用。 */
+    const boardCache = useRef<
+        Partial<Record<VrccBoardSort, { board: VrccBoard; at: number }>>
+    >({});
+    /** 正在看的排序；重新加载时照它拉，而不是跳回总榜。 */
+    const boardSortRef = useRef<VrccBoardSort>('top');
 
     const patch = useCallback((next: Partial<State>) => {
         if (mounted.current) {
@@ -119,6 +169,14 @@ export function useVrccController() {
                 title: normalized.message || i18n.t('vrcc.error.unknown')
             });
             patch({ error: normalized });
+            if (normalized.kind === 'needsReauth') {
+                // 令牌失效（`404 gone`）时后端已经把它清掉了：重读连接状态，
+                // 界面改显示「连接已失效，请重新连接」，而不是一直挂着「已连接」。
+                void vrccApi
+                    .connection()
+                    .then((connection) => patch({ connection }))
+                    .catch(() => {});
+            }
         },
         // 这里刻意只依赖 `patch`（空依赖的 useCallback，永远稳定）。
         //
@@ -143,11 +201,33 @@ export function useVrccController() {
         return connection;
     }, [patch]);
 
-    /** 地图榜：官方说明服务器最多 5 分钟更新一次，问再勤也是同一份。 */
-    const refreshBoards = useCallback(async () => {
-        const boards = await vrccApi.boards(20);
-        patch({ boards });
-    }, [patch]);
+    /**
+     * 地图榜：官方说明服务器最多 5 分钟更新一次，问再勤也是同一份。
+     *
+     * `sort` 是本周榜或新上榜、回来的却没有 `sort` 时，服务器还不认这个参数，
+     * 回的是总榜：照总榜显示，并藏起切换。
+     */
+    const refreshBoards = useCallback(
+        async (sort: VrccBoardSort = 'top', reuse = false) => {
+            const cached = boardCache.current[sort];
+            if (reuse && cached && Date.now() - cached.at < BOARD_REUSE_MS) {
+                boardSortRef.current = sort;
+                patch({ boards: cached.board, boardSort: sort });
+                return;
+            }
+            const boards = await vrccApi.boards(20, sort);
+            if (sort !== 'top' && boards.sort == null) {
+                boardCache.current.top = { board: boards, at: Date.now() };
+                boardSortRef.current = 'top';
+                patch({ boards, boardSort: 'top', boardSortSupported: false });
+                return;
+            }
+            boardCache.current[sort] = { board: boards, at: Date.now() };
+            boardSortRef.current = sort;
+            patch({ boards, boardSort: sort });
+        },
+        [patch]
+    );
 
     /**
      * 最近的提醒。
@@ -200,6 +280,39 @@ export function useVrccController() {
         }
     }, [patch]);
 
+    /**
+     * 几处未读数（`me/unread`）。
+     *
+     * `refresh` 为 false 时只读后台轮询的缓存：收到「有变化」的事件时后台刚问过，
+     * 不必再花一次（每天 1500 次）。
+     */
+    const refreshUnread = useCallback(
+        async (refresh = true) => {
+            const unread = await vrccApi.unread(refresh);
+            patch({ unread });
+        },
+        [patch]
+    );
+
+    /** 通知中心（`me/notes`）。只在玩家切到「通知」时拉，读了不标已读。 */
+    const refreshNotes = useCallback(async () => {
+        const notes = await vrccApi.notes();
+        patch({ notes, notesSupported: notes !== null });
+    }, [patch]);
+
+    /**
+     * 公告和停站。拿不到不算页面错误：它只是附加信息，停站时个人接口
+     * 自己也会报「停站维护中」。
+     */
+    const refreshAnnouncements = useCallback(async () => {
+        try {
+            const announcements = await vrccApi.announcements();
+            patch({ announcements });
+        } catch (error) {
+            console.error('[vrcc] refreshAnnouncements failed:', error);
+        }
+    }, [patch]);
+
     const refreshService = useCallback(async () => {
         try {
             const service = await vrccApi.status();
@@ -238,7 +351,8 @@ export function useVrccController() {
         void refreshService().catch((error) => {
             reportError(error, 'refreshService');
         });
-        void refreshBoards().catch((error) => {
+        void refreshAnnouncements();
+        void refreshBoards(boardSortRef.current).catch((error) => {
             reportError(error, 'refreshBoards');
         });
         // 所在地图要已连接才有意义，且它内部会查接口——同样不能挡首屏。
@@ -253,15 +367,20 @@ export function useVrccController() {
             void refreshMutuals().catch((error) => {
                 reportError(error, 'refreshMutuals');
             });
+            void refreshUnread(true).catch((error) => {
+                reportError(error, 'refreshUnread');
+            });
         }
     }, [
         patch,
+        refreshAnnouncements,
         refreshBoards,
         refreshConnection,
         refreshMutuals,
         refreshMyMap,
         refreshRecent,
         refreshService,
+        refreshUnread,
         reportError
     ]);
 
@@ -309,51 +428,78 @@ export function useVrccController() {
      *
      * 现在后端发事件、前端只负责刷新状态。事件本身不带提醒正文（不把玩家
      * 内容经手额外的事件层），所以收到后要自己拉一次列表。
+     *
+     * 另一个事件是「连接失效」：后端收到 `404 gone` 后已经清掉令牌，这里
+     * 重读连接状态，界面改显示「请重新连接」。连接一断，这个 effect 就退订。
      */
     useEffect(() => {
         if (!state.connection?.connected) {
             return;
         }
         let disposed = false;
-        let unsubscribe: (() => void) | null = null;
+        const unsubscribers: Array<() => void> = [];
 
-        tauriClient.events
-            .subscribe(VRCC_NOTICES_CHANGED_EVENT, () => {
-                if (disposed) return;
-                // 收到后端信号说明有新提醒，这里拉一次列表。
-                // 这行日志用于区分「事件没到」和「事件到了但刷新失败」，
-                // 是排查「后台弹了通知但界面没变」的第一现场。
-                console.info('[vrcc] notices changed event received');
-                // 后台发现的提醒不标记已读：玩家还没看到，替他标记是错的。
-                refreshRecent(false).catch((error) => {
-                    if (disposed) return;
-                    if (
-                        error instanceof VrccError &&
-                        error.kind === 'needsReauth'
-                    ) {
-                        reportError(error, 'poll');
+        const subscribe = (event: string, handler: () => void) => {
+            tauriClient.events
+                .subscribe(event, () => {
+                    if (!disposed) handler();
+                })
+                .then((off) => {
+                    if (disposed) {
+                        // 订阅回来时组件已经卸载：立刻退订，别留下悬空监听。
+                        off();
+                        return;
                     }
+                    unsubscribers.push(off);
+                    console.info(`[vrcc] ${event} event subscribed`);
+                })
+                .catch((error) => {
+                    console.error(
+                        `[vrcc] subscribe ${event} event failed:`,
+                        error
+                    );
                 });
-            })
-            .then((off) => {
-                if (disposed) {
-                    // 订阅回来时组件已经卸载：立刻退订，别留下悬空监听。
-                    off();
-                    return;
+        };
+
+        subscribe(VRCC_NOTICES_CHANGED_EVENT, () => {
+            // 收到后端信号说明有新提醒或未读数变了，这里拉一次列表。
+            // 这行日志用于区分「事件没到」和「事件到了但刷新失败」，
+            // 是排查「后台弹了通知但界面没变」的第一现场。
+            console.info('[vrcc] notices changed event received');
+            // 后台发现的提醒不标记已读：玩家还没看到，替他标记是错的。
+            refreshRecent(false).catch((error) => {
+                if (disposed) return;
+                if (
+                    error instanceof VrccError &&
+                    error.kind === 'needsReauth'
+                ) {
+                    reportError(error, 'poll');
                 }
-                unsubscribe = off;
-                console.info('[vrcc] notices changed event subscribed');
-            })
-            .catch((error) => {
-                console.error('[vrcc] subscribe notices event failed:', error);
             });
+            // 后台刚问过未读数，读它留下的就行。
+            refreshUnread(false).catch((error) => {
+                console.error('[vrcc] refreshUnread failed:', error);
+            });
+        });
+        subscribe(VRCC_CONNECTION_CHANGED_EVENT, () => {
+            console.info('[vrcc] connection changed event received');
+            refreshConnection().catch((error) => {
+                if (!disposed) reportError(error, 'refreshConnection');
+            });
+        });
 
         return () => {
             disposed = true;
-            unsubscribe?.();
-            console.info('[vrcc] notices changed event unsubscribed');
+            for (const off of unsubscribers) off();
+            console.info('[vrcc] events unsubscribed');
         };
-    }, [state.connection?.connected, refreshRecent, reportError]);
+    }, [
+        state.connection?.connected,
+        refreshConnection,
+        refreshRecent,
+        refreshUnread,
+        reportError
+    ]);
 
     /**
      * 切页签。
@@ -385,6 +531,34 @@ export function useVrccController() {
             reportError,
             state.connection?.connected
         ]
+    );
+
+    /** 切换地图榜的排序。刚看过的直接用手上的，不再请求。 */
+    const setBoardSort = useCallback(
+        (sort: VrccBoardSort) => {
+            refreshBoards(sort, true).catch((error) => {
+                reportError(error, 'refreshBoards');
+            });
+        },
+        [refreshBoards, reportError]
+    );
+
+    /**
+     * 「提醒」页签里切换「最近的提醒 / 通知中心」。
+     *
+     * 通知中心每次切过来都拉一次：它不标已读、玩家在网页上看过会变，而它算
+     * 每天 1000 次的第二份读，只在玩家真的要看时才花。
+     */
+    const setNotificationsView = useCallback(
+        (view: VrccNotificationsView) => {
+            patch({ notificationsView: view });
+            if (view === 'notes' && state.connection?.connected) {
+                refreshNotes().catch((error) => {
+                    reportError(error, 'refreshNotes');
+                });
+            }
+        },
+        [patch, refreshNotes, reportError, state.connection?.connected]
     );
 
     /** 开始设备授权。 */
@@ -480,7 +654,12 @@ export function useVrccController() {
         patch({ error: null });
         try {
             await vrccApi.disconnect();
-            patch({ deviceAuth: null, recent: null });
+            patch({
+                deviceAuth: null,
+                recent: null,
+                unread: null,
+                notes: null
+            });
             await refreshConnection();
         } catch (error) {
             reportError(error, 'disconnect');
@@ -515,7 +694,9 @@ export function useVrccController() {
         ...state,
         setTab,
         reload: load,
-        refreshBoards,
+        refreshBoards: () => refreshBoards(boardSortRef.current),
+        setBoardSort,
+        setNotificationsView,
         refreshMyMap,
         refreshMutuals,
         beginDeviceAuth,

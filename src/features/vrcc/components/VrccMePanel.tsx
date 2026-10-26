@@ -15,10 +15,11 @@ import type {
 const SITE = 'https://vrcc.cc';
 
 /**
- * 「我的」页：连接状态、设备授权、本地用量。
+ * 「我的」页：连接状态、设备授权、今日用量。
  *
- * 用量口径是**「本客户端今日已用 N/300」**，不是「剩余」——官方没有查询
- * 剩余额度的接口，服务器按令牌计数，我们看不到那个数。这里只报自己记的数。
+ * 用量口径是「今日已用 N/上限」，不是「剩余」。服务器回过 `RateLimit-*`
+ * （1.11.0 起）就是服务器按这个授权算的准数，否则是本客户端自己记的数；
+ * 说明文字照来源换，不把自己猜的数说成服务器的。
  */
 export function VrccMePanel({
     connection,
@@ -117,6 +118,12 @@ export function VrccMePanel({
                     </div>
                 ) : (
                     <div className="space-y-2">
+                        {/* 令牌被服务器判了失效（`404 gone`）：说清楚为什么断了。 */}
+                        {connection?.expired && (
+                            <p className="text-xs leading-relaxed">
+                                {t('vrcc.me.expired')}
+                            </p>
+                        )}
                         <p className="text-muted-foreground text-xs leading-relaxed">
                             {t('vrcc.me.connect_hint')}
                         </p>
@@ -196,6 +203,14 @@ export function VrccMePanel({
                         used={usage.personalUsedToday}
                         limit={usage.personalDailyLimit}
                     />
+                    {usage.unreadUsedToday != null &&
+                        usage.unreadDailyLimit != null && (
+                            <UsageBar
+                                label={t('vrcc.me.unread_used')}
+                                used={usage.unreadUsedToday}
+                                limit={usage.unreadDailyLimit}
+                            />
+                        )}
                     <UsageBar
                         label={t('vrcc.me.device_code_used')}
                         used={usage.deviceCodeUsedToday}
@@ -207,7 +222,9 @@ export function VrccMePanel({
                         limit={usage.windowLimit}
                     />
                     <p className="text-muted-foreground mt-2 text-[10px] leading-relaxed">
-                        {t('vrcc.me.usage_note')}
+                        {usage.personalFromServer
+                            ? t('vrcc.me.usage_note_server')
+                            : t('vrcc.me.usage_note')}
                     </p>
                 </section>
             )}

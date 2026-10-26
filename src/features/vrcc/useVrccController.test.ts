@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
     usage: vi.fn(),
     boards: vi.fn(),
     status: vi.fn(),
+    announcements: vi.fn(),
+    unread: vi.fn(),
+    notes: vi.fn(),
     recentNotifications: vi.fn(),
     pollNotifications: vi.fn(),
     myMap: vi.fn(),
@@ -48,6 +51,9 @@ vi.mock('@/platform/tauri/bindings', () => ({
         appVrccUsage: mocks.usage,
         appVrccBoards: mocks.boards,
         appVrccStatus: mocks.status,
+        appVrccAnnouncements: mocks.announcements,
+        appVrccUnread: mocks.unread,
+        appVrccNotes: mocks.notes,
         appVrccRecentNotifications: mocks.recentNotifications,
         appVrccPollNotifications: mocks.pollNotifications,
         appVrccMyMap: mocks.myMap,
@@ -74,6 +80,8 @@ import { useVrccController } from './useVrccController';
 
 const connected = {
     connected: true,
+    expired: false,
+    clientIsDev: true,
     star: 77,
     vrcName: 'VRC',
     scope: 'profile maps',
@@ -84,7 +92,10 @@ const connected = {
 
 const usage = {
     personalUsedToday: 7,
-    personalDailyLimit: 300,
+    personalDailyLimit: 1000,
+    personalFromServer: true,
+    unreadUsedToday: 40,
+    unreadDailyLimit: 1500,
     deviceCodeUsedToday: 1,
     deviceCodeDailyLimit: 30,
     windowUsed: 2,
@@ -97,8 +108,19 @@ beforeEach(() => {
     vi.clearAllMocks();
     mocks.connection.mockResolvedValue(connected);
     mocks.usage.mockResolvedValue(usage);
-    mocks.boards.mockResolvedValue({ board: 'maps', min: 5, maps: [], at: 1 });
+    mocks.boards.mockImplementation((_limit: number, sort: string | null) =>
+        Promise.resolve({
+            board: 'maps',
+            sort: sort ?? 'top',
+            min: 1,
+            maps: [],
+            at: 1
+        })
+    );
     mocks.status.mockResolvedValue({ at: 1, state: 'ok' });
+    mocks.announcements.mockResolvedValue({ stop: null, posts: [] });
+    mocks.unread.mockResolvedValue({ inbox: 1, cross: 0, chats: 2, notes: 0 });
+    mocks.notes.mockResolvedValue({ notes: [] });
     mocks.recentNotifications.mockResolvedValue({ items: [], read: 0 });
     mocks.pollNotifications.mockResolvedValue({
         last: 1,
@@ -125,7 +147,7 @@ describe('useVrccController', () => {
         expect(result.current.connection?.connected).toBe(true);
         // 用量必须是后端给的真值：写死的 0 会被这条抓住。
         expect(result.current.usage?.personalUsedToday).toBe(7);
-        expect(result.current.usage?.personalDailyLimit).toBe(300);
+        expect(result.current.usage?.personalDailyLimit).toBe(1000);
     });
 
     it('打开「提醒」页签时用 mark=true 同步账号已读', async () => {
@@ -174,25 +196,149 @@ describe('useVrccController', () => {
     });
 
     it('后端推来「提醒有变化」时刷新列表，且不标记已读', async () => {
-        let fire: (() => void) | null = null;
+        const handlers: Record<string, () => void> = {};
         mocks.subscribeNotices.mockImplementation(
-            (_event: string, handler: () => void) => {
-                fire = handler;
+            (event: string, handler: () => void) => {
+                handlers[event] = handler;
                 return Promise.resolve(() => {});
             }
         );
 
         const { result } = renderHook(() => useVrccController());
         await waitFor(() => expect(result.current.loading).toBe(false));
-        await waitFor(() => expect(fire).not.toBeNull());
+        await waitFor(() => expect(handlers.vrccNoticesChanged).toBeDefined());
 
         mocks.recentNotifications.mockClear();
-        act(() => fire?.());
+        mocks.unread.mockClear();
+        act(() => handlers.vrccNoticesChanged());
 
         // 后台发现的提醒不能替玩家标记已读。
         await waitFor(() =>
             expect(mocks.recentNotifications).toHaveBeenCalledWith(false)
         );
+        // 未读数读后台刚问过的缓存，不再花一次 me/unread。
+        expect(mocks.unread).toHaveBeenCalledWith(false);
+    });
+
+    it('后端说连接失效时重读连接状态', async () => {
+        const handlers: Record<string, () => void> = {};
+        mocks.subscribeNotices.mockImplementation(
+            (event: string, handler: () => void) => {
+                handlers[event] = handler;
+                return Promise.resolve(() => {});
+            }
+        );
+
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        await waitFor(() =>
+            expect(handlers.vrccConnectionChanged).toBeDefined()
+        );
+
+        mocks.connection.mockResolvedValue({
+            ...connected,
+            connected: false,
+            expired: true
+        });
+        act(() => handlers.vrccConnectionChanged());
+
+        await waitFor(() =>
+            expect(result.current.connection?.connected).toBe(false)
+        );
+        expect(result.current.connection?.expired).toBe(true);
+    });
+
+    it('请求报令牌失效时也重读连接状态，界面不再挂着「已连接」', async () => {
+        const consoleSpy = vi
+            .spyOn(console, 'error')
+            .mockImplementation(() => {});
+        mocks.classifyError.mockResolvedValue('needsReauth');
+        mocks.myMap.mockRejectedValue(
+            new Error('星遇同频接口返回 HTTP 404（gone）')
+        );
+        mocks.connection.mockResolvedValueOnce(connected).mockResolvedValue({
+            ...connected,
+            connected: false,
+            expired: true
+        });
+
+        const { result } = renderHook(() => useVrccController());
+
+        await waitFor(() =>
+            expect(result.current.connection?.expired).toBe(true)
+        );
+        expect(result.current.error?.kind).toBe('needsReauth');
+        consoleSpy.mockRestore();
+    });
+
+    it('连上后拉一次未读数（发请求）', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.unread).not.toBeNull());
+        expect(mocks.unread).toHaveBeenCalledWith(true);
+        expect(result.current.unread?.chats).toBe(2);
+    });
+
+    it('服务器还没有新接口时安静地不显示', async () => {
+        mocks.unread.mockResolvedValue(null);
+        mocks.announcements.mockResolvedValue(null);
+        mocks.notes.mockResolvedValue(null);
+
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        await waitFor(() => expect(mocks.unread).toHaveBeenCalled());
+
+        act(() => result.current.setNotificationsView('notes'));
+        await waitFor(() => expect(result.current.notesSupported).toBe(false));
+        expect(result.current.unread).toBeNull();
+        expect(result.current.announcements).toBeNull();
+        expect(result.current.error).toBeNull();
+        expect(mocks.toastAdd).not.toHaveBeenCalled();
+    });
+
+    it('切到「通知」才拉通知中心', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        expect(mocks.notes).not.toHaveBeenCalled();
+
+        act(() => result.current.setNotificationsView('notes'));
+        await waitFor(() => expect(mocks.notes).toHaveBeenCalledTimes(1));
+        expect(result.current.notificationsView).toBe('notes');
+        await waitFor(() => expect(result.current.notesSupported).toBe(true));
+    });
+
+    it('切换地图榜排序', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+        expect(mocks.boards).toHaveBeenCalledWith(20, 'top');
+
+        act(() => result.current.setBoardSort('week'));
+        await waitFor(() => expect(result.current.boardSort).toBe('week'));
+        expect(mocks.boards).toHaveBeenCalledWith(20, 'week');
+        expect(result.current.boardSortSupported).toBe(true);
+
+        // 一分钟内切回总榜，直接用手上的，不再请求。
+        mocks.boards.mockClear();
+        act(() => result.current.setBoardSort('top'));
+        await waitFor(() => expect(result.current.boardSort).toBe('top'));
+        expect(mocks.boards).not.toHaveBeenCalled();
+    });
+
+    it('服务器不认 sort 时退回总榜并藏起切换', async () => {
+        // 旧服务器：不管要什么都回总榜，回答里没有 sort。
+        mocks.boards.mockResolvedValue({
+            board: 'maps',
+            min: 1,
+            maps: [],
+            at: 1
+        });
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+
+        act(() => result.current.setBoardSort('week'));
+        await waitFor(() =>
+            expect(result.current.boardSortSupported).toBe(false)
+        );
+        expect(result.current.boardSort).toBe('top');
     });
 
     it('地图被隐藏时后端返回 null，页面不显示卡片', async () => {
@@ -212,11 +358,10 @@ describe('useVrccController', () => {
             avg: 9.2,
             raters: 18,
             mine: 9,
-            can: true,
-            need: null,
             words: null,
             wordsOk: null,
-            img: null
+            img: null,
+            imgUrl: null
         });
         const { result } = renderHook(() => useVrccController());
         await waitFor(() => expect(result.current.loading).toBe(false));

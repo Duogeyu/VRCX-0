@@ -11,8 +11,8 @@
 use tauri::State;
 use vrcx_0_application::vrcc::{VrccDeviceAuthPrompt, VrccDeviceAuthStep, VrccErrorKind};
 use vrcx_0_contracts::vrcc::{
-    VrccBoard, VrccConnectionSnapshot, VrccRecentNotifications, VrccStatus, VrccToday,
-    VrccUsageSnapshot,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccNotes,
+    VrccRecentNotifications, VrccStatus, VrccToday, VrccUnread, VrccUsageSnapshot,
 };
 use vrcx_0_runtime_host_desktop::notification::DesktopNotificationAction;
 
@@ -116,31 +116,51 @@ impl From<VrccErrorKind> for VrccErrorKindOutput {
 /// 早先这里漏了 `scope` 系列，于是一个必然失败的 `mutuals`（`dev-` 标识拿不到
 /// 敏感权限）被判成 `Other`，前端走了全局错误路径，渲染成整页红色横幅，
 /// 看起来像连接坏了。
+///
+/// 错误码按整个码比，不按子串：`VrccError::Api` 的文案是
+/// `星遇同频接口返回 HTTP 404（gone）`，括号里就是官方的码。原来用
+/// `contains("gone")`，`star_gone`（对方不在了）、`map_gone`、`yq_gone` 也会被
+/// 当成令牌失效，界面让玩家去重新连接，其实令牌好好的。
 #[tauri::command(async)]
 #[specta::specta]
 pub fn app__vrcc_classify_error(message: String) -> VrccErrorKindOutput {
     let lowered = message.to_ascii_lowercase();
+    let code = error_code(&lowered);
     // `scope` 必须排在 `client_*` 前面：`scope_unreviewed` 里不含这些前缀，
     // 但把顺序写死能防止以后再加关键字时误伤。
     if lowered.contains("scope") {
         return VrccErrorKindOutput::MissingScope;
     }
-    if lowered.contains("gone")
-        || lowered.contains("client_mismatch")
-        || lowered.contains("client_unknown")
-        || lowered.contains("client_off")
-        || lowered.contains("token 缺失")
+    if matches!(
+        code,
+        Some("gone" | "client_mismatch" | "client_unknown" | "client_off" | "client_missing")
+    ) || lowered.contains("token 缺失")
     {
         return VrccErrorKindOutput::NeedsReauth;
     }
-    if lowered.contains("限流") || lowered.contains("额度") || lowered.contains("too_many") {
+    if lowered.contains("限流")
+        || lowered.contains("额度")
+        || lowered.contains("太快")
+        || lowered.contains("too_many")
+        || lowered.contains("too_soon")
+    {
         return VrccErrorKindOutput::Throttled;
     }
-    if lowered.contains("暂时不可用") || lowered.contains("timeout") || lowered.contains("无法解析")
+    if lowered.contains("暂时不可用")
+        || lowered.contains("停站")
+        || lowered.contains("timeout")
+        || lowered.contains("无法解析")
     {
         return VrccErrorKindOutput::Transport;
     }
     VrccErrorKindOutput::Other
+}
+
+/// 从 `…HTTP 404（gone）` 这样的文案里取出括号中的官方错误码。
+fn error_code(message: &str) -> Option<&str> {
+    let start = message.rfind('（')? + '（'.len_utf8();
+    let end = start + message[start..].find('）')?;
+    Some(message[start..end].trim())
 }
 
 // -- 连接状态 ---------------------------------------------------------------
@@ -151,8 +171,8 @@ pub fn app__vrcc_connection(state: State<'_, AppState>) -> VrccConnectionSnapsho
     state.runtime_host().vrcc().connection()
 }
 
-/// 本地用量。口径是「本客户端今日已用 N/300」，不是「剩余」——
-/// 服务器按令牌算额度，我们看不见那个数字。
+/// 今日用量。口径是「今日已用 N/上限」，不是「剩余」。服务器回过
+/// `RateLimit-*` 就是服务器的数，否则是本客户端自己记的（`personalFromServer`）。
 #[tauri::command(async)]
 #[specta::specta]
 pub fn app__vrcc_usage(state: State<'_, AppState>) -> VrccUsageSnapshot {
@@ -161,17 +181,35 @@ pub fn app__vrcc_usage(state: State<'_, AppState>) -> VrccUsageSnapshot {
 
 // -- 开放数据 ---------------------------------------------------------------
 
-/// 地图榜。不需要连接。
+/// 地图榜。不需要连接。`sort` 传 `null` 是总榜。
+///
+/// 要的是本周榜或新上榜、回答里却没有 `sort` 时，说明服务器还不支持，
+/// 回的是总榜。
 #[tauri::command]
 #[specta::specta]
 pub async fn app__vrcc_boards(
     state: State<'_, AppState>,
     limit: u32,
+    sort: Option<VrccBoardSort>,
 ) -> Result<VrccBoard, AppError> {
     state
         .runtime_host()
         .vrcc()
-        .boards(limit)
+        .boards(limit, sort.unwrap_or_default())
+        .await
+        .map_err(AppError::Custom)
+}
+
+/// 公告和停站。不需要连接。服务器还没有这个接口时返回 `null`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_announcements(
+    state: State<'_, AppState>,
+) -> Result<Option<VrccAnnouncements>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .announcements()
         .await
         .map_err(AppError::Custom)
 }
@@ -259,6 +297,36 @@ pub async fn app__vrcc_recent_notifications(
         .runtime_host()
         .vrcc()
         .recent_notifications(mark)
+        .await
+        .map_err(AppError::Custom)
+}
+
+/// 几处未读数（连向我、星轨相交、私聊、通知）。
+///
+/// `refresh` 为 `false` 时只读后台轮询的缓存、不发请求——收到
+/// `vrccNoticesChanged` 时用这个。服务器还没有 `me/unread` 时返回 `null`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_unread(
+    state: State<'_, AppState>,
+    refresh: bool,
+) -> Result<Option<VrccUnread>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .unread(refresh)
+        .await
+        .map_err(AppError::Custom)
+}
+
+/// 通知中心。读了不标已读。服务器还没有 `me/notes` 时返回 `null`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_notes(state: State<'_, AppState>) -> Result<Option<VrccNotes>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .notes()
         .await
         .map_err(AppError::Custom)
 }
@@ -395,6 +463,65 @@ mod tests {
             app__vrcc_classify_error(message.to_string()),
             VrccErrorKindOutput::MissingScope
         );
+    }
+
+    /// 只有令牌本身的 `gone` 才要重新连接。
+    ///
+    /// `star_gone`（连线、私聊的对方不在了）、`map_gone` / `yq_gone`（那条短评、
+    /// 动态不在了）、1.9.0 起签名图片失效的 `expired`、1.11.0 起的 `405 method`，
+    /// 令牌都没事。
+    #[test]
+    fn only_the_token_gone_code_asks_for_reconnect() {
+        for message in [
+            "星遇同频接口返回 HTTP 404（star_gone）",
+            "星遇同频接口返回 HTTP 404（map_gone）",
+            "星遇同频接口返回 HTTP 404（yq_gone）",
+            "星遇同频接口返回 HTTP 404（expired）",
+            "星遇同频接口返回 HTTP 405（method）",
+            "星遇同频接口返回 HTTP 404（not_found）",
+        ] {
+            assert_ne!(
+                app__vrcc_classify_error(message.to_string()),
+                VrccErrorKindOutput::NeedsReauth,
+                "should not ask to reconnect: {message}"
+            );
+        }
+        assert_eq!(
+            app__vrcc_classify_error(
+                "Tauri command failed: app__vrcc_today: 星遇同频接口返回 HTTP 404（gone）"
+                    .to_string()
+            ),
+            VrccErrorKindOutput::NeedsReauth
+        );
+        assert_eq!(
+            app__vrcc_classify_error("星遇同频接口返回 HTTP 403（client_missing）".to_string()),
+            VrccErrorKindOutput::NeedsReauth
+        );
+    }
+
+    #[test]
+    fn too_soon_and_stop_are_passing_problems() {
+        assert_eq!(
+            app__vrcc_classify_error("星遇同频轮询太快，7 秒后再问".to_string()),
+            VrccErrorKindOutput::Throttled
+        );
+        assert_eq!(
+            app__vrcc_classify_error("星遇同频停站维护中：升级数据库".to_string()),
+            VrccErrorKindOutput::Transport
+        );
+        assert_eq!(
+            app__vrcc_classify_error(
+                "星遇同频额度已用尽：too_many，今天的次数用完了，约 5 小时后恢复".to_string()
+            ),
+            VrccErrorKindOutput::Throttled
+        );
+    }
+
+    #[test]
+    fn error_code_is_read_from_the_brackets() {
+        assert_eq!(error_code("http 404（gone）"), Some("gone"));
+        assert_eq!(error_code("x（a）y（star_gone）"), Some("star_gone"));
+        assert_eq!(error_code("no brackets"), None);
     }
 
     #[test]

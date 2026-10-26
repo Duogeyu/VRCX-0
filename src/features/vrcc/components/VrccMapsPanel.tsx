@@ -1,10 +1,22 @@
 import { ExternalLink, RefreshCw } from 'lucide-react';
+import { Fragment } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/ui/shadcn/button';
 import { Spinner } from '@/ui/shadcn/spinner';
+import {
+    ToggleGroup,
+    ToggleGroupItem,
+    ToggleGroupSeparator
+} from '@/ui/shadcn/toggle-group';
 
-import type { VrccBoard } from '../vrccApi';
+import type { VrccBoard, VrccBoardSort } from '../vrccApi';
+
+const SORTS: readonly VrccBoardSort[] = ['top', 'week', 'new'];
+
+function isBoardSort(value: unknown): value is VrccBoardSort {
+    return SORTS.includes(value as VrccBoardSort);
+}
 
 const SITE = 'https://vrcc.cc';
 
@@ -13,13 +25,22 @@ const SITE = 'https://vrcc.cc';
  *
  * 密度取向：一行一张图，名次 + 名字 + 作者 + 均分 + 评分人数，全部单行，
  * 靠右对齐数字；悬停才出现外链，静止时不留视觉噪声。
+ *
+ * 排序（1.13.0 起）：总榜、本周、新上榜，和网页地图榜一样。服务器还不认
+ * `sort` 时（`sortSupported` 为 false）不显示切换。
  */
 export function VrccMapsPanel({
     boards,
+    sort,
+    sortSupported,
+    onSortChange,
     onRefresh,
     onOpenWorld
 }: {
     boards: VrccBoard | null;
+    sort: VrccBoardSort;
+    sortSupported: boolean;
+    onSortChange: (sort: VrccBoardSort) => void;
     onRefresh: () => void;
     /** 点一行时打开 VRCX-0 自己的世界详情窗，不跳网页。 */
     onOpenWorld: (worldId: string) => void;
@@ -31,7 +52,32 @@ export function VrccMapsPanel({
     return (
         <div className="flex h-full min-h-0 flex-col">
             <div className="text-muted-foreground flex shrink-0 items-center gap-2 px-1 pb-2 text-xs">
-                <span>{t('vrcc.maps.hint', { min })}</span>
+                {sortSupported && (
+                    <ToggleGroup
+                        variant="outline"
+                        size="sm"
+                        value={[sort]}
+                        onValueChange={(next) => {
+                            const value = next[0];
+                            if (isBoardSort(value)) onSortChange(value);
+                        }}
+                    >
+                        {SORTS.map((value, index) => (
+                            <Fragment key={value}>
+                                {index > 0 ? <ToggleGroupSeparator /> : null}
+                                <ToggleGroupItem
+                                    value={value}
+                                    className="text-xs"
+                                >
+                                    {t(`vrcc.maps.sort.${value}`)}
+                                </ToggleGroupItem>
+                            </Fragment>
+                        ))}
+                    </ToggleGroup>
+                )}
+                <span className="min-w-0 truncate">
+                    {t('vrcc.maps.hint', { min })}
+                </span>
                 <Button
                     variant="ghost"
                     size="icon"
@@ -96,7 +142,12 @@ export function VrccMapsPanel({
                                                 : '—'}
                                         </div>
                                         <div className="text-muted-foreground text-[10px] tabular-nums">
-                                            {map.raters ?? 0}
+                                            {/* 本周榜显示本周几人打分，和网页上的「本周 N」一样。 */}
+                                            {sort === 'week' && map.week != null
+                                                ? t('vrcc.maps.week_count', {
+                                                      count: map.week
+                                                  })
+                                                : (map.raters ?? 0)}
                                         </div>
                                     </div>
                                 </button>

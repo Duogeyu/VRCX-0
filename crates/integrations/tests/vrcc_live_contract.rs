@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use vrcx_0_contracts::vrcc::VrccBoardSort;
 use vrcx_0_integrations::vrcc::VrccClient;
 
 /// 建一个没有令牌的客户端。公开数据端点的 `authed = false`，用不到它。
@@ -50,7 +51,7 @@ macro_rules! skip_if_offline {
 
 #[tokio::test]
 async fn boards_live_response_parses_into_the_contract() {
-    let boards = skip_if_offline!(client().boards(3).await);
+    let boards = skip_if_offline!(client().boards(3, VrccBoardSort::Top).await);
 
     assert_eq!(boards.board.as_deref(), Some("maps"));
     // 至少能拿到条目；空榜单也算合法，所以不强求非空。
@@ -88,7 +89,7 @@ async fn boards_live_response_parses_into_the_contract() {
 
 #[tokio::test]
 async fn boards_limit_is_honoured() {
-    let boards = skip_if_offline!(client().boards(2).await);
+    let boards = skip_if_offline!(client().boards(2, VrccBoardSort::Top).await);
     // 请求 2 条，线上不应回超过 2 条（榜单可能不足 2 条，所以用 <=）。
     assert!(
         boards.maps.len() <= 2,

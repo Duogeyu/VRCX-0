@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use vrcx_0_contracts::vrcc::VrccBoardMap;
+use vrcx_0_contracts::vrcc::{VrccBoardMap, VrccUnread};
 
 /// 内存令牌仓库。
 #[derive(Default)]
@@ -60,14 +60,121 @@ fn new_without_stored_token_is_disconnected() {
 
 #[test]
 fn usage_reports_used_not_remaining() {
-    // 口径要求：只说「本客户端今日已用 N/300」，不说「还剩」。
+    // 口径要求：只说「今日已用 N/上限」，不说「还剩」。
     let service = VrccService::new(Arc::new(MemoryStore::default()), "dev-test");
     let usage = service.usage();
-    assert_eq!(usage.personal_daily_limit, 300);
+    // 1.8.4 起第一份读是每个授权每天 1000 次。
+    assert_eq!(usage.personal_daily_limit, 1000);
     assert_eq!(usage.device_code_daily_limit, 30);
     assert_eq!(usage.window_limit, 120);
     assert!(!usage.date.is_empty());
-    // 结构里没有 "remaining" 这类字段，是刻意的。
+    // 还没拿到过服务器的 `RateLimit-*`：本地数，未读数那一份不显示。
+    assert!(!usage.personal_from_server);
+    assert_eq!(usage.unread_used_today, None);
+    assert_eq!(usage.unread_daily_limit, None);
+}
+
+#[test]
+fn a_gone_token_is_dropped_and_remembered_as_expired() {
+    let store = MemoryStore::with(StoredCredential {
+        token: "tok".into(),
+        star: Some(77),
+        vrc_name: None,
+        scope: Some("profile notifications maps".into()),
+    });
+    let service = VrccService::new(store.clone(), "dev-test");
+    service.note_unread(&VrccUnread {
+        inbox: 2,
+        ..Default::default()
+    });
+
+    let error = service.settle(VrccError::Api {
+        status: 404,
+        error: "gone".into(),
+        need: None,
+        why: None,
+    });
+    assert!(error.is_gone());
+
+    let snapshot = service.snapshot();
+    assert!(!snapshot.connected);
+    assert!(snapshot.expired, "界面要能说出是失效，不是玩家自己断开的");
+    // 本地存的令牌也清掉了，重启后不会拿着死令牌再问。
+    assert!(store.load().unwrap().is_none());
+    // 未读数不再属于任何人。
+    assert!(service.cached_unread().is_none());
+    assert_eq!(
+        service.wrist_summary(None).map(|summary| summary.unread),
+        Some(0)
+    );
+}
+
+#[test]
+fn other_404s_leave_the_token_alone() {
+    // `star_gone`（对方不在了）、`expired`（签名图片失效）、`not_found`（旧服务器
+    // 没有这个接口）都不是令牌的事。
+    for code in ["star_gone", "expired", "not_found"] {
+        let store = MemoryStore::with(StoredCredential {
+            token: "tok".into(),
+            ..Default::default()
+        });
+        let service = VrccService::new(store.clone(), "dev-test");
+        service.settle(VrccError::Api {
+            status: 404,
+            error: code.into(),
+            need: None,
+            why: None,
+        });
+        assert!(service.snapshot().connected, "{code}");
+        assert!(!service.snapshot().expired, "{code}");
+        assert!(store.load().unwrap().is_some(), "{code}");
+    }
+}
+
+#[test]
+fn wrist_prefers_the_unread_counts_over_recent() {
+    let service = VrccService::new(Arc::new(MemoryStore::default()), "dev-test");
+    // 旧服务器：只有「最近的提醒」的未读条数。
+    service.note_recent(2);
+    assert_eq!(service.wrist_summary(None).unwrap().unread, 2);
+
+    // 有了 `me/unread`：腕表显示几处红点的合计。
+    let counts = VrccUnread {
+        inbox: 1,
+        cross: 1,
+        chats: 2,
+        notes: 3,
+    };
+    assert!(service.note_unread(&counts), "第一次拿到算变化");
+    assert_eq!(service.wrist_summary(None).unwrap().unread, 7);
+    // 之后「最近的提醒」不再覆盖它。
+    service.note_recent(0);
+    assert_eq!(service.wrist_summary(None).unwrap().unread, 7);
+    // 一样的数不算变化，后台就不必通知前端。
+    assert!(!service.note_unread(&counts));
+    assert_eq!(service.cached_unread(), Some(counts));
+}
+
+#[test]
+fn stop_is_classified_as_a_passing_problem() {
+    let paused = VrccError::Paused {
+        say: Some("维护".into()),
+        until: None,
+    };
+    assert_eq!(classify_vrcc_error(&paused).0, VrccErrorKind::Transport);
+}
+
+#[tokio::test]
+async fn unread_and_notes_require_connection() {
+    let service = VrccService::new(Arc::new(MemoryStore::default()), "dev-test");
+    assert!(matches!(
+        service.refresh_unread().await.unwrap_err(),
+        VrccError::TokenMissing
+    ));
+    assert!(matches!(
+        service.notes().await.unwrap_err(),
+        VrccError::TokenMissing
+    ));
 }
 
 #[test]
@@ -95,6 +202,7 @@ fn wrist_summary_reports_map_rank_from_board_cache() {
     // 直接喂一份榜单，模拟页面拉过地图榜。
     let board = VrccBoard {
         board: Some("maps".into()),
+        sort: None,
         min: Some(5),
         maps: vec![
             VrccBoardMap {

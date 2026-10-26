@@ -68,6 +68,9 @@ export function VrccMutualsPanel({
                     // 没有 vrcUser 说明对方没公开「已验证」，就无法打开玩家页。
                     // 这时只显示名字，不给一个点了没反应的按钮。
                     const canOpen = userId.startsWith('usr_');
+                    // 我给 TA 的分（1.12.0 起）：0–5，半颗星一档，0 是没打；
+                    // 连上当天和旧服务器都没有。
+                    const mine = star.rate?.mine ?? 0;
                     return (
                         <li
                             key={star.n}
@@ -84,6 +87,14 @@ export function VrccMutualsPanel({
                                     {star.vrc ?? '—'}
                                 </div>
                             </div>
+                            {mine > 0 && (
+                                <span
+                                    className="text-muted-foreground shrink-0 text-xs tabular-nums"
+                                    title={t('vrcc.mutuals.rate_mine')}
+                                >
+                                    ★ {mine}
+                                </span>
+                            )}
                             {canOpen && (
                                 <Button
                                     variant="ghost"

@@ -1,17 +1,19 @@
 //! 客户端侧的频率与配额控制。
 //!
-//! 官方《频率限制》表格里对我们有效的几条：
+//! 官方《频率限制》表格里对我们有效的几条（开放接口 1.14.0）：
 //!
 //! | 范围 | 限制 |
 //! | --- | --- |
 //! | 每个网络地址（总计） | 每分钟约 120 次 |
-//! | 轮询提醒 `/me/notifications` | 两次之间至少 25 秒，建议按返回的 `every`（60 秒） |
-//! | 最近提醒 / 星轨 / 互相连上 / 所在图 / 我打过的图 | 合计每颗星每天 300 次 |
+//! | 轮询提醒 `/me/notifications` | 两次之间至少 25 秒，建议按返回的 `every`（60 秒）；**没有每天上限** |
+//! | 第一份读：最近提醒 / 星轨 / 互相连上 / 所在图 / 我打过的图 | 每个授权每天 1000 次（1.8.4 起，原来 300） |
+//! | 第二份读：今天的星 / 通知中心 / … | 每个授权每天 1000 次，和第一份分开算 |
+//! | 未读数 `/me/unread` | 每个授权每天 1500 次，单独算 |
 //! | 设备授权拿码 `/device/code` | 每网络地址每天 30 个 |
 //!
-//! 这些都要在本地先扣，宁可少问也不越界。注意「300 次」的计数是**按令牌**
-//! 在服务器侧算的，我们在本地记的只是本客户端这一份，所以对外只能说
-//! 「本客户端今日已用 N 次」，不能说「还剩 N 次」。
+//! 1.11.0 起，带每天次数的接口回答 `RateLimit-Limit` / `RateLimit-Remaining`
+//! / `RateLimit-Reset`；1.9.0 起所有 `429` 都带 `Retry-After`。服务器给了就以
+//! 服务器为准（见 `client.rs`），这里的本地计数只在旧服务器没给头时兜底。
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -21,16 +23,21 @@ use std::time::{Duration, Instant};
 pub const WINDOW_LIMIT: usize = 120;
 /// 限流窗口长度。
 pub const WINDOW: Duration = Duration::from_secs(60);
-/// 个人接口每日合计上限。
-pub const PERSONAL_DAILY_LIMIT: i64 = 300;
+/// 「第一份读」每个授权每天的上限（1.8.4 起从每颗星 300 次改成每个授权 1000 次）。
+///
+/// 只是服务器没给 `RateLimit-Limit` 时的兜底；给了就用服务器的。
+pub const PERSONAL_DAILY_LIMIT: i64 = 1000;
 /// 设备授权拿码每日上限。
 pub const DEVICE_CODE_DAILY_LIMIT: i64 = 30;
 /// 轮询提醒的最小间隔（官方硬性要求）。
 pub const NOTIFICATIONS_MIN_GAP: Duration = Duration::from_secs(25);
 
 /// 429 之后的最大退避。
+///
+/// 也是「短等」和「等到明天」的分界：`Retry-After` 比它长的，是某一项每天的
+/// 次数用完了，只停那一项，不让全部接口一起退避（见 `client.rs`）。
 pub const MAX_BACKOFF: Duration = Duration::from_secs(600);
-/// 429 之后的最小退避（官方要求「至少等一分钟」）。
+/// 旧服务器的 429 不带 `Retry-After` 时的最小退避（当时官方写「至少等一分钟」）。
 pub const MIN_BACKOFF: Duration = Duration::from_secs(60);
 
 /// 滑动窗口限流器 + 每接口最小间隔。
@@ -112,23 +119,14 @@ pub fn backoff_for(attempt: u32) -> Duration {
 
 /// 按本地日期滚动的用量计数。
 ///
-/// 只记「已用」，不记「剩余」——服务器侧的额度是按令牌算的，我们看不见。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// 只记「已用」，不记「剩余」。服务器回过 `RateLimit-*` 时，`personal` 会被
+/// 改成服务器的准数（见 [`DailyUsage::set_personal`]）。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyUsage {
     date: String,
     personal: i64,
     device_code: i64,
-}
-
-impl Default for DailyUsage {
-    fn default() -> Self {
-        Self {
-            date: String::new(),
-            personal: 0,
-            device_code: 0,
-        }
-    }
 }
 
 impl DailyUsage {
@@ -180,6 +178,19 @@ impl DailyUsage {
         }
         self.personal += amount;
         true
+    }
+
+    /// 只记账、不拦：服务器已经告诉我们还有余量时用，拦不拦由服务器的数说了算。
+    pub fn add_personal(&mut self, amount: i64) {
+        self.personal = self.personal.saturating_add(amount);
+    }
+
+    /// 用服务器 `RateLimit-*` 算出的已用次数覆盖本地计数。
+    ///
+    /// 服务器按这个授权数，是准数；本地数只是兜底。覆盖之后落盘的也是准数，
+    /// 重启后在拿到下一次响应头之前，显示的不会是自己猜的。
+    pub fn set_personal(&mut self, used: i64) {
+        self.personal = used.max(0);
     }
 
     pub fn can_spend_device_code(&self) -> bool {
@@ -305,13 +316,36 @@ mod tests {
     fn daily_usage_rolls_over_on_new_date() {
         let mut usage = DailyUsage::default();
         assert!(usage.roll_to("2026-10-25"));
-        assert!(usage.spend_personal(299));
-        assert!(!usage.spend_personal(2)); // 300 是上限，超了不给
-        assert_eq!(usage.personal_used(), 299);
+        assert!(usage.spend_personal(PERSONAL_DAILY_LIMIT - 1));
+        assert!(!usage.spend_personal(2)); // 到上限了，超了不给
+        assert_eq!(usage.personal_used(), PERSONAL_DAILY_LIMIT - 1);
         // 跨天清零。
         assert!(usage.roll_to("2026-10-26"));
         assert_eq!(usage.personal_used(), 0);
-        assert!(usage.spend_personal(300));
+        assert!(usage.spend_personal(PERSONAL_DAILY_LIMIT));
+    }
+
+    #[test]
+    fn personal_limit_matches_the_1_8_4_quota() {
+        // 1.8.4 起「第一份读」是每个授权每天 1000 次。还按 300 拦的话，
+        // 本客户端会在服务器还有大半余量时自己停下。
+        assert_eq!(PERSONAL_DAILY_LIMIT, 1000);
+    }
+
+    #[test]
+    fn server_count_overrides_the_local_guess() {
+        let mut usage = DailyUsage::default();
+        usage.roll_to("2026-10-27");
+        assert!(usage.spend_personal(3));
+        // 服务器说这个授权今天已经用了 412 次（别处的会话、重启前的请求都算在内）。
+        usage.set_personal(412);
+        assert_eq!(usage.personal_used(), 412);
+        // 只记账不拦。
+        usage.add_personal(1);
+        assert_eq!(usage.personal_used(), 413);
+        // 负数（服务器头写坏了）不该让计数变负。
+        usage.set_personal(-5);
+        assert_eq!(usage.personal_used(), 0);
     }
 
     #[test]

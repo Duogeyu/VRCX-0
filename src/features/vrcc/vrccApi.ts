@@ -60,10 +60,19 @@ export const vrccApi = {
     connection: () => call(() => commands.appVrccConnection()),
     usage: () => call(() => commands.appVrccUsage()),
 
-    /** 地图榜。不需要连接。 */
-    boards: (limit = 20) => call(() => commands.appVrccBoards(limit)),
+    /**
+     * 地图榜。不需要连接。
+     *
+     * `sort` 是本周榜或新上榜、回答里却没有 `sort` 时，说明服务器还不支持
+     * （回的是总榜），界面要藏起切换，不能把总榜当本周榜显示。
+     */
+    boards: (limit = 20, sort: VrccBoardSort = 'top') =>
+        call(() => commands.appVrccBoards(limit, sort)),
 
     status: () => call(() => commands.appVrccStatus()),
+
+    /** 公告和停站。不需要连接。服务器还没有这个接口时为 null。 */
+    announcements: () => call(() => commands.appVrccAnnouncements()),
 
     /** 第一步设备授权：拿码。`scope` 传 null 用官方默认。 */
     beginDeviceAuth: (scope: string | null = null) =>
@@ -84,6 +93,17 @@ export const vrccApi = {
      */
     recentNotifications: (mark = false) =>
         call(() => commands.appVrccRecentNotifications(mark)),
+
+    /**
+     * 几处未读数（连向我、星轨相交、私聊、通知）。读了不标已读。
+     *
+     * `refresh` 为 false 时只读后台轮询的缓存、不发请求；收到后端「有变化」
+     * 的事件时用它。服务器还没有 `me/unread` 时为 null。
+     */
+    unread: (refresh = true) => call(() => commands.appVrccUnread(refresh)),
+
+    /** 通知中心。读了不标已读。服务器还没有 `me/notes` 时为 null。 */
+    notes: () => call(() => commands.appVrccNotes()),
 
     /** 增量轮询。游标由后端维护。 */
     pollNotifications: () => call(() => commands.appVrccPollNotifications()),
@@ -108,6 +128,10 @@ export const vrccApi = {
 };
 
 export type VrccBoard = Awaited<ReturnType<typeof commands.appVrccBoards>>;
+/** 总榜 / 本周榜 / 新上榜（1.13.0 起）。 */
+export type VrccBoardSort = NonNullable<
+    Parameters<typeof commands.appVrccBoards>[1]
+>;
 /** 榜单里的一行。`maps` 在契约里是可选的，先把 undefined 排掉再取元素类型。 */
 export type VrccBoardMap = NonNullable<VrccBoard['maps']>[number];
 export type VrccConnection = Awaited<
@@ -133,3 +157,14 @@ export type VrccMutualStar = NonNullable<VrccMutuals['stars']>[number];
 export type VrccMyMap = NonNullable<
     Awaited<ReturnType<typeof commands.appVrccMyMap>>
 >;
+export type VrccUnread = NonNullable<
+    Awaited<ReturnType<typeof commands.appVrccUnread>>
+>;
+export type VrccNotes = NonNullable<
+    Awaited<ReturnType<typeof commands.appVrccNotes>>
+>;
+export type VrccNote = NonNullable<VrccNotes['notes']>[number];
+export type VrccAnnouncements = NonNullable<
+    Awaited<ReturnType<typeof commands.appVrccAnnouncements>>
+>;
+export type VrccAnnouncement = NonNullable<VrccAnnouncements['posts']>[number];
