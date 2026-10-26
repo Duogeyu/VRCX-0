@@ -1745,6 +1745,16 @@ impl DesktopRuntimeHostState {
         // 直接把 slot 当 notifier 用：它没挂桥时 `show()` 返回 `Ok(())`，
         // 也就是「没有通知渠道」= 静默不弹，而不是失败。Headless 就是这种情况，
         // 轮询仍然值得跑——未读数与腕表摘要都靠它刷新。
+        // 启动前把关键前提记下来：排查时最先要确认的就是这几件事。
+        let snapshot = self.vrcc.connection();
+        let has_notifier = self.desktop.services.desktop_notifier().is_some();
+        tracing::info!(
+            has_desktop_notifier = has_notifier,
+            token_connected = snapshot.connected,
+            client = %snapshot.client,
+            client_is_dev = snapshot.client_is_dev,
+            "vrcc: starting background poll"
+        );
         let outcome = self.vrcc.spawn_background_poll(
             self.runtime.runtime_tasks(),
             self.desktop.services.notifier_slot(),
@@ -1752,11 +1762,11 @@ impl DesktopRuntimeHostState {
         );
         match outcome {
             vrcx_0_application_core::TaskSpawnOutcome::Scheduled => {
-                tracing::debug!("vrcc: background poll scheduled");
+                tracing::info!("vrcc: background poll scheduled");
             }
             other => {
                 // 任务被拒绝（supervisor 正在停止）不是错误，但要知道。
-                tracing::debug!(?other, "vrcc: background poll not scheduled");
+                tracing::warn!(?other, "vrcc: background poll not scheduled");
             }
         }
     }

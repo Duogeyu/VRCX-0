@@ -320,6 +320,10 @@ export function useVrccController() {
         tauriClient.events
             .subscribe(VRCC_NOTICES_CHANGED_EVENT, () => {
                 if (disposed) return;
+                // 收到后端信号说明有新提醒，这里拉一次列表。
+                // 这行日志用于区分「事件没到」和「事件到了但刷新失败」，
+                // 是排查「后台弹了通知但界面没变」的第一现场。
+                console.info('[vrcc] notices changed event received');
                 // 后台发现的提醒不标记已读：玩家还没看到，替他标记是错的。
                 refreshRecent(false).catch((error) => {
                     if (disposed) return;
@@ -338,6 +342,7 @@ export function useVrccController() {
                     return;
                 }
                 unsubscribe = off;
+                console.info('[vrcc] notices changed event subscribed');
             })
             .catch((error) => {
                 console.error('[vrcc] subscribe notices event failed:', error);
@@ -346,6 +351,7 @@ export function useVrccController() {
         return () => {
             disposed = true;
             unsubscribe?.();
+            console.info('[vrcc] notices changed event unsubscribed');
         };
     }, [state.connection?.connected, refreshRecent, reportError]);
 
