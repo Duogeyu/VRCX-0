@@ -376,6 +376,14 @@ impl VrccService {
         }
     }
 
+    /// 取站点上的静态资源（通知图标之类）。
+    ///
+    /// 不需要连接：那是站点资源，和玩家令牌无关。仍然走客户端，于是复用
+    /// 同一份代理配置与「只和 vrcc.cc 说话」的硬拦。
+    pub async fn fetch_site_asset(&self, path: &str) -> std::result::Result<Vec<u8>, VrccError> {
+        self.client.fetch_site_asset(path).await
+    }
+
     // -- 设备授权 ----------------------------------------------------------
 
     /// 第一步：申请连接码。

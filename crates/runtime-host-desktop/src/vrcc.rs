@@ -1,5 +1,7 @@
 //! 星遇同频运行时：把应用层服务挂到桌面运行时上。
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +12,7 @@ use vrcx_0_contracts::vrcc::{
     VrccRecentNotifications, VrccStatus, VrccToday, VrccUnread, VrccUsageSnapshot,
     VrccWristSummary,
 };
+use vrcx_0_core::OwnerId;
 use vrcx_0_integrations::vrcc::{resolve_client_id, VrccError};
 use vrcx_0_outbound_adapters::LocalVrccTokenStore;
 
@@ -70,6 +73,14 @@ impl DesktopVrccRuntime {
     const BACKGROUND_POLL_BASE: Duration = Duration::from_secs(60);
     /// 抖动上限，避免所有客户端撞在同一秒（官方脚本也这样做）。
     const BACKGROUND_POLL_JITTER: Duration = Duration::from_secs(20);
+
+    /// 星遇企划图标在站点上的路径。
+    ///
+    /// 512×512：Windows toast 会把它缩到 48×48（随 DPI 放大），源图更大
+    /// 降采样后更锐利。
+    pub const NOTICE_ICON_PATH: &str = "/assets/match-icon-512.png";
+    /// 图标缓存文件名，落在应用数据目录。
+    const NOTICE_ICON_FILE: &str = "vrcc-notice-icon.png";
 
     pub fn new(store: LocalVrccTokenStore) -> Self {
         Self::with_client_override(store, None, None)
@@ -255,11 +266,17 @@ impl DesktopVrccRuntime {
     /// `event_sink` 用来告诉前端「有新数据了」或「连接失效了」。前端不再自己
     /// 轮询——双轨会让两边各拉一次、`mark` 语义互相打架，而且隐藏窗口时前端
     /// 定时器会被节流。
+    ///
+    /// 一个任务只服务一个账号：`owner` 是起任务时登录的 VRChat 账号（点通知
+    /// 跳转要知道是哪个账号的会话），`stop` 由宿主在换号、登出时置位，任务
+    /// 下次醒来就自行退出，新账号另起一个任务。
     pub fn spawn_background_poll(
         &self,
         supervisor: &vrcx_0_application_core::TaskSupervisor,
         notifier: Arc<dyn crate::notification::DesktopNotifier>,
         event_sink: Arc<dyn vrcx_0_application_core::RuntimeEventSink>,
+        owner: OwnerId,
+        stop: Arc<AtomicBool>,
     ) -> vrcx_0_application_core::TaskSpawnOutcome {
         let service = Arc::clone(&self.service);
         let base = Self::BACKGROUND_POLL_BASE;
@@ -269,23 +286,35 @@ impl DesktopVrccRuntime {
             let service = Arc::clone(&service);
             let notifier = Arc::clone(&notifier);
             let event_sink = Arc::clone(&event_sink);
+            let owner = owner.clone();
+            let stop = Arc::clone(&stop);
             async move {
+                // 通知图标在轮次之间共享：第一次下载成功后就只用本地文件。
+                let mut notice_icon = NoticeIcon::default();
                 // 启动探针：没有它，分不清「轮询没起来」和「起来了但没数据」。
                 tracing::info!(
                     interval_secs = base.as_secs(),
                     jitter_secs = jitter.as_secs(),
+                    owner = %owner.as_str(),
                     "vrcc: background poll task started"
                 );
                 let mut round: u64 = 0;
                 loop {
+                    // 两个停止信号：应用退出（supervisor 的 token），或者换号、
+                    // 登出（宿主置位的 `stop`）。
                     if stop_token.is_stop_requested() {
                         tracing::info!(round, "vrcc: background poll stop requested");
+                        return;
+                    }
+                    if stop.load(Ordering::Acquire) {
+                        tracing::info!(round, "vrcc: background poll superseded by account change");
                         return;
                     }
                     round = round.wrapping_add(1);
                     // 未连接时不必轮询：个人接口会直接报错。
                     if service.snapshot().connected {
-                        match poll_once(&service, notifier.as_ref()).await {
+                        match poll_once(&service, notifier.as_ref(), &mut notice_icon, &owner).await
+                        {
                             Ok(outcome) => {
                                 // 每一轮都记录结果，但用 debug：正常运行时不该刷屏，
                                 // 排查时打开 RUST_LOG=debug 就有完整时间线。
@@ -385,6 +414,8 @@ impl PollOutcome {
 async fn poll_once(
     service: &VrccService,
     notifier: &dyn crate::notification::DesktopNotifier,
+    icon: &mut NoticeIcon,
+    owner: &OwnerId,
 ) -> Result<PollOutcome, VrccError> {
     let first_poll = service.notifications_cursor().is_none();
     let fresh = match service.poll_notifications().await {
@@ -394,9 +425,16 @@ async fn poll_once(
         Err(error) => return Err(error),
     };
 
+    // 只有真的要弹通知时才去取图标：没有新提醒就不该多一次请求。
+    let icon_path = if fresh.is_empty() {
+        None
+    } else {
+        icon.resolve(service).await
+    };
+
     // 拉取与处理分开：`handle_new_notices` 只接收数据、不看网络，
     // 于是「拿到什么样的数据 → 弹哪些通知」可以脱离服务端直接测。
-    let mut outcome = handle_new_notices(&fresh, notifier);
+    let mut outcome = handle_new_notices(&fresh, notifier, icon_path, Some(owner));
 
     match service.refresh_unread().await {
         Ok(Some((counts, changed))) => {
@@ -422,9 +460,15 @@ async fn poll_once(
 /// 处理一批刚拉到的新提醒：挑出要弹的、交给 notifier。
 ///
 /// 这个函数不发请求也不读时钟，是排查「为什么没弹」时最该被测试覆盖的一段。
+///
+/// `icon` 是通知图标的本地路径（Windows toast 只接受本地文件，不接受 URL），
+/// 传 `None` 也能正常发通知，只是没有图。`owner` 是这个轮询任务所属的账号，
+/// 点通知时据此跳到星遇同频页签。
 fn handle_new_notices(
     items: &[vrcx_0_contracts::vrcc::VrccNotificationItem],
     notifier: &dyn crate::notification::DesktopNotifier,
+    icon: Option<&Path>,
+    owner: Option<&OwnerId>,
 ) -> PollOutcome {
     tracing::debug!(fresh = items.len(), "vrcc: fetched new notices");
 
@@ -442,13 +486,40 @@ fn handle_new_notices(
     }
 
     let mut toast_attempted = 0usize;
+    // `DesktopNotifier` 的 image 参数是字符串（Windows 侧最终当成文件路径用），
+    // 这里把 Path 转一次，转换失败（非 UTF-8 路径）就当作没有图标。
+    let icon_str = icon.and_then(Path::to_str);
     for notice in &selection.notices {
-        match notifier.show(&notice.title, notice.body.as_deref(), None, true, None) {
+        // **带 action 是为了让图标生效**，不只是为了点击跳转。
+        //
+        // `TauriDesktopNotifier::show` 有两条分支：
+        // - action 为 Some → winrt（`Toast::icon(path, …)`，真能带图）
+        // - action 为 None → tauri-plugin-notification，它调的是
+        //   `notify_rust::Notification::icon()`，而那个方法在 Windows 上是
+        //   空操作（Windows 需要的是 `image_path()`）。于是图标会被静默吞掉。
+        //
+        // 拿不到 owner 时退回 None：那时没有可跳转的目标，图标也就跟着没有——
+        // 比弹出一个点了没反应的通知要好。
+        let action = owner.and_then(|owner| {
+            crate::notification::DesktopNotificationAction::open_vrcc(
+                owner,
+                Some(&notice.id.to_string()),
+            )
+        });
+        match notifier.show(
+            &notice.title,
+            notice.body.as_deref(),
+            icon_str,
+            true,
+            action.as_ref(),
+        ) {
             Ok(()) => {
                 // 只记 id 与长度，不记正文：提醒内容属于玩家数据。
                 tracing::info!(
                     notice_id = notice.id,
                     body_len = notice.body.as_deref().map(str::len).unwrap_or(0),
+                    icon = icon_str.is_some(),
+                    actionable = action.is_some(),
                     "vrcc: desktop notification dispatched"
                 );
             }
@@ -484,6 +555,72 @@ fn jitter_millis(jitter: &Duration) -> u64 {
         .map(|elapsed| elapsed.subsec_nanos() as u64)
         .unwrap_or(0);
     now % span
+}
+
+/// 通知图标的本地缓存状态。
+///
+/// **为什么下载而不是打包进仓库**：官方《使用要求》第 17 条把「星遇同频的
+/// 图标」列为不可作为我方品牌使用，它是对方的美术资产。运行时取用并在本地
+/// 缓存不构成再分发；顺带官方换图标时我们也能跟着变。
+///
+/// 失败**不阻断通知**：图标是锦上添花，不是发通知的前置条件。失败后下一轮
+/// 会再试（而不是本会话放弃），因为「启动时正好没网」不该永久失去图标。
+#[derive(Default)]
+struct NoticeIcon {
+    path: Option<PathBuf>,
+}
+
+impl NoticeIcon {
+    /// 拿到图标的本地路径；已缓存则直接返回，不再联网。
+    async fn resolve(&mut self, service: &VrccService) -> Option<&Path> {
+        if self.path.is_none() {
+            self.path = ensure_notice_icon(service).await;
+        }
+        self.path.as_deref()
+    }
+}
+
+/// 确保通知图标已缓存在本地，返回它的路径。
+async fn ensure_notice_icon(service: &VrccService) -> Option<PathBuf> {
+    let dir = vrcx_0_platform::app_paths::default_app_data_dir().ok()?;
+    let target = dir.join(DesktopVrccRuntime::NOTICE_ICON_FILE);
+    if target.is_file() {
+        return Some(target);
+    }
+
+    let bytes = match service
+        .fetch_site_asset(DesktopVrccRuntime::NOTICE_ICON_PATH)
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!(%error, "vrcc: notice icon fetch failed; notifications will have no icon");
+            return None;
+        }
+    };
+    if bytes.is_empty() {
+        tracing::debug!("vrcc: notice icon response was empty");
+        return None;
+    }
+
+    // 先写临时文件再改名：避免下载中断留下半个 PNG —— 那会让后续每一轮
+    // 都认为「已缓存」，却渲染不出图标。
+    let temp = dir.join(format!("{}.tmp", DesktopVrccRuntime::NOTICE_ICON_FILE));
+    if let Err(error) = std::fs::write(&temp, &bytes) {
+        tracing::debug!(%error, "vrcc: notice icon write failed");
+        return None;
+    }
+    if let Err(error) = std::fs::rename(&temp, &target) {
+        let _ = std::fs::remove_file(&temp);
+        tracing::debug!(%error, "vrcc: notice icon rename failed");
+        return None;
+    }
+    tracing::info!(
+        bytes = bytes.len(),
+        path = %target.display(),
+        "vrcc: notice icon cached"
+    );
+    Some(target)
 }
 
 /// 一条准备好投递的通知（已经从契约类型里摘出来，便于测试构造）。
@@ -607,10 +744,18 @@ mod tests {
 
     // -- handle_new_notices：拉取与投递之间的那一段 ----------------------
 
+    /// 一次通知调用里我们关心的部分：标题、正文、图片路径、点击落点。
+    type Shown = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<crate::notification::DesktopNotificationTarget>,
+    );
+
     /// 记录调用的假通知桥。
     #[derive(Default)]
     struct RecordingNotifier {
-        shown: Mutex<Vec<(String, Option<String>)>>,
+        shown: Mutex<Vec<Shown>>,
         fail: bool,
     }
 
@@ -632,36 +777,44 @@ mod tests {
             &self,
             title: &str,
             body: Option<&str>,
-            _image: Option<&str>,
+            image: Option<&str>,
             _play_sound: bool,
-            _action: Option<&crate::notification::DesktopNotificationAction>,
+            action: Option<&crate::notification::DesktopNotificationAction>,
         ) -> Result<(), String> {
             if self.fail {
                 return Err("notifier unavailable".to_string());
             }
-            self.shown
-                .lock()
-                .unwrap()
-                .push((title.to_string(), body.map(str::to_string)));
+            self.shown.lock().unwrap().push((
+                title.to_string(),
+                body.map(str::to_string),
+                image.map(str::to_string),
+                action.map(|action| action.target.clone()),
+            ));
             Ok(())
         }
     }
 
+    const OWNER_USER_ID: &str = "usr_12345678-1234-1234-1234-1234567890ab";
+
     #[test]
     fn handle_notifies_new_notices_and_reports_changed() {
         let notifier = RecordingNotifier::default();
-        let outcome = handle_new_notices(&[item(2, Some("新"), Some("正文"))], &notifier);
+        let outcome =
+            handle_new_notices(&[item(2, Some("新"), Some("正文"))], &notifier, None, None);
         assert_eq!(outcome.fresh, 1);
         assert_eq!(outcome.toast_attempted, 1);
         assert!(outcome.changed);
         let shown = notifier.shown.lock().unwrap().clone();
-        assert_eq!(shown, vec![("新".to_string(), Some("正文".to_string()))]);
+        assert_eq!(
+            shown,
+            vec![("新".to_string(), Some("正文".to_string()), None, None)]
+        );
     }
 
     #[test]
     fn handle_does_nothing_when_nothing_is_new() {
         let notifier = RecordingNotifier::default();
-        let outcome = handle_new_notices(&[], &notifier);
+        let outcome = handle_new_notices(&[], &notifier, None, None);
         assert_eq!(outcome.fresh, 0);
         assert_eq!(outcome.toast_attempted, 0);
         // 「没有变化」很关键：调用方据此决定要不要通知前端刷新。
@@ -673,7 +826,7 @@ mod tests {
     fn handle_still_reports_changed_when_the_notifier_fails() {
         // 通知投递失败不影响「有新提醒」这个事实——界面仍然该刷新。
         let notifier = RecordingNotifier::failing();
-        let outcome = handle_new_notices(&[item(5, None, None)], &notifier);
+        let outcome = handle_new_notices(&[item(5, None, None)], &notifier, None, None);
         assert_eq!(outcome.fresh, 1);
         assert!(outcome.changed);
         // 尝试过一次，但没记成「已展示」。
@@ -686,7 +839,7 @@ mod tests {
         // 上限只影响"弹几次"，不改变"来了几条"。
         let notifier = RecordingNotifier::default();
         let items = (1..=5).map(|id| item(id, None, None)).collect::<Vec<_>>();
-        let outcome = handle_new_notices(&items, &notifier);
+        let outcome = handle_new_notices(&items, &notifier, None, None);
         assert_eq!(outcome.fresh, 5);
         assert_eq!(outcome.toast_attempted, MAX_NOTIFIED_PER_POLL);
         assert_eq!(notifier.count(), MAX_NOTIFIED_PER_POLL);
@@ -703,10 +856,15 @@ mod tests {
     #[test]
     fn a_notice_is_notified_once_across_rounds() {
         let notifier = RecordingNotifier::default();
-        let first = handle_new_notices(&[item(1, Some("提醒"), Some("正文"))], &notifier);
+        let first = handle_new_notices(
+            &[item(1, Some("提醒"), Some("正文"))],
+            &notifier,
+            None,
+            None,
+        );
         assert_eq!(first.toast_attempted, 1);
         // 下一轮服务器只给游标之后的：没有新的。
-        let second = handle_new_notices(&[], &notifier);
+        let second = handle_new_notices(&[], &notifier, None, None);
         assert_eq!(second.toast_attempted, 0);
         assert!(!second.changed);
         assert_eq!(notifier.count(), 1);
@@ -716,15 +874,64 @@ mod tests {
     #[test]
     fn each_round_notifies_only_the_new_arrivals() {
         let notifier = RecordingNotifier::default();
-        handle_new_notices(&[item(1, Some("A"), None)], &notifier);
-        handle_new_notices(&[item(2, Some("B"), None)], &notifier);
+        handle_new_notices(&[item(1, Some("A"), None)], &notifier, None, None);
+        handle_new_notices(&[item(2, Some("B"), None)], &notifier, None, None);
         let shown = notifier.shown.lock().unwrap().clone();
         assert_eq!(
             shown
                 .iter()
-                .map(|(title, _)| title.as_str())
+                .map(|(title, ..)| title.as_str())
                 .collect::<Vec<_>>(),
             vec!["A", "B"]
+        );
+    }
+
+    // -- 通知图标和点击落点 ------------------------------------------------
+
+    #[test]
+    fn passes_the_icon_path_through_to_the_notifier() {
+        // Windows toast 只接受本地文件路径，所以这里传的就是本地缓存路径。
+        let notifier = RecordingNotifier::default();
+        let icon = Path::new(r"C:\Users\someone\AppData\Roaming\VRCX-0\vrcc-notice-icon.png");
+
+        let outcome =
+            handle_new_notices(&[item(1, Some("提醒"), None)], &notifier, Some(icon), None);
+
+        assert_eq!(outcome.toast_attempted, 1);
+        let shown = notifier.shown.lock().unwrap().clone();
+        assert_eq!(shown[0].2.as_deref(), icon.to_str());
+    }
+
+    #[test]
+    fn still_notifies_when_there_is_no_icon() {
+        // 图标是锦上添花：下载失败时通知照发，不能因为没图就不发。
+        let notifier = RecordingNotifier::default();
+        let outcome = handle_new_notices(&[item(1, Some("提醒"), None)], &notifier, None, None);
+
+        assert_eq!(outcome.toast_attempted, 1);
+        let shown = notifier.shown.lock().unwrap().clone();
+        assert_eq!(shown[0].2, None);
+    }
+
+    /// 带上账号时，点通知要落到星遇同频页签，并带着是哪一条提醒。
+    #[test]
+    fn a_signed_in_owner_makes_the_notice_open_the_vrcc_tab() {
+        let notifier = RecordingNotifier::default();
+        let owner = OwnerId::new(OWNER_USER_ID);
+
+        handle_new_notices(
+            &[item(42, Some("提醒"), None)],
+            &notifier,
+            None,
+            Some(&owner),
+        );
+
+        let shown = notifier.shown.lock().unwrap().clone();
+        assert_eq!(
+            shown[0].3,
+            Some(crate::notification::DesktopNotificationTarget::OpenVrcc {
+                notice_id: Some("42".to_string()),
+            })
         );
     }
 
