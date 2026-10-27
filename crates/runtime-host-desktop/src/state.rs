@@ -687,8 +687,19 @@ impl DesktopRuntimeHostState {
             .get_raw(vrcx_0_integrations::vrcc::VRCC_CLIENT_CONFIG_KEY)
             .ok()
             .flatten();
+        // 令牌按账号隔离：闭包每次读写时现取当前登录用户，切号自然生效。
+        let vrcc_owner_scope = runtime.desktop_assembly().auth_scope().clone();
+        let vrcc_owner = Arc::new(move || {
+            let snapshot = vrcc_owner_scope.snapshot();
+            snapshot
+                .active
+                .then(|| vrcx_0_core::OwnerId::new(snapshot.current_user_id))
+        });
         let vrcc = Arc::new(crate::vrcc::DesktopVrccRuntime::with_client_override(
-            vrcx_0_outbound_adapters::LocalVrccTokenStore::new(Arc::clone(runtime.database())),
+            vrcx_0_outbound_adapters::LocalVrccTokenStore::new(
+                Arc::clone(runtime.database()),
+                vrcc_owner,
+            ),
             vrcc_client_override.as_deref(),
             // 用宿主应用统一的代理设置：本机实测 vrcc.cc 直连 DNS 超时，
             // 不接代理时所有接口都会表现为「暂时不可用」。
@@ -1755,10 +1766,21 @@ impl DesktopRuntimeHostState {
             client_is_dev = snapshot.client_is_dev,
             "vrcc: starting background poll"
         );
+        // owner 用闭包按轮次取，而不是在启动时固定：轮询可能在玩家登录前就
+        // 起来了，登录后 owner 才有值。固定成启动时的值会让整段会话都拿不到
+        // owner，进而丢掉通知上的图标与点击跳转。
+        let auth_scope = self.runtime.desktop_assembly().auth_scope().clone();
+        let owner = Arc::new(move || {
+            let snapshot = auth_scope.snapshot();
+            snapshot
+                .active
+                .then(|| vrcx_0_core::OwnerId::new(snapshot.current_user_id))
+        });
         let outcome = self.vrcc.spawn_background_poll(
             self.runtime.runtime_tasks(),
             self.desktop.services.notifier_slot(),
             event_sink,
+            owner,
         );
         match outcome {
             vrcx_0_application_core::TaskSpawnOutcome::Scheduled => {

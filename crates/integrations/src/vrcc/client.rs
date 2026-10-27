@@ -17,7 +17,7 @@ use serde_json::json;
 use vrcx_0_contracts::vrcc::{
     VrccBoard, VrccDeviceCode, VrccErrorBody, VrccMapDetail, VrccMutuals, VrccMyMap,
     VrccNotifications, VrccRecentNotifications, VrccStatus, VrccToday, VrccTokenResponse,
-    VRCC_API_BASE, VRCC_DEFAULT_CLIENT,
+    VRCC_API_BASE, VRCC_DEFAULT_CLIENT, VRCC_SITE_ORIGIN,
 };
 use vrcx_0_core::proxy::with_remote_dns;
 
@@ -511,6 +511,41 @@ impl VrccClient {
             Duration::from_secs(30),
         )
         .await
+    }
+
+    /// 取站点上的一个静态资源（例如星遇企划图标）。
+    ///
+    /// 走 `VRCC_SITE_ORIGIN` 而不是 API 基址：站点资源不在 `/api/v1/` 下。
+    /// 仍然复用同一个 http 客户端，所以**代理设置一致**——否则会出现
+    /// 「接口通、图标取不到」这种看起来像图标坏了、实际是没走代理的情况。
+    ///
+    /// 同样硬拦绝对地址：这个客户端的承诺是「只和 vrcc.cc 说话」，
+    /// 不能因为多了一个取图方法就开个口子把令牌或请求发到别处去。
+    ///
+    /// 不计入个人接口的日配额：那不是带令牌的 API 调用，服务端也不按令牌算。
+    pub async fn fetch_site_asset(&self, path: &str) -> Result<Vec<u8>, VrccError> {
+        Self::validate_path(path)?;
+        let url = format!("{VRCC_SITE_ORIGIN}{path}");
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| VrccError::Transport(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(VrccError::Api {
+                status: status.as_u16(),
+                error: "asset".to_string(),
+                need: None,
+                why: None,
+            });
+        }
+        response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| VrccError::Transport(error.to_string()))
     }
 
     /// 单张地图详情。未上榜或未过审返回 `404 not_found`。
