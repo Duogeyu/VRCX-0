@@ -423,8 +423,12 @@ fn vrcc_summary_reaches_wrist_footer() {
         captured_at_ms: 42,
     });
 
-    // 未读 3 条 + 当前图第 7 名、均分 9.2
-    assert_eq!(model.footer.left, "●3 · #7 9.2");
+    // 未读 3 条 + 当前图第 7 名、均分 9.2。
+    //
+    // 文案经 `localizer` 渲染。原来这里是 `format!("●{}")` /
+    // `format!("#{rank}{avg}")`：玩家看不懂「●3 · #7 9.2」是什么，
+    // 而且不跟随界面语言。
+    assert_eq!(model.footer.left, "未读 3 · 本图第 7 名 · 均分 9.2");
     // 未读数 + 排名没有挤掉 footer 的其它槽位。
     assert_eq!(model.footer.right, "12:34");
 }

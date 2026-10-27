@@ -11,7 +11,10 @@ pub mod client;
 pub mod session;
 pub mod throttle;
 
-pub use client::{DailyUsageStore, VrccClient, VrccClientState, VrccError};
+pub use client::{
+    DailyUsageStore, QuotaBucket, RateHeaders, ServerQuota, VrccClient, VrccClientState, VrccError,
+    VrccLocalUsage,
+};
 pub use session::{VrccSession, VrccSessionSnapshot};
 pub use throttle::{
     backoff_for, format_local_date, local_date_today, now_millis, DailyUsage, RateLimiter,

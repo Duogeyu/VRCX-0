@@ -236,7 +236,7 @@ pub fn build_wrist_surface_model(input: WristOverlayFrameInput) -> WristSurfaceM
             now_playing_model(now_playing, input.captured_at_ms, input.live_now_playing)
         }),
         footer: OverlayFooter {
-            left: vrcc_footer_left(input.footer.vrcc.as_ref()).unwrap_or_else(|| {
+            left: vrcc_footer_left(&localizer, input.footer.vrcc.as_ref()).unwrap_or_else(|| {
                 localizer.text(&ActivityText::message(
                     OverlayMessage::overlay_footer_players(input.footer.player_count),
                 ))
@@ -272,18 +272,31 @@ pub fn build_wrist_surface_model(input: WristOverlayFrameInput) -> WristSurfaceM
 ///
 /// 返回 `None` 时调用方回落到原来的玩家数——这样没连星遇同频的玩家看到的东西
 /// 和以前完全一样，不会因为我们的功能而少一行信息。
-fn vrcc_footer_left(summary: Option<&WristVrccSummary>) -> Option<String> {
+///
+/// 数字都经 `localizer` 渲染，和底栏其他槽位一样：原来这里是
+/// `format!("●{}")` / `format!("#{rank}{avg}")`，玩家看到「●3 · #7 9.2」
+/// 根本猜不出那是什么，也不跟随界面语言。
+fn vrcc_footer_left(
+    localizer: &OverlayLocalizer,
+    summary: Option<&WristVrccSummary>,
+) -> Option<String> {
     let summary = summary?;
     let mut parts = Vec::new();
     if summary.unread > 0 {
-        parts.push(format!("●{}", summary.unread));
+        parts.push(localizer.text(&ActivityText::message(
+            OverlayMessage::overlay_footer_vrcc_unread(summary.unread),
+        )));
     }
     if let Some(rank) = summary.map_rank {
-        let avg = summary
-            .map_avg_x10
-            .map(|avg_x10| format!(" {:.1}", avg_x10 as f64 / 10.0))
-            .unwrap_or_default();
-        parts.push(format!("#{rank}{avg}"));
+        // 有均分就一起说清楚：「本图第 7 名 · 均分 9.2」。
+        let message = match summary.map_avg_x10 {
+            Some(avg_x10) => OverlayMessage::overlay_footer_vrcc_rank_avg(
+                rank,
+                format!("{:.1}", avg_x10 as f64 / 10.0),
+            ),
+            None => OverlayMessage::overlay_footer_vrcc_rank(rank),
+        };
+        parts.push(localizer.text(&ActivityText::message(message)));
     }
     if parts.is_empty() {
         // 有摘要但没有可显示的数字（没未读、当前图不在榜）时，不占这一格，

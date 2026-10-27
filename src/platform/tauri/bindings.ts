@@ -325,23 +325,35 @@ const generatedCommands = {
         return await TAURI_INVOKE('app__vrcc_connection');
     },
     /**
-     * 本地用量。口径是「本客户端今日已用 N/300」，不是「剩余」——
-     * 服务器按令牌算额度，我们看不见那个数字。
+     * 今日用量。口径是「今日已用 N/上限」，不是「剩余」。服务器回过
+     * `RateLimit-*` 就是服务器的数，否则是本客户端自己记的（`personalFromServer`）。
      */
     async appVrccUsage(): Promise<VrccUsageSnapshot> {
         return await TAURI_INVOKE('app__vrcc_usage');
     },
     /**
-     * 地图榜。不需要连接。
+     * 地图榜。不需要连接。`sort` 传 `null` 是总榜。
+     *
+     * 要的是本周榜或新上榜、回答里却没有 `sort` 时，说明服务器还不支持，
+     * 回的是总榜。
      */
-    async appVrccBoards(limit: number): Promise<VrccBoard> {
-        return await TAURI_INVOKE('app__vrcc_boards', { limit });
+    async appVrccBoards(
+        limit: number,
+        sort: VrccBoardSort | null
+    ): Promise<VrccBoard> {
+        return await TAURI_INVOKE('app__vrcc_boards', { limit, sort });
     },
     /**
      * 服务探活。用来在页面上显示「星遇同频现在可用吗」。
      */
     async appVrccStatus(): Promise<VrccStatus> {
         return await TAURI_INVOKE('app__vrcc_status');
+    },
+    /**
+     * 公告和停站。不需要连接。服务器还没有这个接口时返回 `null`。
+     */
+    async appVrccAnnouncements(): Promise<VrccAnnouncements | null> {
+        return await TAURI_INVOKE('app__vrcc_announcements');
     },
     /**
      * 第一步：申请连接码。`scope` 传 `null` 表示用官方默认。
@@ -377,6 +389,21 @@ const generatedCommands = {
         return await TAURI_INVOKE('app__vrcc_recent_notifications', { mark });
     },
     /**
+     * 几处未读数（连向我、星轨相交、私聊、通知）。
+     *
+     * `refresh` 为 `false` 时只读后台轮询的缓存、不发请求——收到
+     * `vrccNoticesChanged` 时用这个。服务器还没有 `me/unread` 时返回 `null`。
+     */
+    async appVrccUnread(refresh: boolean): Promise<VrccUnread | null> {
+        return await TAURI_INVOKE('app__vrcc_unread', { refresh });
+    },
+    /**
+     * 通知中心。读了不标已读。服务器还没有 `me/notes` 时返回 `null`。
+     */
+    async appVrccNotes(): Promise<VrccNotes | null> {
+        return await TAURI_INVOKE('app__vrcc_notes');
+    },
+    /**
      * 当前所在地图在地图榜上的状态与我自己的评分。
      *
      * 地图 ID 由后端自己从游戏日志取，前端不用传：位置本来就只有后端知道，
@@ -408,25 +435,6 @@ const generatedCommands = {
      */
     async appVrccMutuals(): Promise<VrccMutuals> {
         return await TAURI_INVOKE('app__vrcc_mutuals');
-    },
-    /**
-     * 把一行错误信息归类，并把缺的权限一并带回。
-     *
-     * 运行时的命令把 `VrccError` 折成了字符串（`AppError::Custom`），这里按
-     * 官方错误码表的关键字分类。这不是理想的形状——理想是让 `VrccError` 自己
-     * 跨过命令边界——但改那个要动 `AppError` 的变体，留到有明确需求时再做。
-     *
-     * **顺序很重要**：先判 `MissingScope`，再判 `NeedsReauth`。
-     * 官方对「权限不够」用的错误码是 `scope` / `scope_unreviewed`，而后者的语义
-     * 是「这项权限要审核」，玩家重新授权也拿不到——它不该显示成「去重新连接」，
-     * 而该显示成「这项功能需要开通」。所以这两个码必须归到 `MissingScope`。
-     *
-     * 早先这里漏了 `scope` 系列，于是一个必然失败的 `mutuals`（`dev-` 标识拿不到
-     * 敏感权限）被判成 `Other`，前端走了全局错误路径，渲染成整页红色横幅，
-     * 看起来像连接坏了。
-     */
-    async appVrccClassifyError(message: string): Promise<VrccErrorKindOutput> {
-        return await TAURI_INVOKE('app__vrcc_classify_error', { message });
     },
     async appNotificationHideAndExpire(
         input: NotificationHideExpireInput
@@ -3425,14 +3433,38 @@ export type AppErrorCode =
     | 'integration_api_port_in_use'
     | 'integration_api_bind'
     | 'feed_logger'
+    | 'vrcc'
     | 'custom';
 export type AppErrorPayload = {
     code: AppErrorCode;
     message: string;
+    /**
+     * 星遇同频的错误分类。
+     *
+     * **为什么放在这里而不是让前端解析文案**：分类必须在知道
+     * `VrccError` 确切变体的那一层算（runtime/application），前端只能看到
+     * 字符串。早先前端靠对中文文案做子串匹配，结果 `401 token` 落进
+     * `Other`、缺权限的 `need` 在转字符串时丢失、`missing_scope` 提示
+     * 永远不显示。这里把结论随错误一起带出去。
+     */
+    vrcc?: AppErrorVrccDetail | null;
     sqliteCategory?: SqliteErrorCategory | null;
     statusCode?: number | null;
     port?: number | null;
     feedLoggerCode?: FeedLoggerErrorCode | null;
+};
+/**
+ * 星遇同频错误的结构化细节，直接来自 `VrccFailure`。
+ */
+export type AppErrorVrccDetail = {
+    /**
+     * 行为分类：`needsReauth` / `missingScope` / `throttled` / `transport` / `other`。
+     */
+    kind: string;
+    /**
+     * 缺哪个权限（`missingScope` 时通常有值）。
+     */
+    need?: string | null;
 };
 export type AppLauncherEntry = {
     id: string;
@@ -4263,7 +4295,15 @@ export type DesktopNotificationActivation = {
 export type DesktopNotificationTarget =
     | { kind: 'openUserProfile'; userId: string }
     | { kind: 'openGroupProfile'; groupId: string }
-    | { kind: 'openLocation'; location: string };
+    | { kind: 'openLocation'; location: string }
+    /**
+     * 星遇同频的提醒。点击后打开星遇同频页签。
+     *
+     * 只带一个可选的提醒 id：vrcc 的提醒没有 VRChat 的用户/世界 ID，
+     * 无法复用上面三种落点。带 id 是为了将来能定位到具体那一条，
+     * 现在前端只需要跳到页签。
+     */
+    | { kind: 'openVrcc'; notice_id: string | null };
 export type DesktopWidgetSnapshot = {
     supported: boolean;
     enabled: boolean;
@@ -7168,12 +7208,60 @@ export type VrcStatusSnapshot = {
     error: string;
 };
 /**
+ * 一条公告（`GET /announcements` 的 `posts[]`）。
+ */
+export type VrccAnnouncement = {
+    id?: number;
+    /**
+     * 网页上怎么显示：`bar` 顶上一条、`pop` 弹窗、`force` 强制。
+     */
+    level?: string | null;
+    /**
+     * 纯文字，显示时不要当 HTML。
+     */
+    title?: string | null;
+    body?: string | null;
+    /**
+     * 「查看」打开的完整网址。
+     */
+    link?: string | null;
+    /**
+     * 卡片顶上的图（完整网址）。
+     */
+    cover?: string | null;
+    /**
+     * 什么时候撤下（毫秒），`null` 是没定。
+     */
+    end?: number | null;
+};
+/**
+ * `GET /announcements`：给所有玩家的公告和停站说明（1.12.0 起，不用令牌）。
+ */
+export type VrccAnnouncements = {
+    /**
+     * 停站时才有。
+     */
+    stop?: VrccStop | null;
+    /**
+     * 正在显示的公告，新的在前。
+     */
+    posts?: VrccAnnouncement[];
+};
+/**
  * 地图榜 / 批量查地图 / 我打过的图，三者的外层结构一致。
  */
 export type VrccBoard = {
     board?: string | null;
     /**
-     * 上总榜所需最少评分人数。
+     * 这次用的排序：`top` / `week` / `new`（1.13.0 起）。
+     *
+     * 旧服务器不认 `sort`、照旧回总榜，回答里也没有这个字段。所以要的是
+     * 本周榜或新上榜、回来的却没有 `sort` 时，说明服务器还不支持，不能把
+     * 总榜当成本周榜显示。
+     */
+    sort?: string | null;
+    /**
+     * 有名次最少需要几人评分（当前为 1）。
      */
     min?: number | null;
     maps?: VrccBoardMap[];
@@ -7197,15 +7285,18 @@ export type VrccBoardMap = {
      */
     avg?: number | null;
     /**
-     * 评分人数；官方要求满 5 人才进总榜。
+     * 评分人数；有一个评分就有名次（`min` 现在是 1）。
      */
     raters?: number | null;
     /**
-     * 名次，1 起。
+     * 总榜名次，1 起；新上榜里还没人评分的是 `null`。
+     *
+     * 本周榜里也是总榜名次：本周榜只按本周的打分重新排顺序，本周的名次是
+     * 它在列表里的位置。
      */
     rank?: number | null;
     /**
-     * 口碑档位 `light` / `mid` / …
+     * 多小咕实测的轻重：`light` / `mid` / `heavy`，没测过是 `null`。
      */
     weight?: string | null;
     /**
@@ -7217,14 +7308,20 @@ export type VrccBoardMap = {
      */
     img?: string | null;
     /**
-     * 地图的简短口碑。
-     *
-     * **官方文档未记录这个字段**——`openapi.yaml` 的 `BoardMap` 里没有它，
-     * 但线上确实返回（实测 `text` / `by` / `up` / `went` 四个键，结构稳定）。
-     * 因为 schema 没有禁 `additionalProperties`，接收它是安全的；缺了也不报错。
+     * 热评：最热的一条短评（1.10.1 起写进文档），没有时是 `null`。
      */
     hot?: VrccMapHot | null;
+    /**
+     * 只在本周榜（`sort=week`）里有：本周几人打分（1.13.0 起）。
+     */
+    week?: number | null;
 };
+/**
+ * 地图榜的排序（1.13.0 起）：总榜、本周榜、新上榜。
+ *
+ * 和网页地图榜的「总榜」「本周」「新上榜」一样，只是不分星池。
+ */
+export type VrccBoardSort = 'top' | 'week' | 'new';
 /**
  * 连接状态投影。
  */
@@ -7233,6 +7330,14 @@ export type VrccConnectionSnapshot = {
      * 是否持有令牌。
      */
     connected: boolean;
+    /**
+     * 上一个令牌是不是被服务器判了失效（`404 gone`）后清掉的。
+     *
+     * 玩家在网页上断开、同一个客户端又授权了一次、星被删除，以及 1.10.0 起
+     * 「90 天没调用过任何接口自动断开」，都会这样。界面据此提示「连接已失效，
+     * 请重新连接」，而不是只显示一个「未连接」让玩家摸不着头脑。
+     */
+    expired: boolean;
     /**
      * 星号，已连接且拿到时才有。
      */
@@ -7317,21 +7422,15 @@ export type VrccDeviceAuthStepOutput =
      */
     | { state: 'terminal'; message: string };
 /**
- * 错误分类，供前端决定显示「重新连接」还是「稍后再试」。
+ * 地图榜条目上的热评 `{text, by, up, went}`。
  *
- * 前端拿到的是 `AppError`（字符串），但「是否需要重新授权」这种判断不该
- * 让前端去解析文案。这个类型把 `classify_vrcc_error` 的结论带过命令边界。
- */
-export type VrccErrorKindOutput =
-    | 'needsReauth'
-    | 'missingScope'
-    | 'throttled'
-    | 'transport'
-    | 'other';
-/**
- * 地图榜条目上的「口碑」小段文字。
+ * **`hot` 不在官方 `openapi.yaml` 的 `BoardMap` 里**，是 1.10.1 才写进文档的
+ * 附加字段；README「开放数据」一节也写明公开榜单「不给谁打了分，也不给短评」。
+ * 也就是说它随时可能改形状或下线。
  *
- * 字段名全部按线上实返，不是文档（文档没有这一块）。
+ * 因此每个字段都容忍「形状不对」：`text` / `by` 若不是字符串就当没有，
+ * 而不是让整个 `VrccBoard` 解析失败——那会让地图榜整页空白、腕表上的名次
+ * 也不再更新，代价远大于少显示一句短评。
  */
 export type VrccMapHot = {
     /**
@@ -7347,9 +7446,24 @@ export type VrccMapHot = {
      */
     up?: number | null;
     /**
-     * 相关标记，线上为布尔。
+     * 写的人去过这张图。
      */
     went?: boolean | null;
+};
+/**
+ * 我给一颗互相连上的星的评价，和网页上互相连上的卡一样。
+ *
+ * 只有我给 TA 的，没有 TA 给我的。
+ */
+export type VrccMutualRate = {
+    /**
+     * 一起玩过没有；`null` 是还没回答。
+     */
+    played?: boolean | null;
+    /**
+     * 我给的分，0–5，半颗星一档；`0` 是没打。
+     */
+    mine?: number | null;
 };
 /**
  * 「互相连上」的一颗星，对应 `GET /me/mutuals` 的条目。
@@ -7387,6 +7501,10 @@ export type VrccMutualStar = {
      * 互相连上的时间（毫秒时间戳）。
      */
     at?: number | null;
+    /**
+     * 我给 TA 的分（1.12.0 起）。连上的第二天起才有，当天和旧服务器都是 `null`。
+     */
+    rate?: VrccMutualRate | null;
 };
 /**
  * `GET /me/mutuals`：与当前玩家双向连线的星友列表。
@@ -7433,14 +7551,6 @@ export type VrccMyMap = {
      */
     mine?: number | null;
     /**
-     * 现在能不能打分。
-     */
-    can?: boolean | null;
-    /**
-     * 不能打分时缺什么：`verify` / `friend` / `go`。
-     */
-    need?: string | null;
-    /**
      * 自己的短评。
      */
     words?: string | null;
@@ -7456,7 +7566,46 @@ export type VrccMyMap = {
      * 内部接口。我们只把它当图片地址加载，不通过它取任何数据。
      */
     img?: string | null;
+    /**
+     * 同一张封面的完整网址（1.11.0 起）。有它就不用自己拼。
+     */
+    imgUrl?: string | null;
 };
+/**
+ * 通知中心的一条（`GET /me/notes`，1.13.0 起）。
+ */
+export type VrccNote = {
+    id?: number;
+    /**
+     * `link` / `mutual` / `gift` / `invite` / `yq` / `map` / `about`，
+     * 以后可能加新的：不认识的照样显示 `text`。
+     */
+    kind?: string | null;
+    /**
+     * 网页上显示的那句话（纯文字）。
+     */
+    text?: string | null;
+    /**
+     * 毫秒时间戳。
+     */
+    at?: number | null;
+    /**
+     * 玩家在网页上看过没有。
+     */
+    seen?: boolean | null;
+    /**
+     * 点开去的星友圈动态编号。
+     */
+    post?: number | null;
+    /**
+     * 点开去的地图（`wrld_…`）。
+     */
+    world?: string | null;
+};
+/**
+ * `GET /me/notes`：网页「通知」那张表，最多 60 条，新的在前。读了不标已读。
+ */
+export type VrccNotes = { notes?: VrccNote[] };
 /**
  * 一条提醒，对应官方的 `Notice`。
  *
@@ -7568,10 +7717,6 @@ export type VrccStarCard = {
      * 星群名称。
      */
     groupName?: string | null;
-    /**
-     * 氛围：`安静` / `随场` / `热闹`。
-     */
-    vibe?: string | null;
     intro?: string | null;
     /**
      * 点亮编号（对方没公开时为 `null`）。
@@ -7616,6 +7761,16 @@ export type VrccStatus = {
     state?: string | null;
 };
 /**
+ * 停站说明。
+ */
+export type VrccStop = {
+    say?: string | null;
+    /**
+     * 预计恢复的时间（毫秒），没定时是 `null`。
+     */
+    until?: number | null;
+};
+/**
  * `GET /me/today`：这一轮路过的星 + 轮次进度。
  */
 export type VrccToday = {
@@ -7627,18 +7782,61 @@ export type VrccToday = {
     round?: VrccRound;
 };
 /**
- * 本客户端的本地用量。**这不是服务器数据**：官方没有"查询剩余配额"的接口，
- * 所以只能报我们自己记的计数，措辞必须诚实。
+ * `GET /me/unread`：网页上几个红点的数字（1.13.0 起，`notifications` 权限）。
+ *
+ * 读了不标已读。每个授权每天 1500 次，和别的读接口分开算，适合后台定时问。
+ */
+export type VrccUnread = {
+    /**
+     * 上次看「连向我」以后，新连向我的星。
+     */
+    inbox?: number;
+    /**
+     * 星轨相交里还没看过的。
+     *
+     * 只在令牌有 `crossings` 权限时才有这个键（16–17 岁没有星轨相交，恒为 0
+     * 就能看出星池）。没有时是 `None`，界面不显示这一项，而不是显示 0。
+     */
+    cross?: number | null;
+    /**
+     * 私聊未读的消息。
+     */
+    chats?: number;
+    /**
+     * 通知中心里未读的：`me/notes` 给的那些里玩家还没看过的。
+     */
+    notes?: number;
+};
+/**
+ * 本客户端今天的用量。
+ *
+ * 1.11.0 起，带每天次数的接口会回答 `RateLimit-Limit` / `RateLimit-Remaining`
+ * / `RateLimit-Reset`，那是服务器按这个授权算的准数。拿到过就用它
+ * （`personal_from_server` 为 `true`）；旧服务器没有这组头时，才退回本客户端
+ * 自己记的数。措辞要分清这两种来源。
  */
 export type VrccUsageSnapshot = {
     /**
-     * 今日个人接口已用次数（本地计数）。
+     * 今日「第一份读」已用次数（最近的提醒、星轨相交、互相连上、所在的地图、
+     * 我打过分的地图合计）。
      */
     personalUsedToday: number;
     /**
-     * 官方对四个个人接口的每日合计上限。
+     * 「第一份读」每个授权每天的上限（1.8.4 起是 1000）。
      */
     personalDailyLimit: number;
+    /**
+     * `personal_used_today` 是不是服务器响应头给的。`false` 时是本地计数。
+     */
+    personalFromServer: boolean;
+    /**
+     * 今日 `me/unread` 已用次数；服务器还没给过响应头时为 `null`。
+     */
+    unreadUsedToday: number | null;
+    /**
+     * `me/unread` 每天的上限（1500）；同上，没拿到时为 `null`。
+     */
+    unreadDailyLimit: number | null;
     /**
      * 今日 `/device/code` 已用次数（本地计数）。
      */

@@ -3,8 +3,172 @@
 //! 字段名与类型严格对照官方 `openapi.yaml` 与 `xingshi-app` 的实现，
 //! 不做"我猜它应该叫这个"的推断。凡是官方允许缺失的字段，一律 `Option`，
 //! 因为接口在不同 scope / 审核状态下返回的字段集合并不相同。
+//!
+//! 对照的是开放接口 1.14.0。官方的兼容规则是「v1 只做加法，要删的字段先标
+//! 弃用、至少再留 60 天」，所以这里：
+//! - 新字段一律 `#[serde(default)]`，旧服务器没给也能解析；
+//! - **不读弃用中的字段**（`vibe`、`can`、`need`、`teen`、`adj`、
+//!   `counts.regenToday`、`counts.styles`），到期不再返回时什么都不会坏；
+//! - 不写 `deny_unknown_fields`，服务器多给的字段直接忽略。
 
 use serde::{Deserialize, Serialize};
+
+/// 官方限制 POST 正文最大 2 KB。
+///
+/// 放在契约层是因为 [`VrccError::BodyTooLarge`] 的错误文案要引用它。
+pub const VRCC_MAX_BODY_BYTES: usize = 2048;
+
+/// 星遇同频的错误。
+///
+/// **为什么定义在契约层而不是网络层**：应用层要按它分类（要不要重新授权、
+/// 是不是限流），并在公开 API 上返回它；如果它留在 `integrations`，
+/// 应用层就得依赖网络实现，架构测试（`backend_architecture`）不允许。
+/// 这个类型本身只是数据 + 判据，不含任何 IO，放在这里不违反「契约层
+/// 只放同步数据与协议」的约束。
+///
+/// `Clone` 是给「先判断能不能重试、再把原错误交出去」这类调用点用的
+/// （见 `VrccService::disconnect`）。
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum VrccError {
+    #[error("星遇同频 token 缺失，请先连接")]
+    TokenMissing,
+    #[error("路径必须相对 /api/v1/：{0}")]
+    AbsolutePath(String),
+    #[error("请求正文超过 {VRCC_MAX_BODY_BYTES} 字节上限")]
+    BodyTooLarge,
+    #[error("星遇同频限流：{0}")]
+    RateLimited(String),
+    /// 429 `too_soon`：两次轮询间隔太短。等 `retry_after_secs` 再问，
+    /// 不触发长时间退避——这不是配额问题，只是问勤了。
+    #[error("星遇同频轮询太快，{retry_after_secs} 秒后再问")]
+    TooSoon { retry_after_secs: u64 },
+    #[error("星遇同频额度已用尽：{0}")]
+    QuotaExhausted(String),
+    /// `503 stop`：停站维护。令牌没事，等到 `until` 以后再试。
+    ///
+    /// 只有「网页上的动作」那一批（今天的星等）会这样回答；提醒、星卡、
+    /// 地图榜停站时照常。
+    #[error("星遇同频停站维护中{}", stop_suffix(.say))]
+    Paused {
+        say: Option<String>,
+        until: Option<i64>,
+    },
+    #[error("星遇同频接口返回 HTTP {status}（{error}）")]
+    Api {
+        status: u16,
+        error: String,
+        need: Option<String>,
+        why: Option<String>,
+    },
+    #[error("星遇同频接口暂时不可用：{0}")]
+    Transport(String),
+    #[error("星遇同频返回无法解析：{0}")]
+    Decode(String),
+}
+
+fn stop_suffix(say: &Option<String>) -> String {
+    match say.as_deref().map(str::trim).filter(|say| !say.is_empty()) {
+        Some(say) => format!("：{say}"),
+        None => String::new(),
+    }
+}
+
+impl VrccError {
+    /// 官方错误码表里的 `404 gone`：**令牌失效**（玩家断开了、同一个客户端又
+    /// 授权了一次、星被删除，1.10.0 起还有「90 天没调用过任何接口自动断开」）。
+    /// 要停下轮询并让玩家重新授权。
+    ///
+    /// 注意区分 `star_gone`（连线/私聊的对方不在了，令牌没事）、`expired`
+    /// （1.9.0 起签名图片失效用这个码，原来也叫 `gone`）和 `not_found`
+    /// （查的地图不在榜上、或旧服务器还没有这个接口），这些都**不该**触发重新授权。
+    pub fn is_gone(&self) -> bool {
+        matches!(
+            self,
+            VrccError::Api {
+                status: 404,
+                error,
+                ..
+            } if error == "gone"
+        )
+    }
+
+    /// `404 not_found`：没有这个接口，或查的东西不在。
+    ///
+    /// 新接口（`me/unread`、`me/notes`、`announcements`）在还没更新的服务器上
+    /// 就是这样回答的，调用方据此安静地不显示，而不是报错。
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            VrccError::Api {
+                status: 404,
+                error,
+                ..
+            } if error == "not_found"
+        )
+    }
+
+    /// 需要重新授权的情况。照官方错误码表逐条来：
+    /// - `404 gone`：令牌失效
+    /// - `403 client_mismatch`：令牌不是发给这个 `X-Client` 的
+    /// - `403 client_unknown` / `client_off` / `client_missing`：标识本身有问题
+    /// - `401 token`：没带令牌或格式不对
+    /// - `403 scope`：缺权限，要玩家重新授权时勾上 `need` 那一项
+    pub fn needs_reauth(&self) -> bool {
+        if self.is_gone() {
+            return true;
+        }
+        matches!(self, VrccError::Api { status: 401, .. })
+            || matches!(
+                self,
+                VrccError::Api {
+                    status: 403,
+                    error,
+                    ..
+                } if matches!(
+                    error.as_str(),
+                    "client_mismatch"
+                        | "client_unknown"
+                        | "client_off"
+                        | "client_missing"
+                        | "scope"
+                        | "scope_unreviewed"
+                )
+            )
+            || matches!(self, VrccError::TokenMissing)
+    }
+
+    /// 缺哪个权限。前端据此提示「需要重新授权并勾上 X」。
+    pub fn needed_scope(&self) -> Option<&str> {
+        match self {
+            VrccError::Api { need, .. } => need.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// 设备授权期间「玩家还没点同意」，调用方应等 `interval` 秒再来问。
+    pub fn is_authorization_pending(&self) -> bool {
+        matches!(
+            self,
+            VrccError::Api {
+                status: 400,
+                error,
+                ..
+            } if error == "authorization_pending"
+        )
+    }
+
+    /// 设备授权走到终态：玩家取消，或码过期/已用过。
+    pub fn is_device_auth_terminal(&self) -> bool {
+        matches!(
+            self,
+            VrccError::Api {
+                status: 400,
+                error,
+                ..
+            } if error == "access_denied" || error == "expired_token"
+        )
+    }
+}
 
 /// API 基址。生产代码里只允许拼相对路径，绝对地址会在客户端层被拒绝。
 pub const VRCC_API_BASE: &str = "https://vrcc.cc/api/v1/";
@@ -42,6 +206,19 @@ pub const VRCC_PROD_CLIENT: &str = "";
 /// 调用方应当用 [`resolve_client_id`] 而不是直接读这个常量，
 /// 这样配置覆盖能生效。
 pub const VRCC_DEFAULT_CLIENT: &str = VRCC_DEV_CLIENT;
+
+/// 申请设备授权时**显式请求**的权限集合。
+///
+/// **为什么不能传 `None` 交给服务器决定**：不写 `scope` 时，拿到哪些权限
+/// 完全取决于客户端是怎么登记的——
+/// - 自助登记的 `app_…` 只给 `profile`，于是 `/me/notifications/recent`、
+///   `/me/maps/{world}` 全都 `403 scope`，提醒和所在地图直接不可用；
+/// - 开 Issue 登记的客户端又会默认带上本功能用不到的 `crossings` 和
+///   `maps.rate`，违反官方《使用要求》第 10 条「只申请用得到的权限」。
+///
+/// 这里只列当前界面真正用到的两项。`mutuals`（互相连上）是敏感权限，
+/// 需要单独审核，拿到正式 `app_` 标识后再加。
+pub const VRCC_DEVICE_AUTH_SCOPE: &str = "profile notifications maps";
 
 /// 决定实际要发的 `X-Client`。
 ///
@@ -81,13 +258,16 @@ pub struct VrccBoardMap {
     /// 平均分（1–10）。
     #[serde(default)]
     pub avg: Option<f64>,
-    /// 评分人数；官方要求满 5 人才进总榜。
+    /// 评分人数；有一个评分就有名次（`min` 现在是 1）。
     #[serde(default)]
     pub raters: Option<i64>,
-    /// 名次，1 起。
+    /// 总榜名次，1 起；新上榜里还没人评分的是 `null`。
+    ///
+    /// 本周榜里也是总榜名次：本周榜只按本周的打分重新排顺序，本周的名次是
+    /// 它在列表里的位置。
     #[serde(default)]
     pub rank: Option<i64>,
-    /// 口碑档位 `light` / `mid` / …
+    /// 多小咕实测的轻重：`light` / `mid` / `heavy`，没测过是 `null`。
     #[serde(default)]
     pub weight: Option<String>,
     /// vrcc.cc 上的地图页。
@@ -96,33 +276,102 @@ pub struct VrccBoardMap {
     /// 封面图地址。
     #[serde(default)]
     pub img: Option<String>,
-    /// 地图的简短口碑。
-    ///
-    /// **官方文档未记录这个字段**——`openapi.yaml` 的 `BoardMap` 里没有它，
-    /// 但线上确实返回（实测 `text` / `by` / `up` / `went` 四个键，结构稳定）。
-    /// 因为 schema 没有禁 `additionalProperties`，接收它是安全的；缺了也不报错。
+    /// 热评：最热的一条短评（1.10.1 起写进文档），没有时是 `null`。
     #[serde(default)]
     pub hot: Option<VrccMapHot>,
+    /// 只在本周榜（`sort=week`）里有：本周几人打分（1.13.0 起）。
+    #[serde(default)]
+    pub week: Option<i64>,
 }
 
-/// 地图榜条目上的「口碑」小段文字。
+/// 地图榜条目上的热评 `{text, by, up, went}`。
 ///
-/// 字段名全部按线上实返，不是文档（文档没有这一块）。
+/// **`hot` 不在官方 `openapi.yaml` 的 `BoardMap` 里**，是 1.10.1 才写进文档的
+/// 附加字段；README「开放数据」一节也写明公开榜单「不给谁打了分，也不给短评」。
+/// 也就是说它随时可能改形状或下线。
+///
+/// 因此每个字段都容忍「形状不对」：`text` / `by` 若不是字符串就当没有，
+/// 而不是让整个 `VrccBoard` 解析失败——那会让地图榜整页空白、腕表上的名次
+/// 也不再更新，代价远大于少显示一句短评。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VrccMapHot {
     /// 那句短评。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_optional_string")]
     pub text: Option<String>,
     /// 出处（形如「某位炉边倾听者」）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_optional_string")]
     pub by: Option<String>,
     /// 点赞数。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_optional_i64")]
     pub up: Option<i64>,
-    /// 相关标记，线上为布尔。
-    #[serde(default)]
+    /// 写的人去过这张图。
+    #[serde(default, deserialize_with = "lenient_optional_bool")]
     pub went: Option<bool>,
+}
+
+/// 把「类型不对」一律读成 `None` 而不是报错。
+///
+/// 用在这些**非契约必需**的附加字段上：字段缺失、`null`、或是别的类型，
+/// 三种都当作没有，绝不让它连累整份回答的解析。
+fn lenient_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(text)) => Some(text),
+        Some(serde_json::Value::Number(number)) => Some(number.to_string()),
+        _ => None,
+    })
+}
+
+fn lenient_optional_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Number(number)) => number.as_i64(),
+        Some(serde_json::Value::String(text)) => text.trim().parse().ok(),
+        _ => None,
+    })
+}
+
+fn lenient_optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Bool(flag)) => Some(flag),
+        _ => None,
+    })
+}
+
+/// 地图榜的排序（1.13.0 起）：总榜、本周榜、新上榜。
+///
+/// 和网页地图榜的「总榜」「本周」「新上榜」一样，只是不分星池。
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize, specta::Type,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum VrccBoardSort {
+    #[default]
+    Top,
+    Week,
+    New,
+}
+
+impl VrccBoardSort {
+    /// 查询串里的写法。
+    pub fn as_query(self) -> &'static str {
+        match self {
+            VrccBoardSort::Top => "top",
+            VrccBoardSort::Week => "week",
+            VrccBoardSort::New => "new",
+        }
+    }
 }
 
 /// 地图榜 / 批量查地图 / 我打过的图，三者的外层结构一致。
@@ -131,7 +380,14 @@ pub struct VrccMapHot {
 pub struct VrccBoard {
     #[serde(default)]
     pub board: Option<String>,
-    /// 上总榜所需最少评分人数。
+    /// 这次用的排序：`top` / `week` / `new`（1.13.0 起）。
+    ///
+    /// 旧服务器不认 `sort`、照旧回总榜，回答里也没有这个字段。所以要的是
+    /// 本周榜或新上榜、回来的却没有 `sort` 时，说明服务器还不支持，不能把
+    /// 总榜当成本周榜显示。
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// 有名次最少需要几人评分（当前为 1）。
     #[serde(default)]
     pub min: Option<i64>,
     #[serde(default)]
@@ -334,12 +590,8 @@ pub struct VrccMyMap {
     /// 自己打的分（1–10）。
     #[serde(default)]
     pub mine: Option<i64>,
-    /// 现在能不能打分。
-    #[serde(default)]
-    pub can: Option<bool>,
-    /// 不能打分时缺什么：`verify` / `friend` / `go`。
-    #[serde(default)]
-    pub need: Option<String>,
+    // 不读 `can` / `need`：官方 1.10.1 起标为弃用（2026-10-24 起谁都能打分，
+    // 恒为 `true` / `null`），2026-12-26 起不再返回。
     /// 自己的短评。
     #[serde(default)]
     pub words: Option<String>,
@@ -353,6 +605,9 @@ pub struct VrccMyMap {
     /// 内部接口。我们只把它当图片地址加载，不通过它取任何数据。
     #[serde(default)]
     pub img: Option<String>,
+    /// 同一张封面的完整网址（1.11.0 起）。有它就不用自己拼。
+    #[serde(default)]
+    pub img_url: Option<String>,
 }
 
 impl VrccMyMap {
@@ -365,7 +620,17 @@ impl VrccMyMap {
     }
 
     /// 封面的完整地址；没有封面时返回 `None`。
+    ///
+    /// 优先用服务器给的 `imgUrl`，旧服务器没有时再拿 `img` 自己拼。
     pub fn image_url(&self) -> Option<String> {
+        if let Some(url) = self
+            .img_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| url.starts_with("https://"))
+        {
+            return Some(url.to_string());
+        }
         let img = self.img.as_deref()?.trim();
         if img.is_empty() {
             return None;
@@ -412,9 +677,8 @@ pub struct VrccStarCard {
     /// 星群名称。
     #[serde(default)]
     pub group_name: Option<String>,
-    /// 氛围：`安静` / `随场` / `热闹`。
-    #[serde(default)]
-    pub vibe: Option<String>,
+    // 不读 `vibe`：网页的星卡上不显示，官方 1.10.1 起标为弃用，
+    // 2026-12-26 起不再返回。
     #[serde(default)]
     pub intro: Option<String>,
     /// 点亮编号（对方没公开时为 `null`）。
@@ -491,6 +755,23 @@ pub struct VrccMutualStar {
     /// 互相连上的时间（毫秒时间戳）。
     #[serde(default)]
     pub at: Option<i64>,
+    /// 我给 TA 的分（1.12.0 起）。连上的第二天起才有，当天和旧服务器都是 `null`。
+    #[serde(default)]
+    pub rate: Option<VrccMutualRate>,
+}
+
+/// 我给一颗互相连上的星的评价，和网页上互相连上的卡一样。
+///
+/// 只有我给 TA 的，没有 TA 给我的。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccMutualRate {
+    /// 一起玩过没有；`null` 是还没回答。
+    #[serde(default)]
+    pub played: Option<bool>,
+    /// 我给的分，0–5，半颗星一档；`0` 是没打。
+    #[serde(default)]
+    pub mine: Option<f64>,
 }
 
 /// `GET /me/mutuals`：与当前玩家双向连线的星友列表。
@@ -534,6 +815,126 @@ pub struct VrccStatus {
 }
 
 // ---------------------------------------------------------------------------
+// 未读数、通知中心、公告（1.12.0 / 1.13.0 起）
+// ---------------------------------------------------------------------------
+
+/// `GET /me/unread`：网页上几个红点的数字（1.13.0 起，`notifications` 权限）。
+///
+/// 读了不标已读。每个授权每天 1500 次，和别的读接口分开算，适合后台定时问。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccUnread {
+    /// 上次看「连向我」以后，新连向我的星。
+    #[serde(default)]
+    pub inbox: i64,
+    /// 星轨相交里还没看过的。
+    ///
+    /// 只在令牌有 `crossings` 权限时才有这个键（16–17 岁没有星轨相交，恒为 0
+    /// 就能看出星池）。没有时是 `None`，界面不显示这一项，而不是显示 0。
+    #[serde(default)]
+    pub cross: Option<i64>,
+    /// 私聊未读的消息。
+    #[serde(default)]
+    pub chats: i64,
+    /// 通知中心里未读的：`me/notes` 给的那些里玩家还没看过的。
+    #[serde(default)]
+    pub notes: i64,
+}
+
+impl VrccUnread {
+    /// 几处加起来。
+    pub fn total(&self) -> i64 {
+        [self.inbox, self.cross.unwrap_or(0), self.chats, self.notes]
+            .into_iter()
+            .map(|count| count.max(0))
+            .sum()
+    }
+}
+
+/// 通知中心的一条（`GET /me/notes`，1.13.0 起）。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccNote {
+    #[serde(default)]
+    pub id: i64,
+    /// `link` / `mutual` / `gift` / `invite` / `yq` / `map` / `about`，
+    /// 以后可能加新的：不认识的照样显示 `text`。
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// 网页上显示的那句话（纯文字）。
+    #[serde(default)]
+    pub text: Option<String>,
+    /// 毫秒时间戳。
+    #[serde(default)]
+    pub at: Option<i64>,
+    /// 玩家在网页上看过没有。
+    #[serde(default)]
+    pub seen: Option<bool>,
+    /// 点开去的星友圈动态编号。
+    #[serde(default)]
+    pub post: Option<i64>,
+    /// 点开去的地图（`wrld_…`）。
+    #[serde(default)]
+    pub world: Option<String>,
+}
+
+/// `GET /me/notes`：网页「通知」那张表，最多 60 条，新的在前。读了不标已读。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccNotes {
+    #[serde(default)]
+    pub notes: Vec<VrccNote>,
+}
+
+/// 一条公告（`GET /announcements` 的 `posts[]`）。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccAnnouncement {
+    #[serde(default)]
+    pub id: i64,
+    /// 网页上怎么显示：`bar` 顶上一条、`pop` 弹窗、`force` 强制。
+    #[serde(default)]
+    pub level: Option<String>,
+    /// 纯文字，显示时不要当 HTML。
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    /// 「查看」打开的完整网址。
+    #[serde(default)]
+    pub link: Option<String>,
+    /// 卡片顶上的图（完整网址）。
+    #[serde(default)]
+    pub cover: Option<String>,
+    /// 什么时候撤下（毫秒），`null` 是没定。
+    #[serde(default)]
+    pub end: Option<i64>,
+}
+
+/// 停站说明。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccStop {
+    #[serde(default)]
+    pub say: Option<String>,
+    /// 预计恢复的时间（毫秒），没定时是 `null`。
+    #[serde(default)]
+    pub until: Option<i64>,
+}
+
+/// `GET /announcements`：给所有玩家的公告和停站说明（1.12.0 起，不用令牌）。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccAnnouncements {
+    /// 停站时才有。
+    #[serde(default)]
+    pub stop: Option<VrccStop>,
+    /// 正在显示的公告，新的在前。
+    #[serde(default)]
+    pub posts: Vec<VrccAnnouncement>,
+}
+
+// ---------------------------------------------------------------------------
 // 错误体
 // ---------------------------------------------------------------------------
 
@@ -550,27 +951,44 @@ pub struct VrccErrorBody {
     pub need: Option<String>,
     #[serde(default)]
     pub why: Option<String>,
-    /// 429 `too_soon` 时给的建议重试间隔（秒）。
+    /// 429 `too_soon` 时给的建议轮询间隔（秒）。
     ///
-    /// 官方把 429 分成两种：`too_soon` 是两次轮询间隔太短，`too_many` 是
-    /// 频率或当日额度用完。只有前者带这个字段，用来告诉客户端该等多久。
+    /// 要等多久以 `Retry-After` 响应头为准（1.9.0 起所有 429 都带）；
+    /// 旧服务器没给头时才用它兜底。
     #[serde(default)]
     pub every: Option<i64>,
+    /// `503 stop`（停站维护）时的说明。
+    #[serde(default)]
+    pub say: Option<String>,
+    /// `503 stop` 时预计恢复的时间（毫秒）。
+    #[serde(default)]
+    pub until: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
 // 前端用的聚合投影
 // ---------------------------------------------------------------------------
 
-/// 本客户端的本地用量。**这不是服务器数据**：官方没有"查询剩余配额"的接口，
-/// 所以只能报我们自己记的计数，措辞必须诚实。
+/// 本客户端今天的用量。
+///
+/// 1.11.0 起，带每天次数的接口会回答 `RateLimit-Limit` / `RateLimit-Remaining`
+/// / `RateLimit-Reset`，那是服务器按这个授权算的准数。拿到过就用它
+/// （`personal_from_server` 为 `true`）；旧服务器没有这组头时，才退回本客户端
+/// 自己记的数。措辞要分清这两种来源。
 #[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VrccUsageSnapshot {
-    /// 今日个人接口已用次数（本地计数）。
+    /// 今日「第一份读」已用次数（最近的提醒、星轨相交、互相连上、所在的地图、
+    /// 我打过分的地图合计）。
     pub personal_used_today: i64,
-    /// 官方对四个个人接口的每日合计上限。
+    /// 「第一份读」每个授权每天的上限（1.8.4 起是 1000）。
     pub personal_daily_limit: i64,
+    /// `personal_used_today` 是不是服务器响应头给的。`false` 时是本地计数。
+    pub personal_from_server: bool,
+    /// 今日 `me/unread` 已用次数；服务器还没给过响应头时为 `null`。
+    pub unread_used_today: Option<i64>,
+    /// `me/unread` 每天的上限（1500）；同上，没拿到时为 `null`。
+    pub unread_daily_limit: Option<i64>,
     /// 今日 `/device/code` 已用次数（本地计数）。
     pub device_code_used_today: i64,
     /// 官方对每网络地址每日拿码上限。
@@ -591,6 +1009,12 @@ pub struct VrccUsageSnapshot {
 pub struct VrccConnectionSnapshot {
     /// 是否持有令牌。
     pub connected: bool,
+    /// 上一个令牌是不是被服务器判了失效（`404 gone`）后清掉的。
+    ///
+    /// 玩家在网页上断开、同一个客户端又授权了一次、星被删除，以及 1.10.0 起
+    /// 「90 天没调用过任何接口自动断开」，都会这样。界面据此提示「连接已失效，
+    /// 请重新连接」，而不是只显示一个「未连接」让玩家摸不着头脑。
+    pub expired: bool,
     /// 星号，已连接且拿到时才有。
     pub star: Option<i64>,
     /// 公开的 VRChat 名字。
@@ -616,7 +1040,9 @@ pub struct VrccConnectionSnapshot {
 /// 而 `application` 不能反向依赖 `overlay-runtime`。放在这里两边都能用。
 ///
 /// 只包含**不额外消耗额度**能拿到的数据：
-/// - `unread` 来自「最近的提醒」的结果（页面本来就会请求）
+/// - `unread` 优先来自后台轮询的 `me/unread`（网页上几个红点的合计，单独的
+///   每天 1500 次）；旧服务器没有这个接口时，退回「最近的提醒」里 `id > read`
+///   的条数
 /// - `map_rank` / `map_avg_x10` 来自「地图榜」的结果（开放数据，不计个人额度）
 ///
 /// 刻意不去调 `me/maps/{world}` 查当前地图：那要花个人额度，而腕表是每帧
@@ -624,7 +1050,7 @@ pub struct VrccConnectionSnapshot {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VrccWristSummary {
-    /// 未读提醒条数。0 表示没有未读。
+    /// 未读数。0 表示没有未读。
     pub unread: u32,
     /// 当前所在地图在榜单上的名次；不在榜或榜单还没加载时为 `None`。
     pub map_rank: Option<i64>,

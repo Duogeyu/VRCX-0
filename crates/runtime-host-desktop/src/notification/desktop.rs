@@ -111,6 +111,18 @@ pub trait DesktopNotifier: Send + Sync {
         play_sound: bool,
         action: Option<&DesktopNotificationAction>,
     ) -> Result<(), String>;
+
+    /// 通知桥是否真的挂载了。
+    ///
+    /// 存在的理由：`DesktopNotifierSlot::show` 在没有挂载桥时返回 `Ok(())`
+    /// （降级而不是报错，那是对的），但调用方无法从 `Ok(())` 区分「真的发出去
+    /// 了」和「静默丢弃了」。后台轮询要据此决定日志写 `dispatched` 还是
+    /// `not delivered`，否则会误报成功。
+    ///
+    /// 默认 `true`：真正会投递的实现（如 `TauriDesktopNotifier`）不用管它。
+    fn is_mounted(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Default)]
@@ -160,6 +172,15 @@ impl DesktopNotifier for DesktopNotifierSlot {
             return Ok(());
         };
         notifier.show(title, body, image, play_sound, action)
+    }
+
+    /// 挂载了桥才算已挂载。没挂载时 `show` 返回 `Ok(())`，但那是降级，
+    /// 不是投递成功。
+    fn is_mounted(&self) -> bool {
+        match self.inner.lock() {
+            Ok(slot) => slot.is_some(),
+            Err(_) => false,
+        }
     }
 }
 

@@ -15,6 +15,13 @@ const VRCC_STAR_KEY: &str = "vrccStar";
 const VRCC_VRC_NAME_KEY: &str = "vrccVrcName";
 const VRCC_SCOPE_KEY: &str = "vrccScope";
 
+/// 签发这个令牌时用的 `X-Client`。
+///
+/// 令牌只能配签发它的那个 client 使用（官方《设备授权》一节），换了标识会
+/// 得到 `403 client_mismatch`。存下来才能在换标识后认出「这个令牌作废了」，
+/// 而不是启动时照样恢复成「已连接」、之后每次请求都 403。
+const VRCC_CLIENT_ID_KEY: &str = "vrccClientId";
+
 /// 从配置表读写的令牌仓库。
 ///
 /// **按 VRChat 账号隔离**：星遇同频的令牌和其它玩家数据一样属于某个人，
@@ -43,6 +50,8 @@ pub struct StoredVrccCredential {
     pub star: Option<i64>,
     pub vrc_name: Option<String>,
     pub scope: Option<String>,
+    /// 签发这个令牌时用的 X-Client；旧存档没有这一项。
+    pub client_id: Option<String>,
 }
 
 impl LocalVrccTokenStore {
@@ -114,6 +123,7 @@ impl LocalVrccTokenStore {
             star: self.load_i64(VRCC_STAR_KEY)?,
             vrc_name: self.load_string(VRCC_VRC_NAME_KEY)?,
             scope: self.load_string(VRCC_SCOPE_KEY)?,
+            client_id: self.load_string(VRCC_CLIENT_ID_KEY)?,
         }))
     }
 
@@ -158,6 +168,7 @@ impl LocalVrccTokenStore {
         )?;
         self.save_optional_string(VRCC_VRC_NAME_KEY, credential.vrc_name.as_deref())?;
         self.save_optional_string(VRCC_SCOPE_KEY, credential.scope.as_deref())?;
+        self.save_optional_string(VRCC_CLIENT_ID_KEY, credential.client_id.as_deref())?;
         Ok(())
     }
 
@@ -203,6 +214,7 @@ mod tests {
             star: Some(77),
             vrc_name: Some("拾光".into()),
             scope: Some("profile maps".into()),
+            client_id: Some("dev-test".into()),
         };
         assert_eq!(credential.token, "abc");
         assert_eq!(credential.star, Some(77));
@@ -264,6 +276,7 @@ mod tests {
             star: Some(645),
             vrc_name: None,
             scope: Some("profile notifications maps".into()),
+            client_id: Some("dev-test".into()),
         }
     }
 

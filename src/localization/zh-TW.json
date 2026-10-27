@@ -652,6 +652,9 @@
     },
     "overlay": {
         "footer": {
+            "vrcc_unread": "未讀 {count}",
+            "vrcc_rank": "本圖第 {rank} 名",
+            "vrcc_rank_avg": "本圖第 {rank} 名 · 均分 {avg}",
             "players": "{count} 位用戶",
             "instance_duration": "停留 {duration}",
             "online_duration": "線上 {duration}"
@@ -788,79 +791,104 @@
         "toggle_theme": "切換主題"
     },
     "vrcc": {
-        "title": "星遇同频",
-        "description": "星遇同频（vrcc.cc）的地图榜、提醒与连接状态",
-        "not_connected": "未连接",
-        "connected": "已连接",
-        "service_down": "服务不可用",
-        "go_connect": "去连接",
-        "reconnect_hint": "去「我的」重新连接",
-        "missing_scope": "这一项需要 {scope} 权限，重新连接时勾上",
+        "title": "星遇同頻",
+        "description": "星遇同頻（vrcc.cc）的地圖榜、提醒與連線狀態",
+        "not_connected": "未連線",
+        "connected": "已連線",
+        "service_down": "服務無法使用",
+        "go_connect": "去連線",
+        "reconnect_hint": "去「我的」重新連線",
+        "missing_scope": "這一項需要 {scope} 權限，重新連線時勾選",
         "tab": {
-            "maps": "地图榜",
+            "maps": "地圖榜",
             "notifications": "提醒",
             "me": "我的",
-            "mutuals": "连上"
+            "mutuals": "連上"
         },
         "maps": {
-            "hint": "满 {min} 人评分才进总榜",
-            "empty": "暂无榜单数据",
-            "open": "在星遇同频打开"
+            "hint": "滿 {min} 人評分才進總榜",
+            "empty": "暫無榜單資料",
+            "open": "在星遇同頻打開",
+            "sort": {
+                "top": "总榜",
+                "week": "本週",
+                "new": "新上榜"
+            },
+            "week_count": "本週 {count}"
         },
         "current_map": {
-            "label": "你所在的图",
-            "open": "在世界详情里打开",
-            "not_ranked": "这张图还没进地图榜。在星遇同频打分后会提交收录审核。",
+            "label": "你所在的地圖",
+            "open": "在世界詳情裡開啟",
+            "not_ranked": "這張圖還沒進地圖榜。在星遇同頻打分後會提交收錄審核。",
             "avg": "均分",
-            "raters": "人数",
+            "raters": "人數",
             "mine": "我打的",
-            "pending": "审核中",
-            "words_pending": "短评审核中",
-            "words_hidden": "短评未通过审核",
-            "need_verify": "打分前请先在星遇同频「我的资料 → VRChat 名字」验证账号。",
-            "need_friend": "打分前请先在 VRChat 中同意机器人「VRCC的小助手」的好友请求。",
-            "need_go": "机器人暂未看到你在 VRChat 中在线，请稍后再试。",
-            "need_other": "现在还打不了分。"
+            "pending": "審核中",
+            "words_pending": "短評審核中",
+            "words_hidden": "短評未通過審核"
         },
         "notifications": {
-            "need_connect": "连接星遇同频后，提醒会出现在这里",
-            "empty": "最近没有新的提醒",
-            "untitled": "提醒"
+            "need_connect": "連線星遇同頻後，提醒會出現在這裡",
+            "empty": "最近沒有新的提醒",
+            "untitled": "提醒",
+            "view": {
+                "recent": "提醒",
+                "notes": "通知"
+            },
+            "notes_empty": "通知中心是空的"
         },
         "me": {
-            "status": "连接",
-            "star": "星号",
+            "status": "連線",
+            "star": "星號",
             "vrc_name": "VRChat 名字",
-            "scope": "权限",
-            "client": "客户端标识",
-            "next_poll": "下次轮询",
-            "disconnect": "断开连接",
-            "connect_hint": "用下面的连接码在星遇同频网页上同意，这里会自动连上。令牌只存在本机，只发给 vrcc.cc。",
-            "begin": "开始连接",
+            "scope": "權限",
+            "client": "客戶端標識",
+            "next_poll": "下次輪詢",
+            "disconnect": "斷開連線",
+            "connect_hint": "用下面的授權碼在星遇同頻網頁上同意，這裡會自動連上。權杖只存在本機，只發給 vrcc.cc。",
+            "begin": "開始連線",
             "auth_pending": "等待同意",
-            "auth_hint": "在浏览器里打开下面的链接，或手动输入连接码：",
-            "open_browser": "在浏览器打开",
-            "auth_expires": "{minutes} 分钟内有效，每 {sec} 秒检查一次",
-            "usage": "本客户端用量",
-            "personal_used": "个人接口",
-            "device_code_used": "申请连接码",
-            "window": "本分钟请求",
-            "usage_note": "这是本客户端自己记的次数，不是服务器的剩余额度——官方没有查询剩余额度的接口。",
-            "disclaimer": "第三方客户端，不是星遇同频官方。",
-            "client_dev": "测试中",
-            "code_copied": "授权码 {code} 已复制",
-            "open_browser_failed": "打不开浏览器，请手动打开星遇同频网页"
+            "auth_hint": "在瀏覽器裡開啟下面的連結，或手動輸入授權碼：",
+            "open_browser": "在瀏覽器開啟",
+            "auth_expires": "{minutes} 分鐘內有效，每 {sec} 秒檢查一次",
+            "usage": "今日用量",
+            "personal_used": "個人介面",
+            "device_code_used": "申請授權碼",
+            "window": "本分鐘請求",
+            "usage_note": "這是本客戶端自己記的次數；下一次請求拿到伺服器的數後，這裡會換成準數。",
+            "disclaimer": "第三方客戶端，不是星遇同頻官方。",
+            "client_dev": "測試中",
+            "code_copied": "授權碼 {code} 已複製",
+            "open_browser_failed": "打不開瀏覽器，請手動開啟星遇同頻網頁",
+            "usage_note_server": "數字來自星遇同頻伺服器，是這個連線今天的次數，北京時間零點重置。",
+            "unread_used": "未讀數",
+            "expired": "上一次的連線已失效：可能在星遇同頻網頁上斷開了、在別處重新授權過，或 90 天沒用自動斷開了。請重新連線。"
         },
         "error": {
-            "unknown": "操作失败，请稍后再试"
+            "unknown": "操作失敗，請稍後再試"
         },
         "mutuals": {
-            "need_connect": "连接星遇同频后，这里会显示互相连上的星友",
-            "empty": "还没有互相连上的星友",
-            "needs_scope": "「互相连上」需要 mutuals 权限，重新连接时勾上。",
+            "need_connect": "連線星遇同頻後，這裡會顯示互相連上的星友",
+            "empty": "還沒有互相連上的星友",
+            "needs_scope": "「互相連上」需要 mutuals 權限，重新連線時勾選。",
             "unnamed": "未命名",
-            "open_profile": "在 VRChat 玩家详情里打开",
-            "unavailable": "这一项需要额外权限，当前客户端还没开通"
+            "open_profile": "在 VRChat 玩家詳情裡開啟",
+            "unavailable": "這一項需要額外權限，當前客戶端還沒開通",
+            "rate_mine": "我給 TA 的分"
+        },
+        "unread": {
+            "inbox": "連向我",
+            "cross": "星軌相交",
+            "chats": "私聊",
+            "notes": "通知"
+        },
+        "stop": {
+            "title": "星遇同頻正在停站維護",
+            "until": "預計 {time} 恢復"
+        },
+        "announcement": {
+            "open": "查看",
+            "dismiss": "關閉這條公告"
         }
     },
     "nav_menu": {

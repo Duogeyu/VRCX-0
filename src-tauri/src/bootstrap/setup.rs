@@ -47,8 +47,7 @@ pub fn init_error_logging(app_data: Option<PathBuf>) {
         default_panic_hook(panic_info);
     }));
 
-    let tracing_app_data = app_data.clone();
-    let diagnostic_app_data = app_data;
+    let tracing_app_data = app_data;
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer().with_filter(
@@ -69,41 +68,7 @@ pub fn init_error_logging(app_data: Option<PathBuf>) {
                     should_capture_gui_error(metadata.level(), metadata.target())
                 })),
         )
-        // 诊断日志：单开一个文件，收 debug 及以上的本项目事件。
-        //
-        // 为什么不并进 error-log.txt：那个文件装的是 error，混入 debug 会让
-        // 「最近出过什么错」得靠翻找。分开之后 error-log 保持精简，
-        // diagnostic-log 提供完整时间线，各看各的。
-        //
-        // 这一层正是给「请人帮忙复现」用的：对方只要把这个文件发回来，
-        // 就能看到轮询起没起、连没连上、通知弹了几次、每次失败的原因。
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(move || {
-                    vrcx_0_platform::error_log::ErrorLogWriter::with_file_name_and_version(
-                        diagnostic_app_data.clone(),
-                        DIAGNOSTIC_LOG_FILE,
-                        Some(APP_VERSION),
-                    )
-                })
-                .with_filter(filter_fn(|metadata| {
-                    should_capture_gui_diagnostic(metadata.level(), metadata.target())
-                })),
-        )
         .init();
-}
-
-/// 诊断日志的文件名（落在应用数据目录里）。
-const DIAGNOSTIC_LOG_FILE: &str = "diagnostic-log.txt";
-
-/// 诊断日志收哪些事件：debug 及以上，来源是本项目的 crate。
-///
-/// 不像错误日志那样只收 `ERROR`——诊断的价值恰恰在于「一切正常时也能看到
-/// 它走到哪一步了」。排除第三方 crate 的 debug：那些量大且与本项目无关。
-fn should_capture_gui_diagnostic(level: &Level, target: &str) -> bool {
-    level <= &Level::DEBUG
-        && (target == "vrcx_0" || target.starts_with("vrcx_0::") || target.starts_with("vrcx_0_"))
 }
 
 pub fn init_tls_crypto_provider() {

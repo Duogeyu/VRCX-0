@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use vrcx_0_application::vrcc::{StoredCredential, VrccService, VrccTokenStore};
+use vrcx_0_application::vrcc::{StoredCredential, VrccFailure, VrccService, VrccTokenStore};
 use vrcx_0_contracts::vrcc::{
-    VrccBoard, VrccConnectionSnapshot, VrccRecentNotifications, VrccStatus, VrccToday,
-    VrccUsageSnapshot, VrccWristSummary,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccNotes,
+    VrccRecentNotifications, VrccStatus, VrccToday, VrccUnread, VrccUsageSnapshot,
+    VrccWristSummary,
 };
-use vrcx_0_integrations::vrcc::resolve_client_id;
+use vrcx_0_integrations::vrcc::{resolve_client_id, VrccError};
 use vrcx_0_outbound_adapters::LocalVrccTokenStore;
 
 /// 把本地加密仓库适配成应用层端口。
@@ -27,6 +28,7 @@ impl VrccTokenStore for TokenStoreAdapter {
             star: credential.star,
             vrc_name: credential.vrc_name,
             scope: credential.scope,
+            client_id: credential.client_id,
         }))
     }
 
@@ -37,6 +39,7 @@ impl VrccTokenStore for TokenStoreAdapter {
                 star: credential.star,
                 vrc_name: credential.vrc_name.clone(),
                 scope: credential.scope.clone(),
+                client_id: credential.client_id.clone(),
             })
     }
 
@@ -45,10 +48,15 @@ impl VrccTokenStore for TokenStoreAdapter {
     }
 }
 
-/// 星遇同频提醒发生变化时发给前端的事件名。
+/// 星遇同频提醒或未读数发生变化时发给前端的事件名。
 ///
 /// 只作为「该刷新了」的信号，不带正文——玩家内容没必要经手额外的事件层。
 pub const VRCC_NOTICES_CHANGED_EVENT: &str = "vrccNoticesChanged";
+
+/// 令牌被服务器判了失效（`404 gone`）、本地已经清掉时发给前端的事件名。
+///
+/// 前端收到后重读连接状态，显示「连接已失效，请重新连接」。
+pub const VRCC_CONNECTION_CHANGED_EVENT: &str = "vrccConnectionChanged";
 
 /// 桌面侧的星遇同频运行时。
 pub struct DesktopVrccRuntime {
@@ -58,8 +66,9 @@ pub struct DesktopVrccRuntime {
 impl DesktopVrccRuntime {
     /// 后台轮询的基准间隔。
     ///
-    /// 官方建议 60 秒，并明确 `/me/notifications` 有 25 秒的最小间隔。
-    /// 取 60 是照官方建议，不是我们保守。
+    /// 官方建议按 `me/notifications` 返回的 `every`（通常 60 秒）问，最少隔
+    /// 25 秒。这里取 60 秒和 `every` 里大的那个：`me/unread` 每天 1500 次，
+    /// 一分钟问一次正好够一整天。
     const BACKGROUND_POLL_BASE: Duration = Duration::from_secs(60);
     /// 抖动上限，避免所有客户端撞在同一秒（官方脚本也这样做）。
     const BACKGROUND_POLL_JITTER: Duration = Duration::from_secs(20);
@@ -93,13 +102,16 @@ impl DesktopVrccRuntime {
         ));
         let port = Arc::new(TokenStoreAdapter { inner: store });
         let client_id = resolve_client_id(client_override);
-        Self {
-            service: Arc::new(VrccService::with_usage_store(
-                port,
+        // 网络端口的实现放在 outbound-adapters：应用层不认识 `VrccSession`，
+        // 这里只把它当作 `Arc<dyn VrccRemote>` 注入。
+        let remote: Arc<dyn vrcx_0_application::vrcc::VrccRemote> =
+            Arc::new(vrcx_0_outbound_adapters::VrccRemoteAdapter::new(
                 client_id,
                 proxy_url.map(str::to_string),
                 Some(usage_store),
-            )),
+            ));
+        Self {
+            service: Arc::new(VrccService::new(port, remote)),
         }
     }
 
@@ -116,96 +128,128 @@ impl DesktopVrccRuntime {
         self.service.usage()
     }
 
-    pub fn client_id(&self) -> &str {
+    pub fn client_id(&self) -> String {
         self.service.client_id()
     }
 
     /// 地图榜：开放数据，不需要连接。
-    pub async fn boards(&self, limit: u32) -> Result<VrccBoard, String> {
+    pub async fn boards(&self, limit: u32, sort: VrccBoardSort) -> Result<VrccBoard, VrccFailure> {
         self.service
-            .boards(limit)
+            .boards(limit, sort)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
-    pub async fn status(&self) -> Result<VrccStatus, String> {
+    pub async fn status(&self) -> Result<VrccStatus, VrccFailure> {
         self.service
             .status()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 公告和停站。服务器还没有这个接口时为 `None`。
+    pub async fn announcements(&self) -> Result<Option<VrccAnnouncements>, VrccFailure> {
+        self.service
+            .announcements()
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
     pub async fn begin_device_auth(
         &self,
         scope: Option<String>,
-    ) -> Result<vrcx_0_application::vrcc::VrccDeviceAuthPrompt, String> {
+    ) -> Result<vrcx_0_application::vrcc::VrccDeviceAuthPrompt, VrccFailure> {
         self.service
             .begin_device_auth(scope.as_deref())
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
     pub async fn poll_device_auth(
         &self,
         prompt: &vrcx_0_application::vrcc::VrccDeviceAuthPrompt,
-    ) -> Result<vrcx_0_application::vrcc::VrccDeviceAuthStep, String> {
+    ) -> Result<vrcx_0_application::vrcc::VrccDeviceAuthStep, VrccFailure> {
         self.service
             .poll_device_auth(prompt)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
-    pub async fn disconnect(&self) -> Result<(), String> {
+    pub async fn disconnect(&self) -> Result<(), VrccFailure> {
         self.service
             .disconnect()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
     /// 最近的提醒。`mark` 为 `true` 时同时把已读状态同步到账号（跨设备）。
     pub async fn recent_notifications(
         &self,
         mark: bool,
-    ) -> Result<VrccRecentNotifications, String> {
+    ) -> Result<VrccRecentNotifications, VrccFailure> {
         self.service
             .recent_notifications(mark)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
     pub async fn poll_notifications(
         &self,
-    ) -> Result<vrcx_0_contracts::vrcc::VrccNotifications, String> {
+    ) -> Result<vrcx_0_contracts::vrcc::VrccNotifications, VrccFailure> {
         self.service
             .poll_notifications()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 几处未读数。
+    ///
+    /// `refresh` 为 `false` 时只读后台轮询留下的缓存，不发请求——前端收到
+    /// 「有变化」的事件时用这个，后台刚问过，不必再花一次。服务器还没有
+    /// `me/unread` 时为 `None`。
+    pub async fn unread(&self, refresh: bool) -> Result<Option<VrccUnread>, VrccFailure> {
+        if !refresh {
+            return Ok(self.service.cached_unread());
+        }
+        self.service
+            .refresh_unread()
+            .await
+            .map(|result| result.map(|(counts, _)| counts))
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 通知中心。服务器还没有这个接口时为 `None`。
+    pub async fn notes(&self) -> Result<Option<VrccNotes>, VrccFailure> {
+        self.service
+            .notes()
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
     /// 当前所在地图在地图榜上的状态。`off` 的地图返回 `None`（不给看）。
     pub async fn my_map(
         &self,
         world: &str,
-    ) -> Result<Option<vrcx_0_contracts::vrcc::VrccMyMap>, String> {
+    ) -> Result<Option<vrcx_0_contracts::vrcc::VrccMyMap>, VrccFailure> {
         self.service
             .my_map(world)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
-    pub async fn today(&self) -> Result<VrccToday, String> {
+    pub async fn today(&self) -> Result<VrccToday, VrccFailure> {
         self.service
             .today()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
     /// 「互相连上」的星友列表。需要 `mutuals` 敏感权限。
-    pub async fn mutuals(&self) -> Result<vrcx_0_contracts::vrcc::VrccMutuals, String> {
+    pub async fn mutuals(&self) -> Result<vrcx_0_contracts::vrcc::VrccMutuals, VrccFailure> {
         self.service
             .mutuals()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| VrccFailure::from_error(&error))
     }
 
     /// 起一个后台轮询任务，把新提醒推成系统通知。
@@ -221,8 +265,9 @@ impl DesktopVrccRuntime {
     /// 通知走宿主注入的 `DesktopNotifier`：Headless 下没人挂载它，
     /// `show()` 返回 `Err`，这里只记日志，不会 panic。
     ///
-    /// `event_sink` 用来告诉前端「有新数据了」。前端不再自己轮询——双轨会让
-    /// 两边各拉一次、`mark` 语义互相打架，而且隐藏窗口时前端定时器会被节流。
+    /// `event_sink` 用来告诉前端「有新数据了」或「连接失效了」。前端不再自己
+    /// 轮询——双轨会让两边各拉一次、`mark` 语义互相打架，而且隐藏窗口时前端
+    /// 定时器会被节流。
     pub fn spawn_background_poll(
         &self,
         supervisor: &vrcx_0_application_core::TaskSupervisor,
@@ -268,7 +313,7 @@ impl DesktopVrccRuntime {
                         return;
                     }
                     round = round.wrapping_add(1);
-                    // 未连接时不必轮询：`recent_notifications` 会直接报错。
+                    // 未连接时不必轮询：个人接口会直接报错。
                     // owner 由任务自身固定持有（见 spawn 的注释），不必再判空。
                     if service.snapshot().connected {
                         match poll_once(
@@ -285,7 +330,8 @@ impl DesktopVrccRuntime {
                                 // 排查时打开 RUST_LOG=debug 就有完整时间线。
                                 tracing::debug!(
                                     round,
-                                    unread = outcome.unread,
+                                    fresh = outcome.fresh,
+                                    unread = ?outcome.unread,
                                     toast_attempted = outcome.toast_attempted,
                                     changed = outcome.changed,
                                     "vrcc: background poll round finished"
@@ -296,6 +342,15 @@ impl DesktopVrccRuntime {
                                 if let Some(event) = outcome.event_to_emit() {
                                     event_sink.emit(event, json!({}));
                                 }
+                            }
+                            Err(error) if error.is_gone() => {
+                                // 令牌失效，应用层已经把它清掉了：之后几轮会因为
+                                // 未连接而跳过，等玩家重新连接。告诉前端改显示。
+                                tracing::info!(
+                                    round,
+                                    "vrcc: token gone, background poll idle until reconnect"
+                                );
+                                event_sink.emit(VRCC_CONNECTION_CHANGED_EVENT, json!({}));
                             }
                             Err(error) => {
                                 // 不把错误抛出去：一次失败不该杀掉整个轮询。
@@ -309,7 +364,8 @@ impl DesktopVrccRuntime {
                     }
                     // 用带抖动的固定间隔。这里刻意用 `sleep` 而不是绝对时刻对齐：
                     // 唤醒后最多补一次，不会像"补 N 个周期"那样突发请求。
-                    let delay = base + Duration::from_millis(jitter_millis(&jitter));
+                    let every = Duration::from_secs(service.poll_every_secs().max(0) as u64);
+                    let delay = base.max(every) + Duration::from_millis(jitter_millis(&jitter));
                     tracing::debug!(
                         round,
                         delay_ms = delay.as_millis() as u64,
@@ -324,14 +380,16 @@ impl DesktopVrccRuntime {
 
 /// 一次轮询的结果，用于日志与事件判定。
 ///
-/// 拆成结构体而不是裸 `bool`：排查时最常问的三个问题分别是「拉到几条」、
-/// 「有几条未读」、「弹出去几次」，只回一个布尔值等于什么都没说。
+/// 拆成结构体而不是裸 `bool`：排查时最常问的问题分别是「来了几条新的」、
+/// 「现在几处未读」、「弹出去几次」，只回一个布尔值等于什么都没说。
 #[derive(Clone, Copy, Debug, Default)]
 struct PollOutcome {
-    /// 判定为未读（`id > read`）的条数。
-    unread: usize,
+    /// 这一轮 `me/notifications` 给的新提醒条数。
+    fresh: usize,
     /// 实际尝试弹系统通知的次数（受 `MAX_NOTIFIED_PER_POLL` 限制）。
     toast_attempted: usize,
+    /// `me/unread` 的合计；服务器还没有这个接口时为 `None`。
+    unread: Option<i64>,
     /// 是否需要让前端刷新。
     changed: bool,
 }
@@ -351,43 +409,64 @@ impl PollOutcome {
     }
 }
 
-/// 一次轮询：拉最近提醒，把「还没弹过」的发成系统通知。
+/// 一次轮询。
 ///
-/// **未读的判定**：`recent` 里的 `read` 是玩家最后已读的提醒 id（顶层游标），
-/// 不是每条条目上的标记。所以 `item.id > read` 才算未读——和服务端语义一致，
-/// 也解释了为什么 `read` 为 `None` 时所有条目都算未读。
+/// 1. `me/notifications?since=`：官方给桌面客户端设计的轮询，**没有每天上限**，
+///    每次只给游标之后的新提醒，所以每条只弹一次。第一次不带游标，服务器只
+///    告诉「现在到哪了」，不给旧提醒——启动时不会把一天的旧提醒全弹一遍。
+/// 2. `me/unread`（1.13.0 起）：几处红点的数字，每天 1500 次单独计数，给腕表和
+///    页面角标。
+/// 3. 旧服务器没有 `me/unread` 时，只在刚连上或来了新提醒时拉一次「最近的提醒」
+///    （每天 1000 次的第一份读），腕表的未读数靠它。
+///
+/// 原来每轮都拉「最近的提醒」：一分钟一次一整天要一千多次，超过第一份读的
+/// 每天上限；而且只要玩家没在网页上看过，同一条提醒每轮都会再弹一次。
 async fn poll_once(
     service: &VrccService,
     notifier: &dyn crate::notification::DesktopNotifier,
     notified: &NotifiedIds,
     icon: &mut NoticeIcon,
     owner: &vrcx_0_core::OwnerId,
-) -> Result<PollOutcome, String> {
-    let recent = service
-        .recent_notifications(false)
-        .await
-        .map_err(|error| error.to_string())?;
+) -> Result<PollOutcome, VrccError> {
+    let first_poll = service.notifications_cursor().is_none();
+    let fresh = match service.poll_notifications().await {
+        Ok(result) => result.items,
+        // 离上一次不到 25 秒（比如刚重新连上）：这一轮没有新的，下一轮补上。
+        Err(VrccError::TooSoon { .. }) => Vec::new(),
+        Err(error) => return Err(error),
+    };
 
-    // 只有真的要弹通知时才去解析图标：没提醒就不该产生任何额外流量。
-    let has_unread = recent
-        .items
-        .iter()
-        .any(|item| item.id > recent.read.unwrap_or(0));
-    let icon_path = if has_unread {
-        icon.resolve(service).await
-    } else {
+    // 只有真有新提醒时才去解析图标：没新提醒就不该产生任何额外流量。
+    let icon_path = if fresh.is_empty() {
         None
+    } else {
+        icon.resolve(service).await
     };
 
     // 拉取与处理分开：`handle_recent_notices` 只接收数据、不看网络，
     // 于是「拿到什么样的数据 → 弹哪些通知」可以脱离服务端直接测。
-    Ok(handle_recent_notices(
-        &recent,
-        notifier,
-        notified,
-        icon_path,
-        Some(owner.clone()),
-    ))
+    let mut outcome =
+        handle_recent_notices(&fresh, notifier, notified, icon_path, Some(owner.clone()));
+
+    match service.refresh_unread().await {
+        Ok(Some((counts, changed))) => {
+            outcome.unread = Some(counts.total());
+            outcome.changed |= changed;
+        }
+        Ok(None) => {
+            if first_poll || !fresh.is_empty() {
+                match service.recent_notifications(false).await {
+                    Ok(_) => outcome.changed = true,
+                    Err(error) if error.is_gone() => return Err(error),
+                    Err(error) => tracing::warn!(%error, "vrcc: recent notices refresh failed"),
+                }
+            }
+        }
+        Err(error) if error.is_gone() => return Err(error),
+        // 未读数拿不到不影响提醒：记一笔，下一轮再试。
+        Err(error) => tracing::warn!(%error, "vrcc: unread count failed"),
+    }
+    Ok(outcome)
 }
 
 /// 已弹过通知的提醒 id 集合。
@@ -427,53 +506,44 @@ impl NotifiedIds {
     }
 }
 
-/// 处理一批刚拉到的提醒：算未读、挑出要弹的、交给 notifier。
+/// 处理一批刚拉到的新提醒：挑出要弹的、交给 notifier。
 ///
 /// 这个函数不发请求也不读时钟，是排查「为什么没弹」时最该被测试覆盖的一段。
 ///
 /// `icon` 是通知图标的本地路径（Windows toast 只接受本地文件，不接受 URL）。
 /// 传 `None` 也能正常发通知，只是没有图。
 fn handle_recent_notices(
-    recent: &vrcx_0_contracts::vrcc::VrccRecentNotifications,
+    items: &[vrcx_0_contracts::vrcc::VrccNotificationItem],
     notifier: &dyn crate::notification::DesktopNotifier,
     notified: &NotifiedIds,
     icon: Option<&std::path::Path>,
     owner: Option<vrcx_0_core::OwnerId>,
 ) -> PollOutcome {
-    // 没有游标 = 全都没读过。
-    let read_cursor = recent.read.unwrap_or(0);
-    let total = recent.items.len();
-    let unread = recent
-        .items
-        .iter()
-        .filter(|item| item.id > read_cursor)
-        .count();
-
-    tracing::debug!(total, unread, read_cursor, "vrcc: fetched recent notices");
+    tracing::debug!(fresh = items.len(), "vrcc: fetched new notices");
 
     // 决策与投递分开：`select_notices_to_notify` 是纯函数，可以脱离网络和
     // 通知桥单独测。这里只负责把它选出来的结果交给 notifier。
-    let selection = select_notices_to_notify(&recent.items, read_cursor, MAX_NOTIFIED_PER_POLL);
+    let selection = select_notices_to_notify(items, MAX_NOTIFIED_PER_POLL);
 
-    // 真正要弹的是「选中 且 之前没弹过」的那些。这一层不能省：游标不前进时
-    // `selection` 每轮都一样，只靠它会导致重复打扰。
+    // 真正要弹的是「选中 且 之前没弹过」的那些。`?since=` 由服务端保证每条只给
+    // 一次，但重连、换号、或服务器重发同一批时仍可能重复，本地这一层不能省。
     let candidates = selection.notices;
     let fresh_ids = notified.take_new(candidates.iter().map(|notice| notice.id));
     let notices: Vec<_> = candidates
         .into_iter()
         .filter(|notice| fresh_ids.contains(&notice.id))
         .collect();
-    // 本轮被本地去重挡下的条数：非零说明「服务端还认为未读，但已经弹过了」，
-    // 这正是游标不前进时的常态，值得在 debug 里看见。
+    // 本轮被本地去重挡下的条数：非零说明「服务端又给了一遍已经弹过的」，
+    // 值得在 debug 里看见。
     let already_notified = fresh_ids.len().saturating_sub(notices.len());
 
-    if selection.deferred > 0 {
-        // 有未读但超出本轮上限：这是「玩家可能没被及时通知」的唯一线索。
+    if selection.skipped > 0 {
+        // 一轮来了太多：老的那几条不弹，在「提醒」页里看得到。
         tracing::warn!(
-            unread,
+            fresh = items.len(),
             limit = MAX_NOTIFIED_PER_POLL,
-            deferred = selection.deferred,
-            "vrcc: unread notices exceed per-poll toast limit; remaining deferred"
+            skipped = selection.skipped,
+            "vrcc: new notices exceed per-poll toast limit; older ones not toasted"
         );
     }
     if already_notified > 0 {
@@ -487,6 +557,10 @@ fn handle_recent_notices(
     // `DesktopNotifier` 的 image 参数是字符串（Windows 侧最终当成文件路径用），
     // 这里把 Path 转一次，转换失败（非 UTF-8 路径）就当作没有图标。
     let icon_str = icon.and_then(|path| path.to_str());
+    // 通知桥没挂载时（Headless、或后台模式早期），`DesktopNotifierSlot::show`
+    // 会返回 `Ok(())`。那样下面会把每条都记成 dispatched，恰好在最需要排查
+    // 「为什么没弹通知」的时候误报成功。所以先问一次挂没挂。
+    let delivered = notifier.is_mounted();
     for notice in &notices {
         // **带 action 是为了让图标生效**，不只是为了点击跳转。
         //
@@ -514,6 +588,14 @@ fn handle_recent_notices(
             true,
             action.as_ref(),
         ) {
+            Ok(()) if !delivered => {
+                // 桥没挂载：`show` 返回 `Ok(())` 是降级，不是投递成功。
+                // 这条日志存在的意义就是别让人以为通知发出去了。
+                tracing::warn!(
+                    notice_id = notice.id,
+                    "vrcc: desktop notification swallowed; no notifier is mounted"
+                );
+            }
             Ok(()) => {
                 // 只记 id 与长度，不记正文：提醒内容属于玩家数据。
                 tracing::info!(
@@ -525,7 +607,6 @@ fn handle_recent_notices(
                 );
             }
             Err(error) => {
-                // Headless 或未挂载通知桥时走到这里。
                 tracing::warn!(notice_id = notice.id, %error, "vrcc: desktop notification not delivered");
             }
         }
@@ -533,15 +614,16 @@ fn handle_recent_notices(
     }
 
     PollOutcome {
-        unread,
+        fresh: items.len(),
         toast_attempted,
-        changed: unread > 0,
+        unread: None,
+        changed: !items.is_empty(),
     }
 }
 
 /// 每次轮询最多弹几条。
 ///
-/// 首次连接时可能一次性拉到很多历史提醒，全弹出来会刷屏。
+/// `me/notifications` 一次最多给 5 条，全弹出来会刷屏。
 const MAX_NOTIFIED_PER_POLL: usize = 3;
 
 /// 在 `0..jitter` 里取一个伪随机毫秒数。
@@ -640,41 +722,31 @@ struct NoticeToNotify {
 /// `select_notices_to_notify` 的结果。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct NoticeSelection {
-    /// 本轮要弹的通知，已按 `limit` 截断。
+    /// 本轮要弹的通知，已按 `limit` 截断，旧的在前。
     notices: Vec<NoticeToNotify>,
-    /// 因超出 `limit` 而推迟到下一轮的条数。
+    /// 因超出 `limit` 而没弹的条数。
     ///
-    /// 单独暴露而不是让调用方再数一遍：它是「玩家可能没被及时通知」的唯一
-    /// 指标，日志里要靠它说话。
-    deferred: usize,
+    /// 游标已经过去了，它们不会在下一轮再来，只能在「提醒」页里看到。
+    /// 单独暴露而不是让调用方再数一遍：日志里要靠它说话。
+    skipped: usize,
 }
 
 /// 决定这一轮该弹哪些通知。
 ///
-/// 纯函数：不碰网络、不碰通知桥、不读时钟。这样「未读怎么判、上限怎么截、
-/// 迟到的那批怎么算」都能脱离环境直接测——而这正是最容易写错、也最难在
-/// 真机上复现的部分。
+/// 纯函数：不碰网络、不碰通知桥、不读时钟。
 ///
 /// 规则：
-/// - `id > read_cursor` 才算未读（`read_cursor` 是服务端的已读游标）；
-/// - 最多返回 `limit` 条，超出的计入 `deferred`；
+/// - `items` 都是游标之后的新提醒（旧的在前），不用再判已读；
+/// - 最多弹 `limit` 条，挑最新的那几条，按时间顺序弹，最新的落在最上面；
 /// - 标题为空时用「星遇同频」，避免弹出一个没有标题的空通知。
 fn select_notices_to_notify(
-    items: &[vrcx_0_contracts::vrcc::VrccRecentNotificationItem],
-    read_cursor: i64,
+    items: &[vrcx_0_contracts::vrcc::VrccNotificationItem],
     limit: usize,
 ) -> NoticeSelection {
-    let mut notices = Vec::new();
-    let mut deferred = 0usize;
-    for item in items {
-        if item.id <= read_cursor {
-            continue;
-        }
-        if notices.len() >= limit {
-            deferred += 1;
-            continue;
-        }
-        notices.push(NoticeToNotify {
+    let skipped = items.len().saturating_sub(limit);
+    let notices = items[skipped..]
+        .iter()
+        .map(|item| NoticeToNotify {
             id: item.id,
             title: item
                 .title
@@ -682,9 +754,9 @@ fn select_notices_to_notify(
                 .filter(|title| !title.trim().is_empty())
                 .unwrap_or_else(|| "星遇同频".to_string()),
             body: item.body.clone(),
-        });
-    }
-    NoticeSelection { notices, deferred }
+        })
+        .collect();
+    NoticeSelection { notices, skipped }
 }
 
 #[cfg(test)]
@@ -692,87 +764,58 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use vrcx_0_contracts::vrcc::VrccRecentNotificationItem;
+    use vrcx_0_contracts::vrcc::VrccNotificationItem;
 
-    fn item(id: i64, title: Option<&str>, body: Option<&str>) -> VrccRecentNotificationItem {
-        VrccRecentNotificationItem {
+    fn item(id: i64, title: Option<&str>, body: Option<&str>) -> VrccNotificationItem {
+        VrccNotificationItem {
             id,
             title: title.map(str::to_string),
             body: body.map(str::to_string),
             at: Some(1_700_000_000_000),
-            url: None,
         }
     }
 
     #[test]
-    fn selects_only_notices_after_the_read_cursor() {
-        let items = vec![
-            item(1, Some("old"), Some("a")),
-            item(2, Some("old"), Some("b")),
-            item(3, Some("new"), Some("c")),
-        ];
-        // 游标 2 表示 1、2 已读。
-        let selection = select_notices_to_notify(&items, 2, 10);
-        assert_eq!(selection.notices.len(), 1);
-        assert_eq!(selection.notices[0].id, 3);
-        assert_eq!(selection.deferred, 0);
-    }
-
-    #[test]
-    fn cursor_equal_to_newest_id_means_nothing_is_unread() {
-        let items = vec![item(7, Some("n"), None), item(8, Some("n"), None)];
-        let selection = select_notices_to_notify(&items, 8, 10);
-        assert!(selection.notices.is_empty());
-        assert_eq!(selection.deferred, 0);
-    }
-
-    #[test]
-    fn zero_cursor_treats_everything_as_unread() {
-        let items = vec![item(1, None, None), item(2, None, None)];
-        // 服务端返回 read 为 None 时调用方传 0，此时全部算未读。
-        let selection = select_notices_to_notify(&items, 0, 10);
-        assert_eq!(selection.notices.len(), 2);
-    }
-
-    #[test]
-    fn respects_the_limit_and_counts_what_it_deferred() {
-        let items = (1..=6).map(|id| item(id, None, None)).collect::<Vec<_>>();
-        let selection = select_notices_to_notify(&items, 0, 3);
-        assert_eq!(selection.notices.len(), 3);
-        // 6 条未读、上限 3 → 恰好推迟 3 条。
-        assert_eq!(selection.deferred, 3);
-        // 截断的是后面那批，不是随机挑。
+    fn every_new_notice_is_selected_in_order() {
+        let items = vec![item(41, Some("a"), None), item(42, Some("b"), None)];
+        let selection = select_notices_to_notify(&items, 10);
         assert_eq!(
             selection.notices.iter().map(|n| n.id).collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![41, 42]
         );
+        assert_eq!(selection.skipped, 0);
     }
 
     #[test]
-    fn deferred_counts_only_unread_over_the_limit() {
-        // 已读的条目不该被算进 deferred——它本来就轮不到弹。
-        let items = vec![
-            item(1, None, None), // 已读
-            item(2, None, None), // 未读，选中
-            item(3, None, None), // 未读，超限
-        ];
-        let selection = select_notices_to_notify(&items, 1, 1);
-        assert_eq!(selection.notices.len(), 1);
-        assert_eq!(selection.notices[0].id, 2);
-        assert_eq!(selection.deferred, 1);
+    fn nothing_new_selects_nothing() {
+        let selection = select_notices_to_notify(&[], 3);
+        assert!(selection.notices.is_empty());
+        assert_eq!(selection.skipped, 0);
+    }
+
+    #[test]
+    fn over_the_limit_keeps_the_newest_and_counts_the_rest() {
+        let items = (1..=5).map(|id| item(id, None, None)).collect::<Vec<_>>();
+        let selection = select_notices_to_notify(&items, 3);
+        // 弹最新的三条，按时间顺序。
+        assert_eq!(
+            selection.notices.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+        assert_eq!(selection.skipped, 2);
     }
 
     #[test]
     fn blank_title_falls_back_so_no_notification_is_titleless() {
         let items = vec![item(1, Some("   "), Some("body"))];
-        let selection = select_notices_to_notify(&items, 0, 10);
+        let selection = select_notices_to_notify(&items, 10);
         assert_eq!(selection.notices[0].title, "星遇同频");
     }
 
     #[test]
     fn keeps_the_body_verbatim() {
         let items = vec![item(1, Some("标题"), Some("正文内容"))];
-        let selection = select_notices_to_notify(&items, 0, 10);
+        let selection = select_notices_to_notify(&items, 10);
         assert_eq!(selection.notices[0].body.as_deref(), Some("正文内容"));
     }
 
@@ -789,12 +832,16 @@ mod tests {
 
     // -- handle_recent_notices：拉取与投递之间的那一段 --------------------
 
+    /// 假通知桥记下的一次调用：(标题, 正文, 图片路径)。
+    ///
+    /// 图片要一起记：它是本模块新加的能力，不记的话「图标有没有真的传给
+    /// notifier」就只能靠肉眼验证。
+    type ShownNotification = (String, Option<String>, Option<String>);
+
     /// 记录调用的假通知桥。
     #[derive(Default)]
     struct RecordingNotifier {
-        /// (标题, 正文, 图片路径)。图片要一起记：它是本模块新加的能力，
-        /// 不记的话「图标有没有真的传给 notifier」就只能靠肉眼验证。
-        shown: Mutex<Vec<(String, Option<String>, Option<String>)>>,
+        shown: Mutex<Vec<ShownNotification>>,
         fail: bool,
     }
 
@@ -832,46 +879,31 @@ mod tests {
         }
     }
 
-    fn recent(
-        read: Option<i64>,
-        items: Vec<vrcx_0_contracts::vrcc::VrccRecentNotificationItem>,
-    ) -> vrcx_0_contracts::vrcc::VrccRecentNotifications {
-        vrcx_0_contracts::vrcc::VrccRecentNotifications { items, read }
-    }
-
     #[test]
-    fn handle_notifies_unread_and_reports_changed() {
+    fn handle_notifies_new_notices_and_reports_changed() {
         let notifier = RecordingNotifier::default();
         let outcome = handle_recent_notices(
-            &recent(
-                Some(1),
-                vec![item(1, None, None), item(2, Some("新"), Some("正文"))],
-            ),
+            &[item(2, Some("新"), Some("正文"))],
             &notifier,
             &NotifiedIds::default(),
             None,
             None,
         );
-        assert_eq!(outcome.unread, 1);
+        assert_eq!(outcome.fresh, 1);
         assert_eq!(outcome.toast_attempted, 1);
         assert!(outcome.changed);
         let shown = notifier.shown.lock().unwrap().clone();
-        assert_eq!(shown.len(), 1);
-        assert_eq!(shown[0].0, "新");
-        assert_eq!(shown[0].1.as_deref(), Some("正文"));
+        assert_eq!(
+            shown,
+            vec![("新".to_string(), Some("正文".to_string()), None)]
+        );
     }
 
     #[test]
-    fn handle_does_nothing_when_everything_is_read() {
+    fn handle_does_nothing_when_nothing_is_new() {
         let notifier = RecordingNotifier::default();
-        let outcome = handle_recent_notices(
-            &recent(Some(9), vec![item(8, None, None), item(9, None, None)]),
-            &notifier,
-            &NotifiedIds::default(),
-            None,
-            None,
-        );
-        assert_eq!(outcome.unread, 0);
+        let outcome = handle_recent_notices(&[], &notifier, &NotifiedIds::default(), None, None);
+        assert_eq!(outcome.fresh, 0);
         assert_eq!(outcome.toast_attempted, 0);
         // 「没有变化」很关键：调用方据此决定要不要通知前端刷新。
         assert!(!outcome.changed);
@@ -883,45 +915,26 @@ mod tests {
         // 通知投递失败不影响「有新提醒」这个事实——界面仍然该刷新。
         let notifier = RecordingNotifier::failing();
         let outcome = handle_recent_notices(
-            &recent(Some(0), vec![item(5, None, None)]),
+            &[item(5, None, None)],
             &notifier,
             &NotifiedIds::default(),
             None,
             None,
         );
-        assert_eq!(outcome.unread, 1);
+        assert_eq!(outcome.fresh, 1);
         assert!(outcome.changed);
         // 尝试过一次，但没记成「已展示」。
         assert_eq!(outcome.toast_attempted, 1);
+        assert_eq!(notifier.count(), 0);
     }
 
     #[test]
-    fn handle_treats_missing_cursor_as_all_unread() {
+    fn handle_caps_toasts_but_still_reports_every_fresh_notice() {
+        // 上限只影响"弹几次"，不改变"来了几条"。
         let notifier = RecordingNotifier::default();
-        let outcome = handle_recent_notices(
-            &recent(None, vec![item(1, None, None), item(2, None, None)]),
-            &notifier,
-            &NotifiedIds::default(),
-            None,
-            None,
-        );
-        assert_eq!(outcome.unread, 2);
-        assert_eq!(outcome.toast_attempted, 2);
-    }
-
-    #[test]
-    fn handle_caps_toasts_but_still_reports_full_unread_count() {
-        // 上限只影响"弹几次"，不改变"有多少未读"——后者决定界面角标。
-        let notifier = RecordingNotifier::default();
-        let items = (1..=10).map(|id| item(id, None, None)).collect::<Vec<_>>();
-        let outcome = handle_recent_notices(
-            &recent(Some(0), items),
-            &notifier,
-            &NotifiedIds::default(),
-            None,
-            None,
-        );
-        assert_eq!(outcome.unread, 10);
+        let items = (1..=5).map(|id| item(id, None, None)).collect::<Vec<_>>();
+        let outcome = handle_recent_notices(&items, &notifier, &NotifiedIds::default(), None, None);
+        assert_eq!(outcome.fresh, 5);
         assert_eq!(outcome.toast_attempted, MAX_NOTIFIED_PER_POLL);
         assert_eq!(notifier.count(), MAX_NOTIFIED_PER_POLL);
         assert!(outcome.changed);
@@ -929,58 +942,49 @@ mod tests {
 
     // -- 跨轮次行为：轮流跑多遍会发生什么 --------------------------------
 
-    /// 同一个提醒在两轮之间不该被重复弹。
+    /// 同一条提醒只弹一次。
     ///
-    /// 两种去重都要成立：游标推进时（玩家在别处读了）不算未读；游标不动时
-    /// （玩家没读）也不该重弹——后者靠本地 `NotifiedIds`。
+    /// 两层保障都要成立：`me/notifications?since=` 让服务端每条只给一次，
+    /// 本地 `NotifiedIds` 再兜住重连/换号/服务端重发带来的重复。
     #[test]
-    fn a_notice_is_not_notified_twice_across_rounds() {
+    fn a_notice_is_notified_once_across_rounds() {
         let notifier = RecordingNotifier::default();
         let notified = NotifiedIds::default();
-        let items = vec![item(1, Some("提醒"), Some("正文"))];
 
-        // 第一轮：游标 0，全都未读 → 弹一次。
         let first = handle_recent_notices(
-            &recent(Some(0), items.clone()),
+            &[item(1, Some("提醒"), Some("正文"))],
             &notifier,
             &notified,
             None,
             None,
         );
         assert_eq!(first.toast_attempted, 1);
-        assert!(first.changed);
-
-        // 第二轮：游标已推到 1，同一条不再未读 → 不再弹。
-        let second =
-            handle_recent_notices(&recent(Some(1), items), &notifier, &notified, None, None);
+        // 下一轮服务器只给游标之后的：没有新的。
+        let second = handle_recent_notices(&[], &notifier, &notified, None, None);
         assert_eq!(second.toast_attempted, 0);
         assert!(!second.changed);
-        // 累计仍只有第一次那一条。
         assert_eq!(notifier.count(), 1);
     }
 
-    /// **游标不前进时也不重复弹。**
+    /// **服务端又给同一批时也不重复弹。**
     ///
     /// 这是实测暴露出来的真实缺陷：后台轮询用 `mark=false`（不替玩家标已读），
-    /// 所以服务端 `read` 游标长期不动，同一条提醒每一轮都被判成未读。修复前
+    /// 服务端 `read` 游标长期不动，同一条提醒每一轮都被判成未读。修复前
     /// 它会每 60 秒重弹一次，同一条提醒弹了几十次。
     ///
-    /// 现在靠 `NotifiedIds` 兜住：弹过就不再弹，与服务端游标无关。
+    /// `?since=` 之后这条路径理论上不该再出现，但重连、换号、服务器重发
+    /// 都会让同一批再来一次，所以本地这层必须留着。
     #[test]
-    fn same_notice_does_not_repeat_when_the_cursor_is_stuck() {
+    fn same_notice_does_not_repeat_when_the_server_resends_it() {
         let notifier = RecordingNotifier::default();
         let notified = NotifiedIds::default();
         let items = vec![item(7, None, None)];
 
-        // 五轮，游标一直停在 0（模拟玩家从未打开页面标已读）。
+        // 五轮，每轮服务端都给同一批（模拟游标不前进）。
         let mut outcomes = Vec::new();
         for _ in 0..5 {
             outcomes.push(handle_recent_notices(
-                &recent(Some(0), items.clone()),
-                &notifier,
-                &notified,
-                None,
-                None,
+                &items, &notifier, &notified, None, None,
             ));
         }
 
@@ -990,11 +994,6 @@ mod tests {
             assert_eq!(outcome.toast_attempted, 0);
         }
         assert_eq!(notifier.count(), 1);
-
-        // 但「未读」这个事实每轮都还在——界面角标不该因此消失。
-        assert!(outcomes.iter().all(|outcome| outcome.unread == 1));
-        // 且每轮都仍要通知前端（内容没变，但状态是"有未读"）。
-        assert!(outcomes.iter().all(|outcome| outcome.changed));
     }
 
     /// 新提醒陆续到来：每轮只弹新增的那些。
@@ -1004,7 +1003,7 @@ mod tests {
         let notified = NotifiedIds::default();
 
         let round1 = handle_recent_notices(
-            &recent(Some(0), vec![item(1, Some("A"), None)]),
+            &[item(1, Some("A"), None)],
             &notifier,
             &notified,
             None,
@@ -1012,12 +1011,9 @@ mod tests {
         );
         assert_eq!(round1.toast_attempted, 1);
 
-        // 第二轮：多了 id=2，游标还停在 1。
+        // 第二轮：服务端只给新的那条。
         let round2 = handle_recent_notices(
-            &recent(
-                Some(1),
-                vec![item(1, Some("A"), None), item(2, Some("B"), None)],
-            ),
+            &[item(2, Some("B"), None)],
             &notifier,
             &notified,
             None,
@@ -1025,9 +1021,13 @@ mod tests {
         );
         assert_eq!(round2.toast_attempted, 1);
         let shown = notifier.shown.lock().unwrap().clone();
-        assert_eq!(shown.len(), 2);
-        assert_eq!(shown[0].0, "A");
-        assert_eq!(shown[1].0, "B");
+        assert_eq!(
+            shown
+                .iter()
+                .map(|(title, _, _)| title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
     }
 
     // -- 通知图标 ----------------------------------------------------------
@@ -1040,7 +1040,7 @@ mod tests {
             std::path::Path::new(r"C:\Users\someone\AppData\Roaming\VRCX-0\vrcc-notice-icon.png");
 
         let outcome = handle_recent_notices(
-            &recent(Some(0), vec![item(1, Some("提醒"), None)]),
+            &[item(1, Some("提醒"), None)],
             &notifier,
             &NotifiedIds::default(),
             Some(icon),
@@ -1057,7 +1057,7 @@ mod tests {
         // 图标是锦上添花：下载失败时通知照发，不能因为没图就不发。
         let notifier = RecordingNotifier::default();
         let outcome = handle_recent_notices(
-            &recent(Some(0), vec![item(1, Some("提醒"), None)]),
+            &[item(1, Some("提醒"), None)],
             &notifier,
             &NotifiedIds::default(),
             None,
@@ -1074,8 +1074,9 @@ mod tests {
     #[test]
     fn changed_outcome_emits_the_notices_event() {
         let outcome = PollOutcome {
-            unread: 1,
+            fresh: 1,
             toast_attempted: 1,
+            unread: Some(3),
             changed: true,
         };
         assert_eq!(outcome.event_to_emit(), Some(VRCC_NOTICES_CHANGED_EVENT));
@@ -1084,11 +1085,7 @@ mod tests {
     #[test]
     fn unchanged_outcome_emits_nothing() {
         // 没有变化时绝不能发事件：否则前端每轮都白刷新一次。
-        let outcome = PollOutcome {
-            unread: 0,
-            toast_attempted: 0,
-            changed: false,
-        };
+        let outcome = PollOutcome::default();
         assert_eq!(outcome.event_to_emit(), None);
     }
 
@@ -1097,7 +1094,8 @@ mod tests {
     /// 这条钉的是跨语言契约：Rust 侧常量改名而前端没跟上时，编译和类型检查
     /// 都不会报错，只会表现为「界面不刷新」，极难定位。
     #[test]
-    fn notices_event_name_matches_the_frontend_contract() {
+    fn event_names_match_the_frontend_contract() {
         assert_eq!(VRCC_NOTICES_CHANGED_EVENT, "vrccNoticesChanged");
+        assert_eq!(VRCC_CONNECTION_CHANGED_EVENT, "vrccConnectionChanged");
     }
 }

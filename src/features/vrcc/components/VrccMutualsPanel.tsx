@@ -53,9 +53,14 @@ export function VrccMutualsPanel({
                         ? t('vrcc.mutuals.unavailable')
                         : t('vrcc.mutuals.empty')}
                 </div>
-                <div className="text-[11px] leading-relaxed">
-                    {t('vrcc.mutuals.needs_scope')}
-                </div>
+                {/* 只有真的因为缺权限失败时才提示去开权限。
+                    已经有 `mutuals` 权限、只是确实没连上人的玩家，
+                    看到「重新连接时勾上」只会困惑。 */}
+                {mutualsError && (
+                    <div className="text-[11px] leading-relaxed">
+                        {t('vrcc.mutuals.needs_scope')}
+                    </div>
+                )}
             </div>
         );
     }
@@ -68,6 +73,9 @@ export function VrccMutualsPanel({
                     // 没有 vrcUser 说明对方没公开「已验证」，就无法打开玩家页。
                     // 这时只显示名字，不给一个点了没反应的按钮。
                     const canOpen = userId.startsWith('usr_');
+                    // 我给 TA 的分（1.12.0 起）：0–5，半颗星一档，0 是没打；
+                    // 连上当天和旧服务器都没有。
+                    const mine = star.rate?.mine ?? 0;
                     return (
                         <li
                             key={star.n}
@@ -84,6 +92,14 @@ export function VrccMutualsPanel({
                                     {star.vrc ?? '—'}
                                 </div>
                             </div>
+                            {mine > 0 && (
+                                <span
+                                    className="text-muted-foreground shrink-0 text-xs tabular-nums"
+                                    title={t('vrcc.mutuals.rate_mine')}
+                                >
+                                    ★ {mine}
+                                </span>
+                            )}
                             {canOpen && (
                                 <Button
                                     variant="ghost"

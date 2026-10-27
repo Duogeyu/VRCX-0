@@ -1,22 +1,54 @@
 //! 对真实星遇同频服务验证契约的测试。
 //!
-//! 这些测试访问 `https://vrcc.cc/api/v1/`，只用**不需要令牌**的端点，
-//! 所以不需要配置任何凭据就能跑。它们价值在于：契约是从文档抄来的，
-//! 而文档和线上返回可能不一致——这里用真实响应把两者钉在一起。
+//! 这些测试访问 `https://vrcc.cc/api/v1/`，只用**不需要令牌**的端点。
+//! 它们价值在于：契约是从文档抄来的，而文档和线上返回可能不一致——
+//! 这里用真实响应把两者钉在一起。
 //!
-//! 默认会跑（不是 `--ignored`），但网络不通时应当跳过而不是判失败：
-//! 一个离线环境不该让「接口形状变了」和「没联网」看起来一样。
+//! # 默认不跑
+//!
+//! **需要 `VRCC_LIVE=1` 才执行**。理由：
+//!
+//! - `cargo test --workspace` 会在三个平台的 CI 上各请求一次线上服务；
+//!   线上返 5xx、返 HTML 错误页、或共享 runner 的 IP 被 `429` 限流时，
+//!   这些测试会 panic，红的是我们的 CI，坏的是别人的服务；
+//! - `status` 不是 `ok` 时 `status_endpoint_reports_ok` 必然失败，
+//!   而停站维护完全是对方的事。
+//!
+//! 本地想验证真契约时：
+//!
+//! ```text
+//! VRCC_LIVE=1 cargo test -p vrcx-0-integrations --test vrcc_live_contract
+//! ```
 //!
 //! 需要令牌的端点不在这里测：它们要有人去网页上点同意，没法自动化。
 
 use std::sync::Arc;
 
+use vrcx_0_contracts::vrcc::VrccBoardSort;
 use vrcx_0_integrations::vrcc::VrccClient;
+
+/// 真跑线上测试的总开关。没设成 `1` 时所有用例直接返回。
+const LIVE_ENV: &str = "VRCC_LIVE";
+
+/// 没开开关就跳过。
+///
+/// 返回 `true` 表示「已跳过」，调用方应立刻 `return`。
+/// 用宏而不是函数是因为要在测试函数体里提前返回，而不是嵌套一层。
+macro_rules! skip_unless_live {
+    () => {
+        if std::env::var(LIVE_ENV).ok().as_deref() != Some("1") {
+            eprintln!(
+                "skip: live contract tests are opt-in; set {LIVE_ENV}=1 to run against vrcc.cc"
+            );
+            return;
+        }
+    };
+}
 
 /// 建一个没有令牌的客户端。公开数据端点的 `authed = false`，用不到它。
 ///
 /// 走环境变量里的代理：本机实测 `vrcc.cc` 直连会 DNS 超时。
-/// 没有代理变量时退回直连，所以在有直连网络的环境（CI）里也能跑。
+/// 没有代理变量时退回直连，所以在有直连网络的环境里也能跑。
 fn client() -> VrccClient {
     let proxy = std::env::var("HTTPS_PROXY")
         .or_else(|_| std::env::var("https_proxy"))
@@ -50,7 +82,8 @@ macro_rules! skip_if_offline {
 
 #[tokio::test]
 async fn boards_live_response_parses_into_the_contract() {
-    let boards = skip_if_offline!(client().boards(3).await);
+    skip_unless_live!();
+    let boards = skip_if_offline!(client().boards(3, VrccBoardSort::Top).await);
 
     assert_eq!(boards.board.as_deref(), Some("maps"));
     // 至少能拿到条目；空榜单也算合法，所以不强求非空。
@@ -88,7 +121,8 @@ async fn boards_live_response_parses_into_the_contract() {
 
 #[tokio::test]
 async fn boards_limit_is_honoured() {
-    let boards = skip_if_offline!(client().boards(2).await);
+    skip_unless_live!();
+    let boards = skip_if_offline!(client().boards(2, VrccBoardSort::Top).await);
     // 请求 2 条，线上不应回超过 2 条（榜单可能不足 2 条，所以用 <=）。
     assert!(
         boards.maps.len() <= 2,
@@ -99,6 +133,7 @@ async fn boards_limit_is_honoured() {
 
 #[tokio::test]
 async fn status_endpoint_reports_ok() {
+    skip_unless_live!();
     let status = skip_if_offline!(client().status().await);
     // 官方定义：`state` 为 `ok` 表示网站与接口都可用。
     // 服务真的挂了才会不是 ok，那时这个断言会提醒我们。

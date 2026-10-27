@@ -9,12 +9,11 @@
 //! 中间态（`device_code`）留在前端，不落盘。
 
 use tauri::State;
-use vrcx_0_application::vrcc::{VrccDeviceAuthPrompt, VrccDeviceAuthStep, VrccErrorKind};
+use vrcx_0_application::vrcc::{VrccDeviceAuthPrompt, VrccDeviceAuthStep};
 use vrcx_0_contracts::vrcc::{
-    VrccBoard, VrccConnectionSnapshot, VrccRecentNotifications, VrccStatus, VrccToday,
-    VrccUsageSnapshot,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccNotes,
+    VrccRecentNotifications, VrccStatus, VrccToday, VrccUnread, VrccUsageSnapshot,
 };
-use vrcx_0_runtime_host_desktop::notification::DesktopNotificationAction;
 
 use crate::{error::AppError, state::AppState};
 
@@ -76,73 +75,6 @@ impl From<VrccDeviceAuthStep> for VrccDeviceAuthStepOutput {
     }
 }
 
-/// 错误分类，供前端决定显示「重新连接」还是「稍后再试」。
-///
-/// 前端拿到的是 `AppError`（字符串），但「是否需要重新授权」这种判断不该
-/// 让前端去解析文案。这个类型把 `classify_vrcc_error` 的结论带过命令边界。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub enum VrccErrorKindOutput {
-    NeedsReauth,
-    MissingScope,
-    Throttled,
-    Transport,
-    Other,
-}
-
-impl From<VrccErrorKind> for VrccErrorKindOutput {
-    fn from(kind: VrccErrorKind) -> Self {
-        match kind {
-            VrccErrorKind::NeedsReauth => Self::NeedsReauth,
-            VrccErrorKind::MissingScope => Self::MissingScope,
-            VrccErrorKind::Throttled => Self::Throttled,
-            VrccErrorKind::Transport => Self::Transport,
-            VrccErrorKind::Other => Self::Other,
-        }
-    }
-}
-
-/// 把一行错误信息归类，并把缺的权限一并带回。
-///
-/// 运行时的命令把 `VrccError` 折成了字符串（`AppError::Custom`），这里按
-/// 官方错误码表的关键字分类。这不是理想的形状——理想是让 `VrccError` 自己
-/// 跨过命令边界——但改那个要动 `AppError` 的变体，留到有明确需求时再做。
-///
-/// **顺序很重要**：先判 `MissingScope`，再判 `NeedsReauth`。
-/// 官方对「权限不够」用的错误码是 `scope` / `scope_unreviewed`，而后者的语义
-/// 是「这项权限要审核」，玩家重新授权也拿不到——它不该显示成「去重新连接」，
-/// 而该显示成「这项功能需要开通」。所以这两个码必须归到 `MissingScope`。
-///
-/// 早先这里漏了 `scope` 系列，于是一个必然失败的 `mutuals`（`dev-` 标识拿不到
-/// 敏感权限）被判成 `Other`，前端走了全局错误路径，渲染成整页红色横幅，
-/// 看起来像连接坏了。
-#[tauri::command(async)]
-#[specta::specta]
-pub fn app__vrcc_classify_error(message: String) -> VrccErrorKindOutput {
-    let lowered = message.to_ascii_lowercase();
-    // `scope` 必须排在 `client_*` 前面：`scope_unreviewed` 里不含这些前缀，
-    // 但把顺序写死能防止以后再加关键字时误伤。
-    if lowered.contains("scope") {
-        return VrccErrorKindOutput::MissingScope;
-    }
-    if lowered.contains("gone")
-        || lowered.contains("client_mismatch")
-        || lowered.contains("client_unknown")
-        || lowered.contains("client_off")
-        || lowered.contains("token 缺失")
-    {
-        return VrccErrorKindOutput::NeedsReauth;
-    }
-    if lowered.contains("限流") || lowered.contains("额度") || lowered.contains("too_many") {
-        return VrccErrorKindOutput::Throttled;
-    }
-    if lowered.contains("暂时不可用") || lowered.contains("timeout") || lowered.contains("无法解析")
-    {
-        return VrccErrorKindOutput::Transport;
-    }
-    VrccErrorKindOutput::Other
-}
-
 // -- 连接状态 ---------------------------------------------------------------
 
 #[tauri::command(async)]
@@ -151,8 +83,8 @@ pub fn app__vrcc_connection(state: State<'_, AppState>) -> VrccConnectionSnapsho
     state.runtime_host().vrcc().connection()
 }
 
-/// 本地用量。口径是「本客户端今日已用 N/300」，不是「剩余」——
-/// 服务器按令牌算额度，我们看不见那个数字。
+/// 今日用量。口径是「今日已用 N/上限」，不是「剩余」。服务器回过
+/// `RateLimit-*` 就是服务器的数，否则是本客户端自己记的（`personalFromServer`）。
 #[tauri::command(async)]
 #[specta::specta]
 pub fn app__vrcc_usage(state: State<'_, AppState>) -> VrccUsageSnapshot {
@@ -161,19 +93,37 @@ pub fn app__vrcc_usage(state: State<'_, AppState>) -> VrccUsageSnapshot {
 
 // -- 开放数据 ---------------------------------------------------------------
 
-/// 地图榜。不需要连接。
+/// 地图榜。不需要连接。`sort` 传 `null` 是总榜。
+///
+/// 要的是本周榜或新上榜、回答里却没有 `sort` 时，说明服务器还不支持，
+/// 回的是总榜。
 #[tauri::command]
 #[specta::specta]
 pub async fn app__vrcc_boards(
     state: State<'_, AppState>,
     limit: u32,
+    sort: Option<VrccBoardSort>,
 ) -> Result<VrccBoard, AppError> {
     state
         .runtime_host()
         .vrcc()
-        .boards(limit)
+        .boards(limit, sort.unwrap_or_default())
         .await
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 公告和停站。不需要连接。服务器还没有这个接口时返回 `null`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_announcements(
+    state: State<'_, AppState>,
+) -> Result<Option<VrccAnnouncements>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .announcements()
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 /// 服务探活。用来在页面上显示「星遇同频现在可用吗」。
@@ -185,7 +135,7 @@ pub async fn app__vrcc_status(state: State<'_, AppState>) -> Result<VrccStatus, 
         .vrcc()
         .status()
         .await
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 // -- 设备授权 ---------------------------------------------------------------
@@ -203,7 +153,7 @@ pub async fn app__vrcc_device_auth_begin(
         .begin_device_auth(scope)
         .await
         .map(VrccDeviceAuthPromptOutput::from)
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 /// 第二步：问一次令牌。前端按返回的 `interval_secs` 定时重试。
@@ -228,7 +178,7 @@ pub async fn app__vrcc_device_auth_poll(
         .poll_device_auth(&prompt)
         .await
         .map(VrccDeviceAuthStepOutput::from)
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 /// 断开。先让服务器吊销，再清本地。
@@ -240,7 +190,7 @@ pub async fn app__vrcc_disconnect(state: State<'_, AppState>) -> Result<(), AppE
         .vrcc()
         .disconnect()
         .await
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 // -- 提醒 -------------------------------------------------------------------
@@ -260,7 +210,37 @@ pub async fn app__vrcc_recent_notifications(
         .vrcc()
         .recent_notifications(mark)
         .await
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 几处未读数（连向我、星轨相交、私聊、通知）。
+///
+/// `refresh` 为 `false` 时只读后台轮询的缓存、不发请求——收到
+/// `vrccNoticesChanged` 时用这个。服务器还没有 `me/unread` 时返回 `null`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_unread(
+    state: State<'_, AppState>,
+    refresh: bool,
+) -> Result<Option<VrccUnread>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .unread(refresh)
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 通知中心。读了不标已读。服务器还没有 `me/notes` 时返回 `null`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_notes(state: State<'_, AppState>) -> Result<Option<VrccNotes>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .notes()
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 /// 当前所在地图在地图榜上的状态与我自己的评分。
@@ -284,7 +264,7 @@ pub async fn app__vrcc_my_map(
         .vrcc()
         .my_map(&world)
         .await
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 /// 增量轮询。游标由后端维护，前端不用关心。
@@ -298,7 +278,7 @@ pub async fn app__vrcc_poll_notifications(
         .vrcc()
         .poll_notifications()
         .await
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 /// 今天这一轮 + 轮次进度。需要 `today` 敏感权限（要审核）。
@@ -310,7 +290,7 @@ pub async fn app__vrcc_today(state: State<'_, AppState>) -> Result<VrccToday, Ap
         .vrcc()
         .today()
         .await
-        .map_err(AppError::Custom)
+        .map_err(|failure| AppError::Vrcc { failure })
 }
 
 /// 「互相连上」的星友列表。需要 `mutuals` 敏感权限（要审核）。
@@ -327,97 +307,5 @@ pub async fn app__vrcc_mutuals(
         .vrcc()
         .mutuals()
         .await
-        .map_err(AppError::Custom)
-}
-
-/// 把一条星遇同频提醒送到桌面通知渠道（Windows toast）。
-///
-/// 为什么要单独一个命令：vrcc 的提醒由**前端轮询**拿到，而 Windows toast 的
-/// 实现（`tauri_winrt_notification`）在 Rust 侧。前端拿到一条新提醒后调这个
-/// 命令，就能复用 VRCX-0 已有的桌面通知出口——包括点击通知回到窗口的那套
-/// `DesktopNotificationAction` 机制，不必自己再实现一遍。
-///
-/// 和 VRChat 的活动通知共用 `DesktopNotifier`，所以第三方主题、免打扰设置、
-/// 通知声音等既有开关对它同样生效。
-#[tauri::command]
-#[specta::specta]
-pub async fn app__vrcc_notify(
-    title: String,
-    body: Option<String>,
-    notice_id: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<(), AppError> {
-    let owner_id = state
-        .runtime_host()
-        .active_owner_id()
-        .ok_or_else(|| AppError::Custom("没有已登录的 VRChat 账号".to_string()))?;
-    // 落点：点击通知回到星遇同频页签。带 notice_id 便于将来定位到具体一条。
-    let action = DesktopNotificationAction::open_vrcc(&owner_id, notice_id.as_deref());
-    state
-        .runtime_host()
-        .show_desktop_notification(&title, body.as_deref(), action.as_ref())
-        .map_err(AppError::Custom)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 权限不足必须判成 `MissingScope`，不能判成 `NeedsReauth`。
-    ///
-    /// 两者的界面含义完全不同：`MissingScope` 是「这项功能需要开通/审核」，
-    /// `NeedsReauth` 是「去重新连接」。`dev-` 标识访问 `mutuals` 拿到的是
-    /// `403 scope`，重新授权一万次也没用——判错会引导玩家做无用功。
-    #[test]
-    fn scope_errors_are_missing_scope_not_reauth() {
-        for message in [
-            // 线上实返：`星遇同频接口返回 HTTP 403（scope）`
-            "Tauri command failed: app__vrcc_mutuals: 星遇同频接口返回 HTTP 403（scope）",
-            "星遇同频接口返回 HTTP 403（scope_unreviewed）",
-            "HTTP 403 scope",
-        ] {
-            assert_eq!(
-                app__vrcc_classify_error(message.to_string()),
-                VrccErrorKindOutput::MissingScope,
-                "should be MissingScope: {message}"
-            );
-        }
-    }
-
-    /// `scope` 的判定要排在 `client_*` 之前。
-    ///
-    /// 反过来会怎样：一个同时提到 client 与 scope 的消息会被判成
-    /// `NeedsReauth`。目前线上不会同时出现，但顺序写死比依赖运气好。
-    #[test]
-    fn scope_wins_over_client_keywords() {
-        let message = "HTTP 403（scope）client_unknown";
-        assert_eq!(
-            app__vrcc_classify_error(message.to_string()),
-            VrccErrorKindOutput::MissingScope
-        );
-    }
-
-    #[test]
-    fn other_kinds_still_classify_correctly() {
-        assert_eq!(
-            app__vrcc_classify_error("星遇同频 token 缺失，请先连接".to_string()),
-            VrccErrorKindOutput::NeedsReauth
-        );
-        assert_eq!(
-            app__vrcc_classify_error("星遇同频接口返回 HTTP 404（gone）".to_string()),
-            VrccErrorKindOutput::NeedsReauth
-        );
-        assert_eq!(
-            app__vrcc_classify_error("星遇同频限流：HTTP 429".to_string()),
-            VrccErrorKindOutput::Throttled
-        );
-        assert_eq!(
-            app__vrcc_classify_error("星遇同频接口暂时不可用：error sending request".to_string()),
-            VrccErrorKindOutput::Transport
-        );
-        assert_eq!(
-            app__vrcc_classify_error("something unexpected".to_string()),
-            VrccErrorKindOutput::Other
-        );
-    }
+        .map_err(|failure| AppError::Vrcc { failure })
 }

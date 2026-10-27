@@ -113,8 +113,8 @@ def main():
         return 0
 
     print("[i] 以上没有星遇同频的提醒。")
-    print("   常见原因：所有提醒都已读（read 游标 >= 全部 id），此时按设计不弹。")
-    print("   排查：看 diagnostic-log.txt 里 `vrcc: fetched recent notices` 的 unread 值。")
+    print("   常见原因：应用开着的这段时间没来新提醒（启动前来的不补弹）。")
+    print("   排查：看 diagnostic-log.txt 里 `vrcc: background poll round finished` 的 fresh 值。")
 
     if not watch:
         return 1

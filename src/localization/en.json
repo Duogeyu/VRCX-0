@@ -652,6 +652,9 @@
     },
     "overlay": {
         "footer": {
+            "vrcc_unread": "{count} unread",
+            "vrcc_rank": "rank #{rank}",
+            "vrcc_rank_avg": "rank #{rank} · avg {avg}",
             "players": "{count} players",
             "instance_duration": "Instance {duration}",
             "online_duration": "Online {duration}"
@@ -788,7 +791,7 @@
         "toggle_theme": "Toggle Theme"
     },
     "vrcc": {
-        "title": "VRCC",
+        "title": "Xingyu Tongpin",
         "description": "vrcc.cc map leaderboard, notifications and connection status",
         "not_connected": "Not connected",
         "connected": "Connected",
@@ -805,7 +808,13 @@
         "maps": {
             "hint": "Needs {min} ratings to reach the board",
             "empty": "No board data yet",
-            "open": "Open on vrcc.cc"
+            "open": "Open on vrcc.cc",
+            "sort": {
+                "top": "All time",
+                "week": "This week",
+                "new": "New"
+            },
+            "week_count": "This week {count}"
         },
         "current_map": {
             "label": "Your current map",
@@ -816,16 +825,17 @@
             "mine": "My score",
             "pending": "In review",
             "words_pending": "Your review text is being checked",
-            "words_hidden": "Your review text was rejected",
-            "need_verify": "Before rating, verify your account under \"My profile → VRChat name\" on vrcc.cc.",
-            "need_friend": "Before rating, accept the friend request from the VRCC bot in VRChat.",
-            "need_go": "The bot has not seen you online in VRChat yet. Try again later.",
-            "need_other": "Rating is not available right now."
+            "words_hidden": "Your review text was rejected"
         },
         "notifications": {
-            "need_connect": "Connect to VRCC and your notifications will appear here",
+            "need_connect": "Connect to Xingyu Tongpin and your notifications will appear here",
             "empty": "No recent notifications",
-            "untitled": "Notification"
+            "untitled": "Notification",
+            "view": {
+                "recent": "Notifications",
+                "notes": "Notes"
+            },
+            "notes_empty": "No notes yet"
         },
         "me": {
             "status": "Connection",
@@ -841,26 +851,44 @@
             "auth_hint": "Open the link below in a browser, or enter the code manually:",
             "open_browser": "Open in browser",
             "auth_expires": "Valid for {minutes} minutes, checked every {sec} seconds",
-            "usage": "This client usage",
+            "usage": "Today's usage",
             "personal_used": "Personal endpoints",
-            "device_code_used": "Connection codes",
+            "device_code_used": "Authorization codes",
             "window": "Requests this minute",
-            "usage_note": "These are counts this client kept itself, not remaining server quota — the API has no endpoint that reports remaining quota.",
+            "usage_note": "Counted by this client; replaced by the server's exact numbers after the next request.",
             "disclaimer": "Third-party client. Not affiliated with vrcc.cc.",
             "client_dev": "dev",
-            "code_copied": "Code {code} copied",
-            "open_browser_failed": "Could not open the browser; open the VRCC site manually"
+            "code_copied": "Authorization code {code} copied",
+            "open_browser_failed": "Could not open the browser; open the VRCC site manually",
+            "usage_note_server": "These numbers come from the VRCC server: today's count for this connection. They reset at midnight Beijing time.",
+            "unread_used": "Unread counts",
+            "expired": "The previous connection is no longer valid: it was disconnected on vrcc.cc, authorized again elsewhere, or unused for 90 days. Please connect again."
         },
         "error": {
             "unknown": "The action failed. Please try again."
         },
         "mutuals": {
-            "need_connect": "Connect to VRCC to see who you are mutually linked with",
+            "need_connect": "Connect to Xingyu Tongpin to see who you are mutually linked with",
             "empty": "No mutual links yet",
             "needs_scope": "Mutual links need the mutuals permission; tick it when you reconnect.",
             "unnamed": "Unnamed",
             "open_profile": "Open in the VRChat player dialog",
-            "unavailable": "This needs an extra permission this client does not have"
+            "unavailable": "This needs an extra permission this client does not have",
+            "rate_mine": "My rating for them"
+        },
+        "unread": {
+            "inbox": "Linked me",
+            "cross": "Crossings",
+            "chats": "Messages",
+            "notes": "Notes"
+        },
+        "stop": {
+            "title": "Xingyu Tongpin is down for maintenance",
+            "until": "Expected back at {time}"
+        },
+        "announcement": {
+            "open": "View",
+            "dismiss": "Dismiss this announcement"
         }
     },
     "nav_menu": {

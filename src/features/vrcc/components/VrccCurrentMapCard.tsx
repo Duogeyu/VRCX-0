@@ -74,13 +74,6 @@ export function VrccCurrentMapCard({
                 </div>
             )}
 
-            {/* 不能打分时说明缺什么——官方给的 need 就三个值，翻成人话。 */}
-            {map.can === false && map.need && (
-                <p className="text-muted-foreground mt-2 text-[11px] leading-relaxed">
-                    {needHint(map.need, t)}
-                </p>
-            )}
-
             {/* 短评的审核状态：审核中/未通过时玩家该知道。 */}
             {map.words && map.wordsOk && map.wordsOk !== 'ok' && (
                 <p className="text-muted-foreground mt-1 text-[11px]">
@@ -100,23 +93,4 @@ function Stat({ label, value }: { label: string; value: string }) {
             <div className="text-muted-foreground text-[10px]">{label}</div>
         </div>
     );
-}
-
-/**
- * 把官方的 `need` 码翻成玩家能懂的话。
- *
- * 官方只有三个值：`verify` 先验证 VRChat 账号、`friend` 先同意机器人好友
- * 请求、`go` 要先在这张图上待一会儿。照官方插件的措辞，别让玩家看到码。
- */
-function needHint(need: string, t: (key: string) => string): string {
-    switch (need) {
-        case 'verify':
-            return t('vrcc.current_map.need_verify');
-        case 'friend':
-            return t('vrcc.current_map.need_friend');
-        case 'go':
-            return t('vrcc.current_map.need_go');
-        default:
-            return t('vrcc.current_map.need_other');
-    }
 }
