@@ -27,10 +27,9 @@ use vrcx_0_persistence::{config::ConfigRepository, DatabaseService};
 
 use crate::host_actions::RuntimeHost;
 use crate::notification::{
-    migrate_legacy_overlay_notification_keys, seed_hmd_notifications_default,
-    DesktopNotificationAction, DesktopNotifier, DesktopNotifierSlot, LocalNotificationPolicy,
-    NotificationDispatcher, NotificationDispatcherDeps, NotificationDoNotDisturbRuntime,
-    RealtimeNotificationIndicator,
+    migrate_legacy_overlay_notification_keys, seed_hmd_notifications_default, DesktopNotifier,
+    DesktopNotifierSlot, LocalNotificationPolicy, NotificationDispatcher,
+    NotificationDispatcherDeps, NotificationDoNotDisturbRuntime, RealtimeNotificationIndicator,
 };
 use crate::privacy_lock::PrivacyLockRuntime;
 
@@ -209,24 +208,6 @@ impl DesktopRuntimeServices {
     /// `Ok(())`——也就是「暂时没有通知渠道」，不是错误。
     pub fn notifier_slot(&self) -> Arc<dyn DesktopNotifier> {
         Arc::new(self.notification_desktop_notifier.clone())
-    }
-
-    /// 直接把一条通知送到桌面通知渠道（Windows toast 等）。
-    ///
-    /// 给「数据源在自己的层里、但没有走 `RenderedNotification`」的调用方用。
-    /// 目前就是星遇同频：它的提醒来自 vrcc.cc，和 VRChat 的活动通知是两个
-    /// 数据模型，塞不进 `NotificationDispatcher`，但应当共用同一个桌面出口——
-    /// 否则每加一个数据源都要自己实现一遍 Windows toast。
-    ///
-    /// 没挂 notifier 时返回错误而不是静默成功：调用方需要知道「没发出去」。
-    pub fn show_desktop_notification(
-        &self,
-        title: &str,
-        body: Option<&str>,
-        action: Option<&DesktopNotificationAction>,
-    ) -> Result<(), String> {
-        self.notification_desktop_notifier
-            .show(title, body, None, true, action)
     }
 
     pub fn set_frontend_tray_notification(&self, notify: bool) {

@@ -1824,22 +1824,6 @@ impl DesktopRuntimeHostState {
         &self.vrcc
     }
 
-    /// 直接把一条通知送到桌面通知渠道（Windows toast 等）。
-    ///
-    /// 给「数据源在自己的层里、没走 `RenderedNotification`」的调用方用，
-    /// 目前是星遇同频：它的提醒来自 vrcc.cc，和 VRChat 的活动通知是两个数据
-    /// 模型，塞不进 `NotificationDispatcher`，但应当共用同一个桌面出口。
-    pub fn show_desktop_notification(
-        &self,
-        title: &str,
-        body: Option<&str>,
-        action: Option<&crate::notification::DesktopNotificationAction>,
-    ) -> std::result::Result<(), String> {
-        self.desktop
-            .services
-            .show_desktop_notification(title, body, action)
-    }
-
     /// 启动星遇同频的后台轮询。
     ///
     /// 放在 Rust 侧而不是前端，因为窗口隐藏到托盘后 WebView 虽然还活着
