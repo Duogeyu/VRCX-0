@@ -44,6 +44,11 @@ export async function takePendingDesktopNotificationActivation(): Promise<void> 
         openWorldDialog({ worldId: activation.target.location });
         return;
     }
+    if (activation.target.kind === 'openVrcc') {
+        // 星遇同频的提醒：打开星遇同频页签，那里有完整的提醒列表。
+        window.location.hash = '#/vrcc';
+        return;
+    }
     if (!isGroupId(activation.target.groupId)) {
         console.warn(
             'Ignored desktop notification activation with invalid group id:',

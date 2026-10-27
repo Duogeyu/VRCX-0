@@ -4290,7 +4290,8 @@ export type DesktopNotificationActivation = {
 export type DesktopNotificationTarget =
     | { kind: 'openUserProfile'; userId: string }
     | { kind: 'openGroupProfile'; groupId: string }
-    | { kind: 'openLocation'; location: string };
+    | { kind: 'openLocation'; location: string }
+    | { kind: 'openVrcc'; noticeId: string | null };
 export type DesktopWidgetSnapshot = {
     supported: boolean;
     enabled: boolean;

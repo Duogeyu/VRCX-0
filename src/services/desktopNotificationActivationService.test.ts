@@ -121,6 +121,24 @@ describe('desktopNotificationActivationService', () => {
         expect(mocks.openUserDialog).not.toHaveBeenCalled();
     });
 
+    it('opens the vrcc page for a vrcc.cc notice', async () => {
+        const location = { hash: '#/' };
+        vi.stubGlobal('window', { location });
+        mocks.appTakePendingDesktopNotificationActivation.mockResolvedValueOnce(
+            { target: { kind: 'openVrcc', noticeId: '42' } }
+        );
+
+        try {
+            await takePendingDesktopNotificationActivation();
+        } finally {
+            vi.unstubAllGlobals();
+        }
+
+        expect(location.hash).toBe('#/vrcc');
+        expect(mocks.openGroupDialog).not.toHaveBeenCalled();
+        expect(mocks.openUserDialog).not.toHaveBeenCalled();
+    });
+
     it('opens the group dialog for a saved-group instance notification', async () => {
         mocks.appTakePendingDesktopNotificationActivation.mockResolvedValueOnce(
             {
