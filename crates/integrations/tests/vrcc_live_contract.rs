@@ -4,8 +4,17 @@
 //! 所以不需要配置任何凭据就能跑。它们价值在于：契约是从文档抄来的，
 //! 而文档和线上返回可能不一致——这里用真实响应把两者钉在一起。
 //!
-//! 默认会跑（不是 `--ignored`），但网络不通时应当跳过而不是判失败：
-//! 一个离线环境不该让「接口形状变了」和「没联网」看起来一样。
+//! 默认不跑（`#[ignore]`）：CI 每次推送都在三个系统上跑一遍测试，线上一回
+//! `429` 或 `5xx` 就会让和改动无关的 CI 变红，`device/code` 还会占掉每个网络
+//! 地址每天 30 个的拿码次数。离线的形状检查在 `vrcc_offline_contract.rs`。
+//! 要对线上核对时手动跑：
+//!
+//! ```text
+//! cargo test -p vrcx-0-integrations --test vrcc_live_contract -- --ignored
+//! ```
+//!
+//! 网络不通时跳过而不是判失败：一个离线环境不该让「接口形状变了」和
+//! 「没联网」看起来一样。
 //!
 //! 需要令牌的端点不在这里测：它们要有人去网页上点同意，没法自动化。
 
@@ -50,6 +59,7 @@ macro_rules! skip_if_offline {
 }
 
 #[tokio::test]
+#[ignore = "hits the live vrcc.cc API; run with --ignored"]
 async fn boards_live_response_parses_into_the_contract() {
     let boards = skip_if_offline!(client().boards(3, VrccBoardSort::Top).await);
 
@@ -88,6 +98,7 @@ async fn boards_live_response_parses_into_the_contract() {
 }
 
 #[tokio::test]
+#[ignore = "hits the live vrcc.cc API; run with --ignored"]
 async fn boards_limit_is_honoured() {
     let boards = skip_if_offline!(client().boards(2, VrccBoardSort::Top).await);
     // 请求 2 条，线上不应回超过 2 条（榜单可能不足 2 条，所以用 <=）。
@@ -99,6 +110,7 @@ async fn boards_limit_is_honoured() {
 }
 
 #[tokio::test]
+#[ignore = "hits the live vrcc.cc API; run with --ignored"]
 async fn status_endpoint_reports_ok() {
     let status = skip_if_offline!(client().status().await);
     // 官方定义：`state` 为 `ok` 表示网站与接口都可用。
@@ -124,6 +136,7 @@ async fn status_endpoint_reports_ok() {
 /// 限 30 个，测试跑得勤会消耗额度，所以它只在 `VRCC_LIVE_DEVICE_CODE=1`
 /// 时执行——默认不跑，避免把开发额度烧光。
 #[tokio::test]
+#[ignore = "hits the live vrcc.cc API; run with --ignored"]
 async fn device_code_round_trip_works_with_scope_in_query() {
     if std::env::var("VRCC_LIVE_DEVICE_CODE").ok().as_deref() != Some("1") {
         eprintln!("skip: set VRCC_LIVE_DEVICE_CODE=1 to run (consumes daily quota)");
