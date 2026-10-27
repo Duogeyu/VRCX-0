@@ -130,6 +130,13 @@ impl DesktopVrccRuntime {
         self.service.client_id()
     }
 
+    /// 按当前登录的 VRChat 账号重新装载令牌，返回连接状态有没有变。
+    ///
+    /// 令牌按账号存，宿主在登录、换号、登出时调用（见 `VrccPollBinding`）。
+    pub fn reload_credential(&self) -> bool {
+        self.service.reload_credential()
+    }
+
     /// 地图榜：开放数据，不需要连接。
     pub async fn boards(&self, limit: u32, sort: VrccBoardSort) -> Result<VrccBoard, String> {
         self.service

@@ -318,6 +318,45 @@ impl VrccService {
         self.session.snapshot().notifications_cursor
     }
 
+    /// 按仓库里「当前账号」的令牌重新装载会话。返回会话有没有变。
+    ///
+    /// 令牌按 VRChat 账号存（见 outbound-adapters 的 `LocalVrccTokenStore`），
+    /// 而这个服务在应用装配阶段就建好了：那时还没有人登录，构造时那一次
+    /// `load` 什么也读不到。所以宿主在登录、换号、登出时都要调一次：读到就
+    /// 换上这个账号的令牌，读不到就把内存里上一个账号的清掉。令牌没变时
+    /// 什么都不动，游标和未读数照旧。
+    pub fn reload_credential(&self) -> bool {
+        let current = self.session.token();
+        let stored = match self.store.load() {
+            Ok(stored) => stored,
+            Err(error) => {
+                // 读不出来就当没有：宁可让玩家重连，也不能沿用上一个账号的令牌。
+                tracing::warn!(%error, "vrcc: failed to read the stored token; treating as not connected");
+                None
+            }
+        };
+        match stored {
+            Some(credential) if current.as_deref() == Some(credential.token.as_str()) => false,
+            Some(credential) => {
+                self.session.connect(
+                    credential.token,
+                    credential.star,
+                    credential.vrc_name,
+                    credential.scope,
+                );
+                self.forget_unread();
+                true
+            }
+            // 仓库和内存里都没有：保持原样，包括「连接已失效」的标记。
+            None if current.is_none() => false,
+            None => {
+                self.session.disconnect();
+                self.forget_unread();
+                true
+            }
+        }
+    }
+
     /// 用量快照。
     ///
     /// 口径：说「今日已用」多少。服务器回过 `RateLimit-*`（1.11.0 起）就是

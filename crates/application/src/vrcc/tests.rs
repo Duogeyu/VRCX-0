@@ -58,6 +58,71 @@ fn new_without_stored_token_is_disconnected() {
     assert!(!service.snapshot().connected);
 }
 
+fn credential(token: &str, star: i64) -> StoredCredential {
+    StoredCredential {
+        token: token.into(),
+        star: Some(star),
+        vrc_name: None,
+        scope: Some("profile notifications maps".into()),
+    }
+}
+
+/// 服务在装配阶段（还没有人登录、仓库读不到）建好，登录后才读得到令牌。
+#[test]
+fn reload_picks_up_a_token_that_appears_after_construction() {
+    let store = Arc::new(MemoryStore::default());
+    let service = VrccService::new(store.clone(), "dev-test");
+    assert!(!service.snapshot().connected);
+
+    store.save(&credential("tok-alice", 1)).unwrap();
+    assert!(service.reload_credential());
+
+    let snapshot = service.snapshot();
+    assert!(snapshot.connected);
+    assert_eq!(snapshot.star, Some(1));
+}
+
+/// 换号：仓库换成另一个账号的令牌，内存里也要跟着换，未读数清掉。
+#[test]
+fn reload_swaps_in_the_new_accounts_token() {
+    let store = MemoryStore::with(credential("tok-alice", 1));
+    let service = VrccService::new(store.clone(), "dev-test");
+    service.note_unread(&VrccUnread {
+        inbox: 1,
+        cross: None,
+        chats: 0,
+        notes: 0,
+    });
+
+    store.save(&credential("tok-bob", 2)).unwrap();
+    assert!(service.reload_credential());
+
+    assert_eq!(service.snapshot().star, Some(2));
+    assert!(service.cached_unread().is_none());
+}
+
+/// 登出，或换到一个没连过的账号：上一个人的令牌不能留在内存里。
+#[test]
+fn reload_drops_the_previous_accounts_token() {
+    let store = MemoryStore::with(credential("tok-alice", 1));
+    let service = VrccService::new(store.clone(), "dev-test");
+
+    store.clear().unwrap();
+    assert!(service.reload_credential());
+
+    assert!(!service.snapshot().connected);
+}
+
+/// 令牌没变（比如同一个账号的登录状态又通知了一次）：什么都不动。
+#[test]
+fn reload_leaves_an_unchanged_session_alone() {
+    let store = MemoryStore::with(credential("tok-alice", 1));
+    let service = VrccService::new(store, "dev-test");
+
+    assert!(!service.reload_credential());
+    assert!(service.snapshot().connected);
+}
+
 #[test]
 fn usage_reports_used_not_remaining() {
     // 口径要求：只说「今日已用 N/上限」，不说「还剩」。
