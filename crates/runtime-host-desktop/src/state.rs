@@ -194,6 +194,109 @@ pub struct DesktopRuntimeBundle {
     pub integration_api_observer: Arc<dyn InstanceRosterObserver>,
 }
 
+/// 把 vrcc 后台轮询挂到 VRChat 登录状态上的绑定。
+///
+/// 登录就绪时起一个属于该账号的任务；账号变化或登出时把上一代的 stop
+/// 置位，让它在下一次醒来时自行退出。旧任务不立即中止而是"下次醒来退出"，
+/// 是因为 `TaskSupervisor` 不对外暴露单个任务的句柄——只能靠任务自己看信号。
+struct VrccPollBinding {
+    runtime: Arc<crate::vrcc::DesktopVrccRuntime>,
+    notifier: Arc<dyn crate::notification::DesktopNotifier>,
+    event_sink: Arc<dyn vrcx_0_application_core::RuntimeEventSink>,
+    supervisor: vrcx_0_application_core::TaskSupervisor,
+    /// 起任务时用它读出当前登录账号。
+    auth_scope: vrcx_0_application_core::RuntimeAuthScope,
+    /// 当前那代任务的停止开关；`None` 表示没有任务在跑。
+    active: std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+}
+
+impl VrccPollBinding {
+    /// 按当前登录状态对齐：该起就起，该停就停。
+    fn reconcile(&self, signed_in_as: Option<&str>) {
+        let mut active = match self.active.lock() {
+            Ok(active) => active,
+            Err(error) => error.into_inner(),
+        };
+
+        let desired = signed_in_as.map(str::trim).filter(|id| !id.is_empty());
+
+        match (desired, active.as_ref()) {
+            // 已登录，且已有任务在跑：同一个账号就不用动。
+            (Some(_), Some(_)) => {
+                // 简化处理：账号变化与账号不变都重起一次。任务本身很轻，
+                // 而跨代复用会让 owner 与令牌的一致性难以推理。
+                self.stop(&mut active);
+                drop(active);
+                self.spawn();
+            }
+            // 已登录但没任务：起一个。
+            (Some(_), None) => {
+                drop(active);
+                self.spawn();
+            }
+            // 未登录：停掉。
+            (None, Some(_)) => {
+                self.stop(&mut active);
+            }
+            (None, None) => {}
+        }
+    }
+
+    fn spawn(&self) {
+        let Some(owner) = self.current_owner() else {
+            return;
+        };
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let outcome = self.runtime.spawn_background_poll(
+            &self.supervisor,
+            Arc::clone(&self.notifier),
+            Arc::clone(&self.event_sink),
+            owner.clone(),
+            Arc::clone(&stop),
+        );
+        match outcome {
+            vrcx_0_application_core::TaskSpawnOutcome::Scheduled => {
+                tracing::info!(owner = %owner.as_str(), "vrcc: background poll scheduled");
+                if let Ok(mut active) = self.active.lock() {
+                    *active = Some(stop);
+                }
+            }
+            other => {
+                tracing::warn!(?other, "vrcc: background poll not scheduled");
+            }
+        }
+    }
+
+    fn stop(&self, active: &mut Option<Arc<std::sync::atomic::AtomicBool>>) {
+        if let Some(stop) = active.take() {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+            tracing::info!("vrcc: background poll asked to stop (account change)");
+        }
+    }
+
+    fn current_owner(&self) -> Option<vrcx_0_core::OwnerId> {
+        let snapshot = self.auth_scope.snapshot();
+        snapshot
+            .active
+            .then(|| vrcx_0_core::OwnerId::new(snapshot.current_user_id))
+    }
+}
+
+/// 登录状态变化的观察者：转给 `VrccPollBinding` 对齐任务。
+struct VrccPollObserver {
+    binding: Arc<VrccPollBinding>,
+}
+
+impl vrcx_0_application_core::RuntimeAuthScopeObserver for VrccPollObserver {
+    fn runtime_auth_scope_changed(
+        &self,
+        snapshot: &vrcx_0_application_core::RuntimeAuthScopeSnapshot,
+    ) {
+        let user = snapshot.active.then_some(snapshot.current_user_id.as_str());
+        self.binding.reconcile(user);
+    }
+}
+
 pub struct DesktopRuntimeHostState {
     runtime: RuntimeHostState,
     game: Arc<GameRuntimeBundle>,
@@ -1749,48 +1852,37 @@ impl DesktopRuntimeHostState {
     ///
     /// 注意这里**不要求** notifier 已挂载：没有通知渠道时轮询照跑，
     /// 界面上的未读数与腕表摘要仍要靠它刷新，只是不弹系统通知。
+    /// 把星遇同频的后台轮询**绑到 VRChat 登录状态**上。
+    ///
+    /// 以前是装配阶段起一次任务、一直跑，owner 靠闭包按轮次取。那样有两个问题：
+    ///
+    /// 1. 启动早期还没登录，owner 为 `None`，通知只能走「无 action」的降级
+    ///    路径——而那条路径在 Windows 上会丢掉图标（插件调的是
+    ///    `notify_rust::icon()`，Windows 上是空操作）。
+    /// 2. 换账号时同一个任务继续跑，身份是模糊的。
+    ///
+    /// 现在：每次登录就绪起一个**属于该账号**的任务，并用一个 `AtomicBool`
+    /// 让旧任务在下次醒来时自行退出。任务从创建起 owner 就是固定值。
     pub fn start_vrcc_background_poll<E>(&self, event_sink: Arc<E>)
     where
         E: vrcx_0_application_core::RuntimeEventSink + 'static,
     {
-        // 直接把 slot 当 notifier 用：它没挂桥时 `show()` 返回 `Ok(())`，
-        // 也就是「没有通知渠道」= 静默不弹，而不是失败。Headless 就是这种情况，
-        // 轮询仍然值得跑——未读数与腕表摘要都靠它刷新。
-        // 启动前把关键前提记下来：排查时最先要确认的就是这几件事。
-        let snapshot = self.vrcc.connection();
-        let has_notifier = self.desktop.services.desktop_notifier().is_some();
-        tracing::info!(
-            has_desktop_notifier = has_notifier,
-            token_connected = snapshot.connected,
-            client = %snapshot.client,
-            client_is_dev = snapshot.client_is_dev,
-            "vrcc: starting background poll"
-        );
-        // owner 用闭包按轮次取，而不是在启动时固定：轮询可能在玩家登录前就
-        // 起来了，登录后 owner 才有值。固定成启动时的值会让整段会话都拿不到
-        // owner，进而丢掉通知上的图标与点击跳转。
-        let auth_scope = self.runtime.desktop_assembly().auth_scope().clone();
-        let owner = Arc::new(move || {
-            let snapshot = auth_scope.snapshot();
-            snapshot
-                .active
-                .then(|| vrcx_0_core::OwnerId::new(snapshot.current_user_id))
-        });
-        let outcome = self.vrcc.spawn_background_poll(
-            self.runtime.runtime_tasks(),
-            self.desktop.services.notifier_slot(),
+        let binding = Arc::new(VrccPollBinding {
+            runtime: Arc::clone(&self.vrcc),
+            notifier: self.desktop.services.notifier_slot(),
             event_sink,
-            owner,
-        );
-        match outcome {
-            vrcx_0_application_core::TaskSpawnOutcome::Scheduled => {
-                tracing::info!("vrcc: background poll scheduled");
-            }
-            other => {
-                // 任务被拒绝（supervisor 正在停止）不是错误，但要知道。
-                tracing::warn!(?other, "vrcc: background poll not scheduled");
-            }
-        }
+            supervisor: self.runtime.runtime_tasks().clone(),
+            auth_scope: self.runtime.desktop_assembly().auth_scope().clone(),
+            // 当前这一代任务：换账号时把上一代的 stop 置位，让它自行退出。
+            active: std::sync::Mutex::new(None),
+        });
+        self.runtime
+            .desktop_assembly()
+            .auth_scope()
+            .add_observer(Arc::new(VrccPollObserver {
+                binding: Arc::clone(&binding),
+            }));
+        // `add_observer` 会立刻按当前状态回调一次：已登录时任务这时就起来了。
     }
 
     pub async fn preview_shared_collection(

@@ -228,7 +228,8 @@ impl DesktopVrccRuntime {
         supervisor: &vrcx_0_application_core::TaskSupervisor,
         notifier: Arc<dyn crate::notification::DesktopNotifier>,
         event_sink: Arc<dyn vrcx_0_application_core::RuntimeEventSink>,
-        owner: Arc<dyn Fn() -> Option<vrcx_0_core::OwnerId> + Send + Sync>,
+        owner: vrcx_0_core::OwnerId,
+        stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> vrcx_0_application_core::TaskSpawnOutcome {
         let service = Arc::clone(&self.service);
         let base = Self::BACKGROUND_POLL_BASE;
@@ -238,7 +239,8 @@ impl DesktopVrccRuntime {
             let service = Arc::clone(&service);
             let notifier = Arc::clone(&notifier);
             let event_sink = Arc::clone(&event_sink);
-            let owner = Arc::clone(&owner);
+            let owner = owner.clone();
+            let stop = Arc::clone(&stop);
             async move {
                 // 去重状态在**所有轮次之间共享**，这是关键：服务端游标长期不动，
                 // 只靠它判断会让同一条提醒每轮重弹一次（实测几十次）。
@@ -249,23 +251,32 @@ impl DesktopVrccRuntime {
                 tracing::info!(
                     interval_secs = base.as_secs(),
                     jitter_secs = jitter.as_secs(),
+                    owner = %owner.as_str(),
                     "vrcc: background poll task started"
                 );
                 let mut round: u64 = 0;
                 loop {
+                    // 两个停止信号：应用退出（supervisor 的 token）或换账号
+                    // （我们自己那个 atomic）。后者让「一个任务只服务一个账号」
+                    // 成为可能——换号时旧任务自行退出，新任务另起。
                     if stop_token.is_stop_requested() {
                         tracing::info!(round, "vrcc: background poll stop requested");
                         return;
                     }
+                    if stop.load(std::sync::atomic::Ordering::Acquire) {
+                        tracing::info!(round, "vrcc: background poll superseded by account change");
+                        return;
+                    }
                     round = round.wrapping_add(1);
                     // 未连接时不必轮询：`recent_notifications` 会直接报错。
+                    // owner 由任务自身固定持有（见 spawn 的注释），不必再判空。
                     if service.snapshot().connected {
                         match poll_once(
                             &service,
                             notifier.as_ref(),
                             &notified,
                             &mut notice_icon,
-                            owner.as_ref(),
+                            &owner,
                         )
                         .await
                         {
@@ -350,7 +361,7 @@ async fn poll_once(
     notifier: &dyn crate::notification::DesktopNotifier,
     notified: &NotifiedIds,
     icon: &mut NoticeIcon,
-    owner: &(dyn Fn() -> Option<vrcx_0_core::OwnerId> + Send + Sync),
+    owner: &vrcx_0_core::OwnerId,
 ) -> Result<PollOutcome, String> {
     let recent = service
         .recent_notifications(false)
@@ -375,7 +386,7 @@ async fn poll_once(
         notifier,
         notified,
         icon_path,
-        owner(),
+        Some(owner.clone()),
     ))
 }
 
