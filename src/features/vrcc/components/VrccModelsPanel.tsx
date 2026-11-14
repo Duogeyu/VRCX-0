@@ -18,6 +18,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
+import { useTiltGrid } from '@/lib/useTiltGrid';
 import { Button } from '@/ui/shadcn/button';
 import { Spinner } from '@/ui/shadcn/spinner';
 import {
@@ -36,7 +37,6 @@ import {
 import { useVrccRowVisibility } from '../useVrccRowVisibility';
 import type { VrccBoardSort, VrccModelBoard } from '../vrccApi';
 import { ModelCardFace, type ModelRow } from './ModelCardFace';
-import { useTiltGrid } from './useTiltGrid';
 import { VrccModelDialog } from './VrccModelDialog';
 
 const SORTS: readonly VrccBoardSort[] = ['top', 'week', 'new'];
