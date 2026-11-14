@@ -2,7 +2,7 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -29,6 +29,12 @@ vi.mock('@/platform/tauri/bindings', () => ({
 
 vi.mock('@/services/shellIntegrationService', () => ({
     openExternalLink: vi.fn()
+}));
+
+// `dateTime` 会顺着 i18nService 把真正的 i18next 拉起来；这条用例只关心时间有
+// 没有落到行里，格式是它自己的单测。固定成可断言的形状。
+vi.mock('@/lib/dateTime', () => ({
+    formatCompactDateTime: (value: unknown) => `t:${String(value)}`
 }));
 
 vi.mock('react-i18next', () => ({
@@ -267,5 +273,145 @@ describe('GroupVrccClub', () => {
             screen.getByText('dialog.group.vrcc.grade_unknown')
         ).toBeTruthy();
         expect(screen.queryByText('北极星')).toBeNull();
+    });
+
+    it('背面用详情里已经拿到的简介、房间和活动，不额外发请求', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+        mocks.appVrccMyClub.mockResolvedValue({
+            club: {
+                likes: 6,
+                followed: true,
+                intro: [
+                    { text: '我们是', hidden: false },
+                    { text: '安静的社团', hidden: false }
+                ],
+                rooms: [{ map: '孤', users: 8, cap: 16 }],
+                events: [{ title: '周会', at: 1700000000000 }]
+            }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        const flip = await screen.findByLabelText(
+            'dialog.group.vrcc.flip_back'
+        );
+        await vi.waitFor(() => expect(mocks.appVrccMyClub).toHaveBeenCalled());
+        fireEvent.click(flip);
+
+        expect(await screen.findByText('我们是安静的社团')).toBeTruthy();
+        expect(screen.getByText('孤')).toBeTruthy();
+        expect(screen.getByText('8/16')).toBeTruthy();
+        expect(screen.getByText('周会')).toBeTruthy();
+        expect(screen.getByText('t:1700000000000')).toBeTruthy();
+        // 简介、房间、活动都来自第一次查详情的那份回答。
+        expect(mocks.appVrccMyClub).toHaveBeenCalledTimes(1);
+    });
+
+    it('没有 clubs 权限时背面说「连接后才看得到」，不说成社团什么都没写', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+        mocks.appVrccConnection.mockResolvedValue({ scope: 'profile maps' });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        fireEvent.click(
+            await screen.findByLabelText('dialog.group.vrcc.flip_back')
+        );
+
+        expect(
+            await screen.findByText('dialog.group.vrcc.back_locked')
+        ).toBeTruthy();
+        expect(screen.queryByText('dialog.group.vrcc.back_empty')).toBeNull();
+        expect(mocks.appVrccMyClub).not.toHaveBeenCalled();
+    });
+
+    it('背对镜头的那一面从可交互树上摘掉', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        const flip = await screen.findByLabelText(
+            'dialog.group.vrcc.flip_back'
+        );
+        const front = document.querySelector('.vrcc-club-card__face');
+        const back = document.querySelector('.vrcc-club-card__face--back');
+        expect(front?.hasAttribute('inert')).toBe(false);
+        expect(back?.hasAttribute('inert')).toBe(true);
+
+        fireEvent.click(flip);
+
+        expect(front?.hasAttribute('inert')).toBe(true);
+        expect(back?.hasAttribute('inert')).toBe(false);
+    });
+
+    /** 翻了没有，只看那片壳上的标记——比找文案稳。 */
+    function flippedNow(): boolean {
+        const flipper = document.querySelector('.vrcc-club-card__flipper');
+        return Boolean(flipper?.hasAttribute('data-flipped'));
+    }
+
+    it('整张卡都能点着翻面，不只标题那一行', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        const lede = await screen.findByText(clubResponse.club.lede);
+        expect(flippedNow()).toBe(false);
+
+        fireEvent.click(lede);
+
+        expect(flippedNow()).toBe(true);
+    });
+
+    it('点在卡里的按钮上不翻面', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        fireEvent.click(await screen.findByText('dialog.group.vrcc.open_page'));
+
+        expect(flippedNow()).toBe(false);
+    });
+
+    it('正在选字时不翻面——玩家是在挑文字，不是在翻卡', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        const lede = await screen.findByText(clubResponse.club.lede);
+        const range = document.createRange();
+        range.selectNodeContents(lede);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+
+        fireEvent.click(lede);
+
+        expect(flippedNow()).toBe(false);
+
+        selection?.removeAllRanges();
     });
 });
