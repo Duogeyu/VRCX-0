@@ -3,11 +3,12 @@
 //! 应用层测试：用内存仓库替换持久化，验证编排逻辑。
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::*;
 use vrcx_0_contracts::vrcc::{
-    HttpDetail, LocalThrottle, VrccBoardMap, VrccCrossingCards, VrccCrossingStar, VrccCrossings,
-    VrccUnread,
+    HttpDetail, LocalThrottle, VrccBoardMap, VrccBoardModel, VrccCrossingCards, VrccCrossingStar,
+    VrccCrossings, VrccModelBoard, VrccModelDetail, VrccUnread,
 };
 // ---------------------------------------------------------------------------
 // 造错误的几个便捷函数
@@ -175,6 +176,14 @@ struct FakeRemote {
     /// 记录两个星轨接口收到的 `mark`。
     crossings_mark: Mutex<Option<bool>>,
     cards_mark: Mutex<Option<bool>>,
+    /// `models_board` 的返回；`None` 时按「旧服务器没这个接口」处理。
+    models: Mutex<Option<VrccModelBoard>>,
+    /// 记录 `models_board` 收到的 `(limit, sort)`。
+    models_calls: Mutex<Vec<(u32, VrccBoardSort)>>,
+    /// `model()` 的返回；`None` 时按「不在榜上」处理。
+    model_detail: Mutex<Option<VrccModelDetail>>,
+    /// 记录 `model()` 收到的 id，用来验证缓存是否真的省掉了请求。
+    model_calls: Mutex<Vec<i64>>,
 }
 
 impl FakeRemote {
@@ -229,11 +238,58 @@ impl FakeRemote {
     fn take_error(&self) -> Option<VrccError> {
         self.next_error.lock().unwrap().take()
     }
+
+    /// 预设模型榜的返回。
+    fn set_models(&self, board: VrccModelBoard) {
+        *self.models.lock().unwrap() = Some(board);
+    }
+
+    /// 预设单模型详情的返回。
+    fn set_model_detail(&self, detail: VrccModelDetail) {
+        *self.model_detail.lock().unwrap() = Some(detail);
+    }
 }
 
 impl VrccRemote for FakeRemote {
     fn boards<'a>(&'a self, _limit: u32, _sort: VrccBoardSort) -> VrccFuture<'a, VrccBoard> {
         Box::pin(async move { Err(transport("fake")) })
+    }
+
+    /// 模型榜：记下调用参数，返回预设值（没预设就当旧服务器没这个接口）。
+    ///
+    /// `next_error` 同样生效：测试「限流窗口内回退缓存」需要它。
+    fn models_board<'a>(
+        &'a self,
+        limit: u32,
+        sort: VrccBoardSort,
+    ) -> VrccFuture<'a, VrccModelBoard> {
+        self.models_calls.lock().unwrap().push((limit, sort));
+        Box::pin(async move {
+            if let Some(error) = self.take_error() {
+                return Err(error);
+            }
+            match self.models.lock().unwrap().clone() {
+                Some(board) => Ok(board),
+                // 没有预设：模拟旧服务器，回答 `404 not_found`。
+                None => Err(VrccError::new(
+                    ErrorLayer::Server,
+                    ErrorDetail::Http(HttpDetail {
+                        status: 404,
+                        error: "not_found".to_string(),
+                        need: None,
+                        why: None,
+                        retry_after: None,
+                        op: Some("models"),
+                    }),
+                )),
+            }
+        })
+    }
+
+    /// 单模型：记下这一次 id，返回预设详情（没预设就是「不在榜上」）。
+    fn model<'a>(&'a self, id: i64) -> VrccFuture<'a, Option<VrccModelDetail>> {
+        self.model_calls.lock().unwrap().push(id);
+        Box::pin(async move { Ok(self.model_detail.lock().unwrap().clone()) })
     }
     fn maps<'a>(&'a self, _worlds: &'a [String]) -> VrccFuture<'a, VrccBoard> {
         Box::pin(async move { Err(transport("fake")) })
@@ -1686,4 +1742,368 @@ async fn crossing_cards_falls_back_to_none_on_old_servers() {
         .expect("应返回星卡");
     assert_eq!(cards.left, Some(3));
     assert_eq!(*remote.cards_mark.lock().unwrap(), Some(true));
+}
+
+// ---------------------------------------------------------------------------
+// 模型榜（1.17.0 起）
+// ---------------------------------------------------------------------------
+
+/// 旧服务器上没有 `boards/models`：`404 not_found` 收成 `None`，不是错误。
+///
+/// 这和一个真实存在的故障必须分开：地图榜还在，模型榜只是还没上线，
+/// 把它抛成错误会让整个页面顶上挂一条红横幅。
+#[tokio::test]
+async fn model_board_missing_on_old_server_returns_none() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store, remote.clone());
+
+    // `FakeRemote` 没预设时回 404 not_found。
+    let board = service
+        .models_board(20, VrccBoardSort::Top)
+        .await
+        .expect("旧服务器不该被当成故障");
+    assert!(board.is_none());
+    assert_eq!(
+        *remote.models_calls.lock().unwrap(),
+        vec![(20, VrccBoardSort::Top)]
+    );
+}
+
+/// 拿到榜单时原样返回，字段照契约读出来。
+#[tokio::test]
+async fn model_board_returns_the_board_it_received() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    remote.set_models(VrccModelBoard {
+        board: Some("models".to_string()),
+        sort: Some("top".to_string()),
+        models: vec![VrccBoardModel {
+            id: 8962830,
+            name: "オリジナル3Dモデル「星」".to_string(),
+            short: Some("星".to_string()),
+            likes: 42,
+            rank: Some(1),
+            ..Default::default()
+        }],
+        at: Some(1),
+        ..Default::default()
+    });
+    let service = VrccService::new(store, remote.clone());
+
+    let board = service
+        .models_board(20, VrccBoardSort::Top)
+        .await
+        .expect("应成功")
+        .expect("应返回榜单");
+    assert_eq!(board.models.len(), 1);
+    assert_eq!(board.models[0].display_name(), "星");
+    assert_eq!(board.models[0].likes, 42);
+}
+
+/// 限流窗口内再问：把上次那份还给玩家，而不是报「请求太频繁」。
+///
+/// 缓存命中要求**排序和条数都一样**：请求 50 条却拿到 20 条的旧数据，界面
+/// 会以为这就是全部内容。
+#[tokio::test]
+async fn model_board_falls_back_to_cache_when_locally_throttled() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    remote.set_models(VrccModelBoard {
+        board: Some("models".to_string()),
+        models: vec![VrccBoardModel {
+            id: 1,
+            name: "モデル".to_string(),
+            likes: 7,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let service = VrccService::new(store, remote.clone());
+
+    // 第一次：真的拿到，并进缓存。
+    let first = service
+        .models_board(20, VrccBoardSort::Top)
+        .await
+        .expect("应成功")
+        .expect("应返回榜单");
+    assert_eq!(first.models.len(), 1);
+
+    // 第二次：本地限流拦下（`is_local_gap`），服务层拿缓存顶上。
+    remote.set_error(throttled_locally(30, LocalThrottle::Gap));
+    let second = service
+        .models_board(20, VrccBoardSort::Top)
+        .await
+        .expect("限流窗口内不该报错，应回退到缓存")
+        .expect("缓存里有这一份");
+    assert_eq!(second.models.len(), 1);
+    assert_eq!(second.models[0].id, 1);
+
+    // 条数不同就不给：请求 50 条却拿到 20 条的旧数据会误导界面。
+    // `set_error` 取一次就清空，所以要重新设一次限流。
+    remote.set_error(throttled_locally(30, LocalThrottle::Gap));
+    let mismatch = service.models_board(50, VrccBoardSort::Top).await;
+    assert!(mismatch.is_err(), "条数不一致时不能拿旧数据冒充");
+}
+
+/// `model()` 不在榜上时是 `None`，不是故障。
+#[tokio::test]
+async fn model_lookup_returns_none_when_not_listed() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store, remote.clone());
+
+    let detail: Option<VrccModelDetail> = service.model(8962830).await.expect("不该失败");
+    assert!(detail.is_none());
+}
+
+/// 单模型详情要进缓存：反复点开同一条不该反复请求。
+///
+/// 玩家常做的动作就是「点开、关掉、再点开」。每次都走一次网络，手感是
+/// 「慢」而不是「快」；官方也说这些信息最多 5 分钟才更新一次。
+#[tokio::test]
+async fn model_detail_is_cached_between_calls() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store, remote.clone());
+
+    // 先放一份真实详情：这次要验的是「拿到了就别再问」。
+    remote.set_model_detail(VrccModelDetail {
+        model: Some(VrccBoardModel {
+            id: 4242,
+            name: "モデル".to_string(),
+            likes: 9,
+            ..Default::default()
+        }),
+        hots: vec![],
+        at: Some(1),
+    });
+
+    let first = service.model(4242).await.expect("should not fail");
+    assert!(first.is_some());
+    assert_eq!(remote.model_calls.lock().unwrap().len(), 1);
+
+    // 第二次：命中缓存，请求次数不涨。
+    let second = service.model(4242).await.expect("should not fail");
+    assert!(second.is_some());
+    assert_eq!(
+        remote.model_calls.lock().unwrap().len(),
+        1,
+        "缓存命中时不该再发请求"
+    );
+
+    // 换个 id 必须重新问。这一条钉的是「缓存按 BOOTH 编号分」——如果哪天
+    // 缓存退化成只存一份，这里会立刻变成 1 次。
+    let other = service.model(9999).await.expect("should not fail");
+    assert!(other.is_some());
+    let calls = remote.model_calls.lock().unwrap().clone();
+    assert_eq!(calls, vec![4242, 9999], "缓存必须按 id 分开");
+}
+
+/// 「不在榜上」只记 MODEL_MISSING_TTL（30 秒）：窗口内别问，久了要重新问。
+///
+/// 这条不是「记住没有」，而是挡住本地限流：`models/{id}` 的 `min_gap` 就是
+/// 30 秒，同一个 id 在这段窗口里再问会被 `MAX_ACQUIRE_WAIT` 直接拒掉，而病根
+/// 只是玩家关掉又点开了同一个已下架的模型——那不该表现成「评论加载失败」。
+#[tokio::test]
+async fn model_404_is_remembered_only_for_the_throttle_window() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store, remote.clone());
+
+    // FakeRemote 默认就是「不在榜上」。
+    let first = service.model(4242).await.expect("should not fail");
+    assert!(first.is_none());
+    assert_eq!(remote.model_calls.lock().unwrap().len(), 1);
+
+    let second = service.model(4242).await.expect("should not fail");
+    assert!(second.is_none(), "窗口内仍然是「不在榜上」");
+    assert_eq!(
+        remote.model_calls.lock().unwrap().len(),
+        1,
+        "限流窗口内不该再问同一个 id"
+    );
+}
+
+/// 详情缓存会过期：TTL 一到就重新问服务器。
+///
+/// 时钟是 std `Instant`，没有注入点，`tokio::time::pause()` 也推不动它。
+/// 所以这里**直接把一条已经过期的时间戳塞进缓存**——比给生产代码开一个
+/// 只在测试里用的时钟口子便宜得多，而且验的还是真实的过期判定。
+#[tokio::test]
+async fn model_detail_expires_after_ttl() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    remote.set_model_detail(VrccModelDetail {
+        model: None,
+        hots: vec![],
+        at: Some(1),
+    });
+    let service = VrccService::new(store, remote.clone());
+
+    // 键要带当前登录态。`FakeRemote` 默认未连接，所以分区是 `None`。
+    let key = OwnedModelKey::new(service.cache_scope(), 777);
+    {
+        let mut cache = service.model_details.write().unwrap();
+        cache.insert(
+            key,
+            (
+                Instant::now() - MODEL_DETAIL_TTL - Duration::from_secs(1),
+                VrccModelDetail {
+                    model: None,
+                    hots: vec![],
+                    at: Some(1),
+                },
+            ),
+        );
+    }
+
+    let hit = service.model(777).await.expect("should not fail");
+    assert!(hit.is_some(), "FakeRemote 配了详情");
+    assert_eq!(
+        remote.model_calls.lock().unwrap().len(),
+        1,
+        "过期的那份不该被当成命中"
+    );
+}
+
+/// 缓存满了淘汰最旧的，而不是整表清空。
+///
+/// 整表清空会让「刚看过的一屏模型」一起失效，下一次点开又是满屏转圈。
+#[tokio::test]
+async fn model_detail_cache_evicts_the_oldest_not_everything() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    remote.set_model_detail(VrccModelDetail {
+        model: None,
+        hots: vec![],
+        at: Some(1),
+    });
+    let service = VrccService::new(store, remote.clone());
+
+    let max = MODEL_DETAIL_CACHE_MAX as i64;
+    let scope = service.cache_scope();
+    {
+        let mut cache = service.model_details.write().unwrap();
+        for id in 0..max {
+            // id 越小越旧：0 是最早写进来的那条。
+            cache.insert(
+                OwnedModelKey::new(scope, id),
+                (
+                    Instant::now() - Duration::from_secs(1_000 - id as u64),
+                    VrccModelDetail {
+                        model: None,
+                        hots: vec![],
+                        at: Some(1),
+                    },
+                ),
+            );
+        }
+    }
+
+    let fresh = max + 1;
+    let _ = service.model(fresh).await.expect("should not fail");
+
+    let cache = service.model_details.read().unwrap();
+    assert!(
+        cache.contains_key(&OwnedModelKey::new(scope, fresh)),
+        "新条目一定进得去"
+    );
+    assert!(
+        !cache.contains_key(&OwnedModelKey::new(scope, 0)),
+        "最旧的那批被淘汰"
+    );
+    assert!(
+        cache.contains_key(&OwnedModelKey::new(scope, max - 1)),
+        "只淘汰最旧的 1/4，不是整表清空"
+    );
+}
+
+/// 换账号之后同一张卡的缓存必须分开取。
+///
+/// 这条钉的是**未来**：`GET /models/{id}` 今天是公开数据，但权限可以再申请，
+/// 接口也可能开始返回跟登录态绑定的东西。键里若没有账号维度，那一天到来时
+/// A 的详情会直接给 B 看。
+#[tokio::test]
+async fn model_detail_cache_is_partitioned_by_account() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    remote.set_model_detail(VrccModelDetail {
+        model: Some(VrccBoardModel {
+            id: 4242,
+            name: "モデル".to_string(),
+            likes: 9,
+            ..Default::default()
+        }),
+        hots: vec![],
+        at: Some(1),
+    });
+    let service = VrccService::new(store, remote.clone());
+
+    // 账号 A 看到的。
+    remote.connect("tok-a".into(), Some(111), Some("A".into()), None);
+    let _ = service.model(4242).await.expect("should not fail");
+    assert_eq!(remote.model_calls.lock().unwrap().len(), 1);
+
+    // 换成账号 B：同一个 id，但分区不同，必须重新问。
+    remote.connect("tok-b".into(), Some(222), Some("B".into()), None);
+    let _ = service.model(4242).await.expect("should not fail");
+    assert_eq!(
+        remote.model_calls.lock().unwrap().len(),
+        2,
+        "换了账号就不该命中上一个账号的缓存"
+    );
+
+    // 切回 A：这次命中 A 自己那份，不再请求。
+    remote.connect("tok-a".into(), Some(111), Some("A".into()), None);
+    let _ = service.model(4242).await.expect("should not fail");
+    assert_eq!(
+        remote.model_calls.lock().unwrap().len(),
+        2,
+        "切回原账号应该命中它自己那份"
+    );
+}
+
+/// 榜单缓存也要按账号分区。
+///
+/// 用模型榜来验（`FakeRemote` 对它既有预设又有调用计数）。榜单今天不含个人
+/// 字段，但这条约束不该靠「今天」来维持：接口以后完全可能带上「你投过票没有」。
+#[tokio::test]
+async fn board_cache_is_partitioned_by_account() {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    remote.set_models(VrccModelBoard {
+        board: Some("models".to_string()),
+        sort: None,
+        total: Some(1),
+        ..Default::default()
+    });
+    let service = VrccService::new(store, remote.clone());
+
+    // 账号 A 拉一次，进缓存。
+    remote.connect("tok-a".into(), Some(111), Some("A".into()), None);
+    let _ = service.models_board(20, VrccBoardSort::Top).await;
+    let a_calls = remote.models_calls.lock().unwrap().len();
+    assert_eq!(a_calls, 1);
+
+    // 换账号 B：缓存里没有 B 的那份。
+    remote.connect("tok-b".into(), Some(222), Some("B".into()), None);
+    let b_key = OwnedModelBoardKey::new(service.cache_scope(), VrccBoardSort::Top);
+    assert!(
+        service.cached_models(20, b_key).is_none(),
+        "换账号之后不该能读到上一个账号的榜单缓存"
+    );
+
+    // 切回 A：A 自己那份还在，而且不用重新请求。
+    remote.connect("tok-a".into(), Some(111), Some("A".into()), None);
+    let a_key = OwnedModelBoardKey::new(service.cache_scope(), VrccBoardSort::Top);
+    assert!(
+        service.cached_models(20, a_key).is_some(),
+        "切回原账号应该还能命中它自己那份"
+    );
+    assert_eq!(
+        remote.models_calls.lock().unwrap().len(),
+        a_calls,
+        "这一段只查缓存，不该再发请求"
+    );
 }

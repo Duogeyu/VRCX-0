@@ -36,6 +36,7 @@ import { VrccCrossingsPanel } from './components/VrccCrossingsPanel';
 import { VrccCurrentMapCard } from './components/VrccCurrentMapCard';
 import { VrccMapsPanel } from './components/VrccMapsPanel';
 import { VrccMePanel } from './components/VrccMePanel';
+import { VrccModelsPanel } from './components/VrccModelsPanel';
 import { VrccMutualsPanel } from './components/VrccMutualsPanel';
 import { VrccNotificationsPanel } from './components/VrccNotificationsPanel';
 import { useOpenExternalLink } from './useOpenExternalLink';
@@ -61,6 +62,7 @@ import { countVrccCrossingsUnread, countVrccUnread } from './vrccUnreadCount';
  */
 const VRCC_TABS: readonly VrccTab[] = [
     'maps',
+    'models',
     'notifications',
     'mutuals',
     'crossings',
@@ -84,6 +86,10 @@ export function VrccPage() {
         boards,
         boardSort,
         boardSortSupported,
+        models,
+        modelSort,
+        modelSortSupported,
+        modelsAvailable,
         recent,
         unread,
         notificationsView,
@@ -108,6 +114,8 @@ export function VrccPage() {
         reload,
         refreshBoards,
         setBoardSort,
+        refreshModels,
+        setModelSort,
         setNotificationsView,
         beginDeviceAuth,
         disconnect,
@@ -387,6 +395,11 @@ export function VrccPage() {
                             <TabsTrigger value="maps">
                                 {t('vrcc.tab.maps')}
                             </TabsTrigger>
+                            {/* 模型榜排在「提醒」前面：它和地图榜同属开放数据、
+                                不需要连接，两个浏览型页签放一起，个人内容往后排。 */}
+                            <TabsTrigger value="models">
+                                {t('vrcc.tab.models')}
+                            </TabsTrigger>
                             <TabsTrigger value="notifications">
                                 {t('vrcc.tab.notifications')}
                                 {unreadTotal > 0 && (
@@ -439,6 +452,17 @@ export function VrccPage() {
                                 onSortChange={setBoardSort}
                                 onRefresh={() => void refreshBoards()}
                                 onOpenWorld={openWorld}
+                            />
+                        </TabsContent>
+
+                        <TabsContent value="models" className="min-h-0 flex-1">
+                            <VrccModelsPanel
+                                models={models}
+                                sort={modelSort}
+                                sortSupported={modelSortSupported}
+                                available={modelsAvailable}
+                                onSortChange={setModelSort}
+                                onRefresh={() => void refreshModels()}
                             />
                         </TabsContent>
 

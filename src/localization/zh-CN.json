@@ -800,6 +800,7 @@
         "reconnect_hint": "去「我的」重新连接",
         "missing_scope": "这一项需要 {scope} 权限，重新连接一次即可",
         "tab": {
+            "models": "模型榜",
             "maps": "地图榜",
             "notifications": "提醒",
             "me": "我的",
@@ -816,6 +817,30 @@
                 "new": "新上榜"
             },
             "week_count": "本周 {count}"
+        },
+        "models": {
+            "hint": "每个模型每天一票",
+            "empty": "暂无模型榜数据",
+            "unavailable": "这台服务器还没有模型榜",
+            "likes": "喜欢",
+            "comments": "查看评论",
+            "likes_count": "喜欢 {count}",
+            "hot_comments": "星遇同频上的热评",
+            "comments_empty": "还没有人写评论。",
+            "comments_gone": "这个模型已经不在榜上，评论看不到了。",
+            "comments_error": "评论没能加载出来，稍后再试。",
+            "comments_note": "开放接口只给最多 2 条热评，也没有投票接口。想看完整页面请去星遇同频。",
+            "week_count": "本周 {count}",
+            "total": "共 {total} 个",
+            "total_capped": "共 {total} 个 · 只列出前 {shown}",
+            "open": "在星遇同频打开",
+            "sort": {
+                "top": "总榜",
+                "week": "本周",
+                "new": "新上榜"
+            },
+            "flip": "翻面",
+            "flip_back": "翻回正面"
         },
         "current_map": {
             "label": "你所在的图",

@@ -11,10 +11,10 @@ use vrcx_0_application::vrcc::{
 };
 use vrcx_0_contracts::vrcc::{
     scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot,
-    VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccMyBoard, VrccMyBoardSort, VrccMyMap,
-    VrccMyMapPage, VrccNotes, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
-    VrccStickers, VrccToday, VrccUnread, VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
-    VrccWristSummary,
+    VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail,
+    VrccMyBoard, VrccMyBoardSort, VrccMyMap, VrccMyMapPage, VrccNotes, VrccRatedMaps,
+    VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccUnread,
+    VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult, VrccWristSummary,
 };
 use vrcx_0_outbound_adapters::LocalVrccTokenStore;
 use vrcx_0_persistence::config::ConfigRepository;
@@ -231,6 +231,26 @@ impl DesktopVrccRuntime {
     pub async fn boards(&self, limit: u32, sort: VrccBoardSort) -> Result<VrccBoard, VrccFailure> {
         self.service
             .boards(limit, sort)
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 模型榜：开放数据，不需要连接。旧服务器上没有这个接口时为 `None`。
+    pub async fn models_board(
+        &self,
+        limit: u32,
+        sort: VrccBoardSort,
+    ) -> Result<Option<VrccModelBoard>, VrccFailure> {
+        self.service
+            .models_board(limit, sort)
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 单个模型：开放数据，不需要连接。不在榜上时为 `None`。
+    pub async fn model(&self, id: i64) -> Result<Option<VrccModelDetail>, VrccFailure> {
+        self.service
+            .model(id)
             .await
             .map_err(|error| VrccFailure::from_error(&error))
     }

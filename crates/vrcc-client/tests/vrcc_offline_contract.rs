@@ -16,8 +16,8 @@
 //! 这里钉住的就是客户端这一侧：新字段当可选、不依赖弃用字段。
 
 use vrcx_0_vrcc_contracts::{
-    VrccAnnouncements, VrccBoard, VrccErrorBody, VrccMutuals, VrccMyMap, VrccNotes,
-    VrccRecentNotifications, VrccToday, VrccTokenResponse, VrccUnread,
+    VrccAnnouncements, VrccBoard, VrccErrorBody, VrccModelBoard, VrccModelDetail, VrccMutuals,
+    VrccMyMap, VrccNotes, VrccRecentNotifications, VrccToday, VrccTokenResponse, VrccUnread,
 };
 
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
@@ -448,4 +448,108 @@ fn crossing_cards_carry_the_pair_section_the_docs_never_mention() {
 
     // 没有 `pair` 的卡照旧能读：它不是必填，界面会整块不渲染。
     assert!(cards.cards[2].pair.is_none());
+}
+
+/// 模型榜（1.17.0 起）：`GET /boards/models`。
+///
+/// 官方 `BoardModel` 的必填字段是 `id` / `name` / `short` / `shop` / `price` /
+/// `likes` / `week` / `rank` / `page` / `img` / `booth` / `hot`，其中除了
+/// `id` / `name` / `likes` 之外都允许 `null`。`place` / `move` / `fresh` 只在
+/// `sort=week` 时有。
+#[test]
+fn models_board_parses_top_week_and_new_shapes() {
+    // 总榜：没有 `place` / `move` / `fresh`。
+    let top: VrccModelBoard = parse(
+        r#"{"board":"models","sort":"top","total":1,"next":null,"at":1792830000000,"models":[{"id":8962830,"name":"オリジナル3Dモデル「星」","short":"星","shop":"星屋","price":"¥1,500","likes":42,"week":7,"rank":1,"page":"https://vrcc.cc/models/8962830","img":"https://booth.pximg.net/example.jpg","booth":"https://booth.pm/ja/items/8962830","hot":{"text":"表情很多，换装方便","by":"某位彩蛋猎人","up":3}}]}"#,
+    );
+    assert_eq!(top.sort.as_deref(), Some("top"));
+    assert_eq!(top.total, Some(1));
+    assert_eq!(top.next, None);
+    assert_eq!(top.models.len(), 1);
+
+    let model = &top.models[0];
+    assert_eq!(model.id, 8962830);
+    assert_eq!(model.likes, 42);
+    assert_eq!(model.rank, Some(1));
+    assert_eq!(model.display_name(), "星");
+    assert_eq!(
+        model.hot.as_ref().and_then(|hot| hot.text.as_deref()),
+        Some("表情很多，换装方便")
+    );
+    // 总榜上这三个字段不该有值。
+    assert_eq!(model.place, None);
+    assert_eq!(model.r#move, None);
+    assert_eq!(model.fresh, None);
+
+    // 本周榜：带 `place` / `move` / `fresh`。`move` 是 Rust 关键字，
+    // 靠 `#[serde(rename = "move")]` 才能读到——漏掉 rename 时这里会是 None。
+    let week: VrccModelBoard = parse(
+        r#"{"board":"models","sort":"week","weeks":[{"w":2965,"from":1793548800000}],"at":1792830000000,"models":[{"id":8962830,"name":"星","short":null,"shop":null,"price":null,"likes":42,"week":2,"rank":1,"page":"https://vrcc.cc/models/8962830","img":"https://booth.pximg.net/example.jpg","booth":"https://booth.pm/ja/items/8962830","hot":null,"place":1,"move":3,"fresh":true}]}"#,
+    );
+    assert_eq!(week.sort.as_deref(), Some("week"));
+    assert_eq!(week.weeks.len(), 1);
+    assert_eq!(week.weeks[0].w, Some(2965));
+    let row = &week.models[0];
+    assert_eq!(row.place, Some(1));
+    assert_eq!(row.r#move, Some(3));
+    assert_eq!(row.fresh, Some(true));
+    // `short` 是 null 时退回 BOOTH 原文。
+    assert_eq!(row.display_name(), "星");
+
+    // 新上榜：还没人喜欢的模型 `rank` 是 null。
+    let new: VrccModelBoard = parse(
+        r#"{"board":"models","sort":"new","models":[{"id":123,"name":"新しいモデル","short":null,"shop":null,"price":null,"likes":0,"week":0,"rank":null,"page":"https://vrcc.cc/models/123","img":null,"booth":null,"hot":null}]}"#,
+    );
+    assert_eq!(new.models[0].rank, None);
+    assert_eq!(new.models[0].likes, 0);
+
+    // 旧服务器（1.17.0 之前）没有这个接口，回的是 `404 not_found`，不会有正文。
+    // 但只要字段缺失，解析也不能炸：全空对象就是空榜。
+    let bare: VrccModelBoard = parse(r#"{}"#);
+    assert!(bare.models.is_empty());
+    assert_eq!(bare.sort, None);
+}
+
+/// 模型榜条目上的附加字段要能容忍「形状不对」。
+///
+/// `hot` 和 `likes` 都不是契约必需的：一句坏短评、一个写成字符串的计数，
+/// 都不该让整个榜单空白。
+#[test]
+fn models_board_tolerates_odd_field_shapes() {
+    // `likes` 写成字符串（网页上就是这种写法）、`hot` 的字段类型也不标准。
+    let odd: VrccModelBoard = parse(
+        r#"{"board":"models","models":[{"id":1,"name":"モデル","likes":"42","hot":{"text":123,"by":null,"up":"7"}}]}"#,
+    );
+    let model = &odd.models[0];
+    assert_eq!(model.likes, 42, "字符串计数要读成数字");
+    // `text` 是数字：读成 "123"（lenient_optional_string 的本意就是不丢信息）。
+    assert_eq!(
+        model.hot.as_ref().and_then(|hot| hot.text.as_deref()),
+        Some("123")
+    );
+    assert_eq!(model.hot.as_ref().and_then(|hot| hot.up), Some(7));
+
+    // `likes` 完全缺失：读成 0，而不是解析失败。
+    let missing: VrccModelBoard = parse(r#"{"models":[{"id":2,"name":"モデル"}]}"#);
+    assert_eq!(missing.models[0].likes, 0);
+    // 其它字段全缺省，`display_name` 仍然可用。
+    assert_eq!(missing.models[0].display_name(), "モデル");
+    assert_eq!(missing.models[0].short, None);
+}
+
+/// 单个模型（`GET /models/{id}`）：`model` + 最多 2 条热评。
+#[test]
+fn model_detail_parses_with_hots() {
+    let detail: VrccModelDetail = parse(
+        r#"{"model":{"id":8962830,"name":"オリジナル3Dモデル「星」","short":"星","shop":"星屋","price":"¥1,500","likes":42,"week":7,"rank":1,"page":"https://vrcc.cc/models/8962830","img":"https://booth.pximg.net/example.jpg","booth":"https://booth.pm/ja/items/8962830","hot":null},"hots":[{"text":"表情很多","by":"某位彩蛋猎人","up":3},{"text":"换装方便","by":"某位星语者","up":2}],"at":1792830000000}"#,
+    );
+    assert_eq!(detail.model.as_ref().map(|model| model.id), Some(8962830));
+    assert_eq!(detail.hots.len(), 2);
+    assert_eq!(detail.hots[0].up, Some(3));
+    assert_eq!(detail.hots[1].by.as_deref(), Some("某位星语者"));
+
+    // 不在榜上时服务器回 404，没有正文；空的回答也该能解析。
+    let empty: VrccModelDetail = parse(r#"{}"#);
+    assert!(empty.model.is_none());
+    assert!(empty.hots.is_empty());
 }

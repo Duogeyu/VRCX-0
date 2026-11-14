@@ -598,6 +598,17 @@ where
     })
 }
 
+/// 和 [`lenient_optional_i64`] 同一套宽容，但结果是**非 Option** 的 `i64`。
+///
+/// 给那些「必需、但读不出来也不该整行消失」的计数字段用（如模型榜的 `likes`）：
+/// 缺失、`null`、类型不对一律读成 `0`。
+fn lenient_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(lenient_optional_i64(deserializer)?.unwrap_or(0))
+}
+
 /// 地图榜的排序（1.13.0 起）：总榜、本周榜、新上榜。
 ///
 /// 和网页地图榜的「总榜」「本周」「新上榜」一样，只是不分星池。
@@ -682,6 +693,166 @@ pub struct VrccBoard {
 pub struct VrccMapDetail {
     #[serde(default)]
     pub map: Option<VrccBoardMap>,
+    #[serde(default)]
+    pub at: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// 开放数据 · 模型榜（1.17.0 起）
+// ---------------------------------------------------------------------------
+
+/// `GET /boards/models` 里的一行。
+///
+/// 官方说它「和 vrcc.cc/models/ 一样」：BOOTH 上的 VRChat 本体模型，玩家每天
+/// 投一票喜欢。**不给谁喜欢了、谁添加的、叫法**，短评只给热评一条。
+///
+/// `id` 是 BOOTH 商品编号，也是这一行的身份——没有它连封面和链接都拼不出来，
+/// 所以和 [`VrccBoardMap::world`] 一样保持必填。其余字段官方允许缺失或为
+/// `null`，一律 `Option`。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccBoardModel {
+    /// BOOTH 商品编号。
+    pub id: i64,
+    /// BOOTH 上的商品名（原文）。
+    pub name: String,
+    /// 简称（网页显示的名字）；没有时显示 `name`。
+    #[serde(default)]
+    pub short: Option<String>,
+    /// BOOTH 店铺名。
+    #[serde(default)]
+    pub shop: Option<String>,
+    /// BOOTH 上写的价格（原文，带货币符号）。
+    #[serde(default)]
+    pub price: Option<String>,
+    /// 一共几个喜欢。
+    ///
+    /// 用 `lenient_i64` 而不是裸 `i64`：这个值只参与展示，**不决定这一行能不能
+    /// 渲染**。服务器哪天把它写成字符串（网页上就是这种写法），整个模型榜不该
+    /// 因此空白；读不出来就当 0，名次还能靠 `rank` 显示。
+    #[serde(default, deserialize_with = "lenient_i64")]
+    pub likes: i64,
+    /// 本周几个喜欢；问往周（`w`）时是那一周的。
+    #[serde(default, deserialize_with = "lenient_optional_i64")]
+    pub week: Option<i64>,
+    /// 总榜名次，1 起；没人喜欢的是 `null`。
+    #[serde(default, deserialize_with = "lenient_optional_i64")]
+    pub rank: Option<i64>,
+    /// 星遇同频模型榜上的公开页。
+    #[serde(default)]
+    pub page: Option<String>,
+    /// 封面图（来自 BOOTH）。
+    #[serde(default)]
+    pub img: Option<String>,
+    /// BOOTH 商品页。
+    #[serde(default)]
+    pub booth: Option<String>,
+    /// 热评：赞最多的一条短评，没有时是 `null`。
+    #[serde(default)]
+    pub hot: Option<VrccModelHot>,
+    /// 只在 `sort=week` 里有：这一周的名次（喜欢满 3 个才有）。
+    #[serde(default, deserialize_with = "lenient_optional_i64")]
+    pub place: Option<i64>,
+    /// 只在 `sort=week` 里有：比上一周升了几名，降是负数。
+    ///
+    /// 官方字段名就叫 `move`，是 Rust 关键字，只能写成原始标识符。`serde`
+    /// 不会自动剥 `r#`，所以必须显式 `rename`——否则键名会变成 `r#move`，
+    /// 服务器给的 `move` 永远读不到，而且不报错。
+    #[serde(rename = "move", default, deserialize_with = "lenient_optional_i64")]
+    pub r#move: Option<i64>,
+    /// 只在 `sort=week` 里可能有：上一周不在榜上，这周新上来。
+    #[serde(default, deserialize_with = "lenient_optional_bool")]
+    pub fresh: Option<bool>,
+}
+
+impl VrccBoardModel {
+    /// 界面上该显示的名字：有简称用简称，没有才用 BOOTH 原文。
+    pub fn display_name(&self) -> &str {
+        self.short
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.name)
+    }
+}
+
+/// 模型榜条目上的热评 `{text, by, up}`。
+///
+/// 和 [`VrccMapHot`] 同一套「宽松」策略：`text` / `by` 不是字符串、`up` 不是
+/// 数字都读成 `None`，不让一句短评把整个榜单解析废掉。差别只是模型榜没有
+/// `went`（那是地图专有的「写的人去过这张图」）。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccModelHot {
+    /// 那句短评。
+    #[serde(default, deserialize_with = "lenient_optional_string")]
+    pub text: Option<String>,
+    /// 出处（形如「某位彩蛋猎人」）。
+    #[serde(default, deserialize_with = "lenient_optional_string")]
+    pub by: Option<String>,
+    /// 点赞数。
+    #[serde(default, deserialize_with = "lenient_optional_i64")]
+    pub up: Option<i64>,
+}
+
+/// 模型榜的一条周记录（`weeks[]`）。
+///
+/// 和地图榜共用形状，但两边各自定义更省事：这一层不做跨榜的类型复用，
+/// 免得哪天地图加字段时连累模型榜的解析。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccModelBoardWeek {
+    /// 周号，传给 `w`。
+    #[serde(default)]
+    pub w: Option<i64>,
+    /// 这周开始的时间（北京时间周一零点，毫秒时间戳）。
+    #[serde(default)]
+    pub from: Option<i64>,
+}
+
+/// `GET /boards/models` 的返回。
+///
+/// 排序与地图榜同义：`top` 总榜、`week` 本周、`new` 新上榜。旧服务器不认这个
+/// 接口，回的是 `404`；认 `sort` 却不回 `sort` 的情况和地图榜一样要当成
+/// 「服务器还不支持排序」，不能把总榜当本周榜显示。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccModelBoard {
+    #[serde(default)]
+    pub board: Option<String>,
+    /// 这次用的排序：`top` / `week` / `new`。
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// 一共几个（1.19.2 起）。
+    #[serde(default)]
+    pub total: Option<i64>,
+    /// 下一页的 `offset`，最后一页是 `null`（1.19.2 起）。
+    #[serde(default)]
+    pub next: Option<i64>,
+    /// 只在 `sort=week` 时有：存过的周，新的在前。
+    #[serde(default)]
+    pub weeks: Vec<VrccModelBoardWeek>,
+    /// 只在 `sort=week&w=` 问到存过的周时有：给的是哪一周。
+    #[serde(default)]
+    pub w: Option<i64>,
+    /// 榜单生成时间（毫秒时间戳）。
+    #[serde(default)]
+    pub at: Option<i64>,
+    #[serde(default)]
+    pub models: Vec<VrccBoardModel>,
+}
+
+/// 单个模型：`GET /models/{id}`。
+///
+/// `hots` 是公开页上的热评（最多 2 条）。不在榜上时服务器回 `404 not_found`，
+/// 那是**正常状态**，由集成层转成 `None`。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccModelDetail {
+    #[serde(default)]
+    pub model: Option<VrccBoardModel>,
+    #[serde(default)]
+    pub hots: Vec<VrccModelHot>,
     #[serde(default)]
     pub at: Option<i64>,
 }

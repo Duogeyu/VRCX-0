@@ -14,9 +14,9 @@ use tauri::State;
 use vrcx_0_application::vrcc::{VrccDeviceAuthPrompt, VrccDeviceAuthStep, VrccFailure};
 use vrcx_0_contracts::vrcc::{
     VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccGuidanceState,
-    VrccMapPage, VrccMyBoard, VrccMyBoardSort, VrccMyMap, VrccMyMapPage, VrccNotes, VrccRatedMaps,
-    VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccUnread,
-    VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
+    VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMyBoard, VrccMyBoardSort, VrccMyMap,
+    VrccMyMapPage, VrccNotes, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
+    VrccStickers, VrccToday, VrccUnread, VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
 };
 
 use crate::{error::AppError, state::AppState};
@@ -140,6 +140,44 @@ pub async fn app__vrcc_boards(
         .runtime_host()
         .vrcc()
         .boards(limit, sort.unwrap_or_default())
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 模型榜（1.17.0 起）。不需要连接。`sort` 传 `null` 是总榜。
+///
+/// 和地图榜同一套降级：要的是本周或新上榜、回答里却没有 `sort` 时，说明
+/// 服务器还不支持排序，回的是总榜——前端据此藏起切换。
+///
+/// 旧服务器上没有这个接口（`404 not_found`）时返回 `null`，和公告、贴纸
+/// 一样：「这台服务器还没有模型榜」不是故障，界面显示成空的即可。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_models(
+    state: State<'_, AppState>,
+    limit: u32,
+    sort: Option<VrccBoardSort>,
+) -> Result<Option<VrccModelBoard>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .models_board(limit, sort.unwrap_or_default())
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 单个模型。不需要连接。不在榜上时返回 `null`（`404 not_found` 已由后端
+/// 收敛成 `None`）。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_model(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<Option<VrccModelDetail>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .model(id)
         .await
         .map_err(|failure| AppError::Vrcc { failure })
 }

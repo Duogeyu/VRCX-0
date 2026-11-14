@@ -55,6 +55,25 @@ export const vrccApi = {
         call(() => commands.appVrccBoards(limit, sort)),
 
     /**
+     * 模型榜（1.17.0 起）。不需要连接。
+     *
+     * 和地图榜同一套 `sort`：总榜 / 本周 / 新上榜。旧服务器上没有这个接口，
+     * 后端回 `null`——那说明「这台服务器还没有模型榜」，不是连接坏了。
+     *
+     * 和 `boards` 一样：要的是本周或新上榜、回答里却没有 `sort` 时，说明服务器
+     * 还不支持排序（回的是总榜），界面要藏起切换。
+     */
+    models: (limit = 20, sort: VrccBoardSort = 'top') =>
+        call(() => commands.appVrccModels(limit, sort)),
+
+    /**
+     * 单个模型（`GET /models/{id}`）。不需要连接。
+     *
+     * 不在榜上时服务器回 `404 not_found`，后端已收敛成 `null`——那是正常状态。
+     */
+    model: (id: number) => call(() => commands.appVrccModel(id)),
+
+    /**
      * 按世界 ID 批量查地图（`GET /maps?ids=`）。不需要连接。
      *
      * 一次最多 20 张，**只返回在榜上的**——结果条数可能少于传入的数量，
@@ -237,6 +256,24 @@ export type VrccBoardSort = NonNullable<
 >;
 /** 榜单里的一行。`maps` 在契约里是可选的，先把 undefined 排掉再取元素类型。 */
 export type VrccBoardMap = NonNullable<VrccBoard['maps']>[number];
+/**
+ * 模型榜：外层结构与地图榜同形，条目是 BOOTH 模型。
+ *
+ * 后端在**旧服务器没有这个接口**时返回 `null`（`404 not_found` 已收敛成
+ * `None`）。这里把 `null` 排掉再取类型：面板拿到的永远是「一份榜单」，
+ * 而「有没有这个功能」由控制器的 `modelsAvailable` 单独表达——两件事分开，
+ * 渲染处不必再判一次 `null` 才敢取 `models`。
+ */
+export type VrccModelBoard = NonNullable<
+    Awaited<ReturnType<typeof commands.appVrccModels>>
+>;
+/** 模型榜里的一行。 */
+export type VrccBoardModel = NonNullable<VrccModelBoard['models']>[number];
+/** 单个模型 + 公开页热评；`null` 表示不在榜上。 */
+export type VrccModelDetail = NonNullable<
+    Awaited<ReturnType<typeof commands.appVrccModel>>
+>;
+export type VrccModelHot = NonNullable<VrccBoardModel['hot']>;
 export type VrccConnection = Awaited<
     ReturnType<typeof commands.appVrccConnection>
 >;

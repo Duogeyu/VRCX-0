@@ -361,6 +361,28 @@ const generatedCommands = {
         return await TAURI_INVOKE('app__vrcc_boards', { limit, sort });
     },
     /**
+     * 模型榜（1.17.0 起）。不需要连接。`sort` 传 `null` 是总榜。
+     *
+     * 和地图榜同一套降级：要的是本周或新上榜、回答里却没有 `sort` 时，说明
+     * 服务器还不支持排序，回的是总榜——前端据此藏起切换。
+     *
+     * 旧服务器上没有这个接口（`404 not_found`）时返回 `null`，和公告、贴纸
+     * 一样：「这台服务器还没有模型榜」不是故障，界面显示成空的即可。
+     */
+    async appVrccModels(
+        limit: number,
+        sort: VrccBoardSort | null
+    ): Promise<VrccModelBoard | null> {
+        return await TAURI_INVOKE('app__vrcc_models', { limit, sort });
+    },
+    /**
+     * 单个模型。不需要连接。不在榜上时返回 `null`（`404 not_found` 已由后端
+     * 收敛成 `None`）。
+     */
+    async appVrccModel(id: number): Promise<VrccModelDetail | null> {
+        return await TAURI_INVOKE('app__vrcc_model', { id });
+    },
+    /**
      * 按世界 ID 批量查地图。不需要连接。
      *
      * 一次最多 20 张，**只返回在榜上的**——结果条数可能少于传入的数量，前端要
@@ -7506,6 +7528,86 @@ export type VrccBoardMap = {
     week?: number | null;
 };
 /**
+ * `GET /boards/models` 里的一行。
+ *
+ * 官方说它「和 vrcc.cc/models/ 一样」：BOOTH 上的 VRChat 本体模型，玩家每天
+ * 投一票喜欢。**不给谁喜欢了、谁添加的、叫法**，短评只给热评一条。
+ *
+ * `id` 是 BOOTH 商品编号，也是这一行的身份——没有它连封面和链接都拼不出来，
+ * 所以和 [`VrccBoardMap::world`] 一样保持必填。其余字段官方允许缺失或为
+ * `null`，一律 `Option`。
+ */
+export type VrccBoardModel = {
+    /**
+     * BOOTH 商品编号。
+     */
+    id: number;
+    /**
+     * BOOTH 上的商品名（原文）。
+     */
+    name: string;
+    /**
+     * 简称（网页显示的名字）；没有时显示 `name`。
+     */
+    short?: string | null;
+    /**
+     * BOOTH 店铺名。
+     */
+    shop?: string | null;
+    /**
+     * BOOTH 上写的价格（原文，带货币符号）。
+     */
+    price?: string | null;
+    /**
+     * 一共几个喜欢。
+     *
+     * 用 `lenient_i64` 而不是裸 `i64`：这个值只参与展示，**不决定这一行能不能
+     * 渲染**。服务器哪天把它写成字符串（网页上就是这种写法），整个模型榜不该
+     * 因此空白；读不出来就当 0，名次还能靠 `rank` 显示。
+     */
+    likes?: number;
+    /**
+     * 本周几个喜欢；问往周（`w`）时是那一周的。
+     */
+    week?: number | null;
+    /**
+     * 总榜名次，1 起；没人喜欢的是 `null`。
+     */
+    rank?: number | null;
+    /**
+     * 星遇同频模型榜上的公开页。
+     */
+    page?: string | null;
+    /**
+     * 封面图（来自 BOOTH）。
+     */
+    img?: string | null;
+    /**
+     * BOOTH 商品页。
+     */
+    booth?: string | null;
+    /**
+     * 热评：赞最多的一条短评，没有时是 `null`。
+     */
+    hot?: VrccModelHot | null;
+    /**
+     * 只在 `sort=week` 里有：这一周的名次（喜欢满 3 个才有）。
+     */
+    place?: number | null;
+    /**
+     * 只在 `sort=week` 里有：比上一周升了几名，降是负数。
+     *
+     * 官方字段名就叫 `move`，是 Rust 关键字，只能写成原始标识符。`serde`
+     * 不会自动剥 `r#`，所以必须显式 `rename`——否则键名会变成 `r#move`，
+     * 服务器给的 `move` 永远读不到，而且不报错。
+     */
+    move?: number | null;
+    /**
+     * 只在 `sort=week` 里可能有：上一周不在榜上，这周新上来。
+     */
+    fresh?: boolean | null;
+};
+/**
  * 地图榜的排序（1.13.0 起）：总榜、本周榜、新上榜。
  *
  * 和网页地图榜的「总榜」「本周」「新上榜」一样，只是不分星池。
@@ -8015,6 +8117,89 @@ export type VrccMapRateWho = {
      * 是不是我。
      */
     me?: boolean | null;
+};
+/**
+ * `GET /boards/models` 的返回。
+ *
+ * 排序与地图榜同义：`top` 总榜、`week` 本周、`new` 新上榜。旧服务器不认这个
+ * 接口，回的是 `404`；认 `sort` 却不回 `sort` 的情况和地图榜一样要当成
+ * 「服务器还不支持排序」，不能把总榜当本周榜显示。
+ */
+export type VrccModelBoard = {
+    board?: string | null;
+    /**
+     * 这次用的排序：`top` / `week` / `new`。
+     */
+    sort?: string | null;
+    /**
+     * 一共几个（1.19.2 起）。
+     */
+    total?: number | null;
+    /**
+     * 下一页的 `offset`，最后一页是 `null`（1.19.2 起）。
+     */
+    next?: number | null;
+    /**
+     * 只在 `sort=week` 时有：存过的周，新的在前。
+     */
+    weeks?: VrccModelBoardWeek[];
+    /**
+     * 只在 `sort=week&w=` 问到存过的周时有：给的是哪一周。
+     */
+    w?: number | null;
+    /**
+     * 榜单生成时间（毫秒时间戳）。
+     */
+    at?: number | null;
+    models?: VrccBoardModel[];
+};
+/**
+ * 模型榜的一条周记录（`weeks[]`）。
+ *
+ * 和地图榜共用形状，但两边各自定义更省事：这一层不做跨榜的类型复用，
+ * 免得哪天地图加字段时连累模型榜的解析。
+ */
+export type VrccModelBoardWeek = {
+    /**
+     * 周号，传给 `w`。
+     */
+    w?: number | null;
+    /**
+     * 这周开始的时间（北京时间周一零点，毫秒时间戳）。
+     */
+    from?: number | null;
+};
+/**
+ * 单个模型：`GET /models/{id}`。
+ *
+ * `hots` 是公开页上的热评（最多 2 条）。不在榜上时服务器回 `404 not_found`，
+ * 那是**正常状态**，由集成层转成 `None`。
+ */
+export type VrccModelDetail = {
+    model?: VrccBoardModel | null;
+    hots?: VrccModelHot[];
+    at?: number | null;
+};
+/**
+ * 模型榜条目上的热评 `{text, by, up}`。
+ *
+ * 和 [`VrccMapHot`] 同一套「宽松」策略：`text` / `by` 不是字符串、`up` 不是
+ * 数字都读成 `None`，不让一句短评把整个榜单解析废掉。差别只是模型榜没有
+ * `went`（那是地图专有的「写的人去过这张图」）。
+ */
+export type VrccModelHot = {
+    /**
+     * 那句短评。
+     */
+    text?: string | null;
+    /**
+     * 出处（形如「某位彩蛋猎人」）。
+     */
+    by?: string | null;
+    /**
+     * 点赞数。
+     */
+    up?: number | null;
 };
 /**
  * 我给一颗互相连上的星的评价，和网页上互相连上的卡一样。

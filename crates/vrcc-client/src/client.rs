@@ -28,10 +28,11 @@ use vrcx_0_vrcc_contracts::resolve_client_id;
 use vrcx_0_vrcc_contracts::{
     ErrorDetail, ErrorLayer, HttpDetail, LocalThrottle, TransportKind, VrccAnnouncements,
     VrccBoard, VrccBoardSort, VrccCrossingCards, VrccCrossings, VrccDeviceCode, VrccErrorBody,
-    VrccMapDetail, VrccMapPage, VrccMutuals, VrccMyBoard, VrccMyBoardSort, VrccMyMap,
-    VrccMyMapPage, VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingInput, VrccRatingText,
-    VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread,
-    VrccVote, VrccVoteKind, VrccVoteResult, VRCC_API_BASE, VRCC_SITE_ORIGIN,
+    VrccMapDetail, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals, VrccMyBoard,
+    VrccMyBoardSort, VrccMyMap, VrccMyMapPage, VrccNotes, VrccNotifications, VrccRatedMaps,
+    VrccRatingInput, VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday,
+    VrccTokenResponse, VrccUnread, VrccVote, VrccVoteKind, VrccVoteResult, VRCC_API_BASE,
+    VRCC_SITE_ORIGIN,
 };
 
 use super::throttle::{backoff_for, RateLimiter, MAX_BACKOFF, NOTIFICATIONS_MIN_GAP};
@@ -820,6 +821,71 @@ impl VrccClient {
         .await
     }
 
+    /// 模型榜（`GET /boards/models`，1.17.0 起）。不需要令牌。
+    ///
+    /// 和 [`Self::boards`] 同一套约定：`sort` 是 `top` / `week` / `new`，旧服务器
+    /// 认不出这个接口会回 `404`，认 `sort` 却不回 `sort` 时调用方要当成
+    /// 「服务器还不支持排序」。服务器同样最多 5 分钟更新一次。
+    ///
+    /// 每种排序单独一个限流槽：切排序本来看的就是不同列表，不该被上一种的
+    /// 60 秒间隔挡住。
+    pub async fn models_board(
+        &self,
+        limit: u32,
+        sort: VrccBoardSort,
+    ) -> Result<VrccModelBoard, VrccError> {
+        let limit = limit.clamp(1, 100);
+        self.request(Call {
+            method: "GET",
+            path: &models_board_path(limit, sort),
+            body: None,
+            authed: false,
+            key: match sort {
+                VrccBoardSort::Top => "models",
+                VrccBoardSort::Week => "models_week",
+                VrccBoardSort::New => "models_new",
+            },
+            min_gap: Duration::from_secs(60),
+            bucket: None,
+            limiter: None,
+            bypass_gate: false,
+        })
+        .await
+    }
+
+    /// 单个模型（`GET /models/{id}`）。不需要令牌。
+    ///
+    /// 不在榜上时服务器回 `404 not_found`——那是**正常状态**（这个模型还没上榜
+    /// 或没通过审核），转成 `Ok(None)`，不让它看起来像故障。
+    ///
+    /// `id` 是 BOOTH 商品编号，要拼进路径，所以只接受正整数：负数、0 本地就
+    /// 挡住，没有理由替它发一次请求。
+    pub async fn model(&self, id: i64) -> Result<Option<VrccModelDetail>, VrccError> {
+        if id <= 0 {
+            return Ok(None);
+        }
+        match self
+            .request(Call {
+                method: "GET",
+                path: &format!("models/{id}"),
+                body: None,
+                authed: false,
+                key: "model",
+                min_gap: Duration::from_secs(30),
+                bucket: None,
+                limiter: None,
+                bypass_gate: false,
+            })
+            .await
+        {
+            Ok(detail) => Ok(Some(detail)),
+            // 只有 `404 not_found` 才是「没有这个模型」；别的 404（比如令牌失效的
+            // `gone`）在这条不需要令牌的路径上不该出现，真出现了也不该被吞掉。
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// 服务探活。不需要 client 标识，也不计入个人额度。
     pub async fn status(&self) -> Result<VrccStatus, VrccError> {
         self.request(Call {
@@ -1501,6 +1567,17 @@ fn boards_path(limit: u32, sort: VrccBoardSort) -> String {
     match sort {
         VrccBoardSort::Top => format!("boards/maps?limit={limit}"),
         other => format!("boards/maps?limit={limit}&sort={}", other.as_query()),
+    }
+}
+
+/// 模型榜的路径。同 [`boards_path`]：总榜不带 `sort`。
+///
+/// 复用 [`VrccBoardSort::as_query`] 而不是再写一份 `match`：两个榜单的排序取值
+/// 是同一套（`top` / `week` / `new`），分开写迟早会有一边漏改。
+fn models_board_path(limit: u32, sort: VrccBoardSort) -> String {
+    match sort {
+        VrccBoardSort::Top => format!("boards/models?limit={limit}"),
+        other => format!("boards/models?limit={limit}&sort={}", other.as_query()),
     }
 }
 

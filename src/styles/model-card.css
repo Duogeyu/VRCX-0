@@ -1,0 +1,146 @@
+@layer components {
+    /* 模型榜卡片：网格里静止 + 跟随倾斜。三层：
+         li.vrcc-model-card   透视
+           __rotor            倾斜（角度由 useTiltGrid 写成 CSS 变量）
+             __stage          正面所挂的平面，自己不做变换
+               __face         那张按钮
+           __tip              跟随指针的标签
+
+       卡片在网格里**不翻面**：展开动作由飞行副本和弹窗接力完成（见
+       card-morph.css），网格这边只负责倾斜、以及「被抽走一格」的那个占位。
+
+       倾斜单独占一层：它是三个变换的复合（rotateX / rotateY / scale），
+       和面的边框底色混在同一层会被 `perspective` 拍扁。 */
+
+    .vrcc-model-card {
+        position: relative;
+        perspective: 800px;
+    }
+
+    /* 封面区（图 + 名次/喜欢角标）不可选中：连点两下会盖上一层系统高亮色，
+       深色主题下就是一块难看的蓝。只禁这一块——底下的名字、热评、价格要能
+       照常选来复制，所以不能把 `user-select` 放到卡片根上。 */
+    .vrcc-model-card__cover {
+        user-select: none;
+        -webkit-user-select: none;
+    }
+
+    /* 悬停 / 内部控件带焦点时，把整张卡抬到兄弟之上。
+       每张 `li` 都是一个独立的层叠上下文（`perspective` 会建一个），而后面的
+       兄弟画在前面的上面——不抬的话，越界的标签和倾斜后伸出的边角都会被右边
+       那张卡盖住。`z-index` 写在标签上没用，那只在卡片自己的上下文里有效。 */
+    .vrcc-model-card:hover,
+    .vrcc-model-card:focus-within {
+        z-index: 2;
+    }
+
+    .vrcc-model-card > .vrcc-model-card__rotor {
+        transform: translate3d(0, 0, 0) rotateX(calc(var(--tilt-x, 0) * 1deg))
+            rotateY(calc(var(--tilt-y, 0) * 1deg)) scale(var(--tilt-scale, 1));
+        transform-style: preserve-3d;
+    }
+
+    /* 正面挂在这一层上。它自己不转，`preserve-3d` 在当前倾斜幅度下也不做功
+       （面永远到不了侧棱）；留着是因为 `__face` 不该和倾斜挤在同一层——以后
+       真要让面单独动一步时，这里有地方挂。 */
+    .vrcc-model-card__stage {
+        transform-style: preserve-3d;
+    }
+
+    /* 底色、描边、圆角、裁剪都放在**面**上，不能放到 li 上：
+       li 一旦有 `overflow: hidden` 就会把 `preserve-3d` 压平，`__rotor` 的倾斜
+       就从立体转动退化成平面内的错位。 */
+    .vrcc-model-card__face {
+        appearance: none;
+        padding: 0;
+        border: 1px solid var(--border);
+        border-radius: 0.75rem;
+        background: var(--card);
+        color: inherit;
+        font: inherit;
+        overflow: hidden;
+        backface-visibility: hidden;
+        -webkit-backface-visibility: hidden;
+        box-shadow: 0 2px 6px -3px
+            color-mix(in oklch, var(--foreground) 22%, transparent);
+        transition:
+            border-color var(--motion-fast) var(--ease-out-ui),
+            box-shadow var(--motion-fast) var(--ease-out-ui);
+    }
+
+    .vrcc-model-card__face--front {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .vrcc-model-card:hover .vrcc-model-card__face {
+        border-color: var(--stroke-strong);
+        box-shadow: 0 10px 26px -14px
+            color-mix(in oklch, var(--foreground) 46%, transparent);
+    }
+
+    /* 反光的圆心与强度由 useTiltGrid 写成 `--tilt-gx/gy/glare`。
+       光色取前景色而非纯白：深色主题下纯白会过曝。 */
+    .vrcc-model-card__glare {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+        opacity: var(--tilt-glare, 0);
+        background: radial-gradient(
+            farthest-corner circle at var(--tilt-gx, 50%) var(--tilt-gy, 50%),
+            color-mix(in oklch, var(--foreground) 34%, transparent) 0%,
+            color-mix(in oklch, var(--foreground) 28%, transparent) 18%,
+            color-mix(in oklch, var(--foreground) 20%, transparent) 27%,
+            color-mix(in oklch, var(--foreground) 11%, transparent) 36%,
+            color-mix(in oklch, var(--foreground) 4%, transparent) 45%,
+            transparent 60%
+        );
+    }
+
+    /* 位置和角度由 useTiltGrid 每帧写成 transform，这里只管长相。
+       偏移 14/16px：正下方、正右方放字会被光标本身压住。
+       `mix-blend` 不用——项目主题底色不固定，混出来会脏。 */
+    .vrcc-model-card__tip {
+        position: absolute;
+        top: 16px;
+        left: 14px;
+        z-index: 3;
+        max-width: 240px;
+        padding: 4px 8px;
+        border-radius: 7px;
+        font-size: 11px;
+        font-weight: 500;
+        line-height: 1.3;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--popover-foreground);
+        background: var(--popover);
+        box-shadow:
+            0 0 0 1px var(--stroke-default),
+            0 8px 18px -8px
+                color-mix(in oklch, var(--foreground) 40%, transparent);
+        pointer-events: none;
+        opacity: 0;
+        transform-origin: 0 0;
+        will-change: transform, opacity;
+    }
+
+    /* 「减少动态效果」下连倾斜都不要：晕动症不是装饰。展开的形变同样不播——
+       飞行层根本不挂（见 `VrccModelsPanel` 的 `prefersReducedMotion`），
+       点卡片直接开弹窗。 */
+    .reduce-effects .vrcc-model-card {
+        perspective: none;
+    }
+
+    .reduce-effects .vrcc-model-card > .vrcc-model-card__rotor {
+        transform: none;
+    }
+
+    .reduce-effects .vrcc-model-card__glare,
+    .reduce-effects .vrcc-model-card__tip {
+        display: none;
+    }
+}

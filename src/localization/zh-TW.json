@@ -800,6 +800,7 @@
         "reconnect_hint": "去「我的」重新連線",
         "missing_scope": "這一項需要 {scope} 權限，重新連線一次即可",
         "tab": {
+            "models": "模型榜",
             "maps": "地圖榜",
             "notifications": "提醒",
             "me": "我的",
@@ -816,6 +817,30 @@
                 "new": "新上榜"
             },
             "week_count": "本週 {count}"
+        },
+        "models": {
+            "hint": "每個模型每天一票",
+            "empty": "暫無模型榜資料",
+            "unavailable": "這台伺服器還沒有模型榜",
+            "likes": "喜歡",
+            "comments": "查看評論",
+            "likes_count": "喜歡 {count}",
+            "hot_comments": "星遇同頻上的熱評",
+            "comments_empty": "還沒有人寫評論。",
+            "comments_gone": "這個模型已經不在榜上，評論看不到了。",
+            "comments_error": "評論沒能載入出來，稍後再試。",
+            "comments_note": "開放介面只給最多 2 條熱評，也沒有投票介面。想看完整頁面請去星遇同頻。",
+            "week_count": "本週 {count}",
+            "total": "共 {total} 個",
+            "total_capped": "共 {total} 個 · 只列出前 {shown}",
+            "open": "在星遇同頻開啟",
+            "sort": {
+                "top": "總榜",
+                "week": "本週",
+                "new": "新上榜"
+            },
+            "flip": "翻面",
+            "flip_back": "翻回正面"
         },
         "current_map": {
             "label": "你所在的地圖",

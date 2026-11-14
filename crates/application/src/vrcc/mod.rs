@@ -15,10 +15,10 @@ use vrcx_0_contracts::vrcc::{
     device_auth_scope, is_dev_client, missing_scopes, ErrorDetail, ErrorLayer, TransportKind,
     VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccCredentialState,
     VrccCrossingCards, VrccCrossings, VrccDeviceCode, VrccError, VrccGuidanceState, VrccMapPage,
-    VrccMutuals, VrccMyBoard, VrccMyBoardSort, VrccMyMap, VrccMyMapPage, VrccNotes,
-    VrccNotifications, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
-    VrccStickers, VrccToday, VrccTokenResponse, VrccUnread, VrccUsageSnapshot, VrccVote,
-    VrccVoteKind, VrccVoteResult, VrccWristSummary,
+    VrccModelBoard, VrccModelDetail, VrccMutuals, VrccMyBoard, VrccMyBoardSort, VrccMyMap,
+    VrccMyMapPage, VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingText,
+    VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread,
+    VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult, VrccWristSummary,
 };
 
 /// 服务器回答 `me/unread` 是 `404 not_found`（还没更新到 1.13.0）之后，
@@ -111,6 +111,14 @@ pub struct VrccLocalUsage {
 pub trait VrccRemote: Send + Sync {
     // -- 开放数据（不需要连接） -------------------------------------------
     fn boards<'a>(&'a self, limit: u32, sort: VrccBoardSort) -> VrccFuture<'a, VrccBoard>;
+    /// 模型榜（1.17.0 起）。和 [`Self::boards`] 同一套 `sort` 语义。
+    fn models_board<'a>(
+        &'a self,
+        limit: u32,
+        sort: VrccBoardSort,
+    ) -> VrccFuture<'a, VrccModelBoard>;
+    /// 单个模型。不在榜上时服务器回 `404 not_found`，这里转成 `None`。
+    fn model<'a>(&'a self, id: i64) -> VrccFuture<'a, Option<VrccModelDetail>>;
     fn maps<'a>(&'a self, worlds: &'a [String]) -> VrccFuture<'a, VrccBoard>;
     fn status<'a>(&'a self) -> VrccFuture<'a, VrccStatus>;
     fn fetch_site_asset<'a>(&'a self, path: &'a str) -> VrccFuture<'a, Vec<u8>>;
@@ -419,8 +427,120 @@ pub struct VrccService {
     /// `ThrottledLocally { reason: Gap }`）：`boards` 的 `min_gap` 是 60 秒，
     /// 用户在这个窗口里点刷新不该看到错误，也不该干等一分钟。官方说开放
     /// 数据最多 5 分钟更新一次，旧的那份完全够用。
-    boards_cache: Arc<RwLock<HashMap<VrccBoardSort, (u32, VrccBoard)>>>,
+    ///
+    /// 键是 [`OwnedBoardKey`]（分区 + 排序），理由同 [`Self::model_details`]：
+    /// **不要拿「这个接口现在公开」去赌未来**。榜单今天不含个人字段，但以后
+    /// 完全可能带上「你投过票没有」这类东西。
+    boards_cache: Arc<RwLock<HashMap<OwnedBoardKey, (u32, VrccBoard)>>>,
+    /// 最近一次成功拉到的模型榜，按排序方式分别记一份。
+    ///
+    /// 和 [`Self::boards_cache`] 同一个理由：`models` 的 `min_gap` 也是 60 秒，
+    /// 窗口内点刷新不该报错、也不该干等。两个榜单各自一份、不共用——
+    /// 它们的资源不同，共用会让「刚看完地图榜就看不到模型榜」。
+    models_cache: Arc<RwLock<HashMap<OwnedModelBoardKey, (u32, VrccModelBoard)>>>,
+    /// 按 BOOTH 商品编号缓存的单个模型详情（含热评）。
+    ///
+    /// 单独一份，不用 `models_cache` 里那行顶上：行里没有热评，而热评正是
+    /// 对话框要显示的东西。官方说信息最多 5 分钟更新一次，所以同一张卡在
+    /// 几分钟内反复点开不该重新请求——玩家常常点开、关掉、再点开同一条。
+    ///
+    /// 值里带时间戳：热评会变，缓存不能永久有效。
+    ///
+    /// ## 键里为什么要带账号
+    ///
+    /// **不能假设「这个接口永远不带令牌」。** 今天 `GET /models/{id}` 确实是
+    /// 公开数据（`authed: false`），但权限是可以再申请的，接口也可能开始返回
+    /// 跟登录态绑定的东西（「你投过票没有」「你的收藏」）。那一天到来时，
+    /// 一个不含账号维度的缓存会**直接把 A 的详情给 B 看**。
+    ///
+    /// 所以这里不靠注释约定，而是让类型强制：键是 [`OwnedModelKey`]，
+    /// 构造它**必须**带上 [`VrccCacheScope`]——当前令牌的 `star`，未登录时是
+    /// `None`。谁以后把接口改成带令牌，只要还是走这个键，就不会串号。
+    model_details: Arc<RwLock<HashMap<OwnedModelKey, (Instant, VrccModelDetail)>>>,
+    /// 最近确认「不在榜上」的模型，以及确认的时刻。键同 [`Self::model_details`]。
+    ///
+    /// 只记 [`MODEL_MISSING_TTL`]（30 秒），不是 5 分钟。理由是它挡的根本
+    /// 不是「服务器状态可能变了」，而是**本地限流**：`models/{id}` 的
+    /// `min_gap` 是 30 秒，同一个 id 在这段时间里再问一次会被
+    /// [`MAX_ACQUIRE_WAIT`] 直接拒掉。既然这 30 秒里本来就不允许再问，
+    /// 那「刚刚问过、服务器说没有」就是这段时间里最新的答案。
+    ///
+    /// 不记 5 分钟：下架和重新上架都会发生，把「没有」记久了会让玩家以为
+    /// 它消失了。
+    model_missing: Arc<RwLock<HashMap<OwnedModelKey, Instant>>>,
 }
+
+/// 缓存的分区：这条数据是在**哪个登录态**下拿到的。
+///
+/// `None` 是「未登录 / 没有令牌」，它自己独占一个分区——匿名拿到的公开数据
+/// 和登录后拿到的数据不能互相顶替。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct VrccCacheScope(Option<i64>);
+
+/// 单模型缓存的键：**账号分区 + BOOTH 编号**。
+///
+/// 单独一个类型而不是 `(i64, i64)`，就是为了让「忘了加账号维度」编译不过：
+/// 所有取键的地方都得先拿到 [`VrccCacheScope`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OwnedModelKey {
+    scope: VrccCacheScope,
+    id: i64,
+}
+
+impl OwnedModelKey {
+    fn new(scope: VrccCacheScope, id: i64) -> Self {
+        Self { scope, id }
+    }
+}
+
+/// 地图榜缓存的键：**账号分区 + 排序方式**。
+///
+/// 和 [`OwnedModelKey`] 同一个用意。榜单今天不含个人字段，但这条约束
+/// 不该靠「今天」来维持。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OwnedBoardKey {
+    scope: VrccCacheScope,
+    sort: VrccBoardSort,
+}
+
+impl OwnedBoardKey {
+    fn new(scope: VrccCacheScope, sort: VrccBoardSort) -> Self {
+        Self { scope, sort }
+    }
+}
+
+/// 模型榜缓存的键：**账号分区 + 排序方式**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OwnedModelBoardKey {
+    scope: VrccCacheScope,
+    sort: VrccBoardSort,
+}
+
+impl OwnedModelBoardKey {
+    fn new(scope: VrccCacheScope, sort: VrccBoardSort) -> Self {
+        Self { scope, sort }
+    }
+}
+
+/// 单个模型详情的本地缓存时长。
+///
+/// 官方说明信息最多 5 分钟更新一次，取 5 分钟正好卡在「服务器可能已经变了」
+/// 和「玩家反复点开同一条不必重新请求」之间。
+const MODEL_DETAIL_TTL: Duration = Duration::from_secs(300);
+
+/// 单模型缓存最多留几份，防止长时间浏览把内存堆起来。
+///
+/// 容量按「点开过多少个详情」算，不是按榜单页数算——这里装的是每次点开卡片
+/// 才会取的那份详情，跟一页显示几行没有关系。超量时淘汰最旧的四分之一，
+/// 不是整表清空（见 [`VrccService::remember_model_detail`]）：整表清空会让
+/// 「刚看过的一屏模型」一起失效，下次点开又是满屏转圈。
+const MODEL_DETAIL_CACHE_MAX: usize = 200;
+
+/// 「不在榜上」这份短记要留多久。
+///
+/// 取 30 秒，和 `models/{id}` 的本地限流间隔一样长：超过这个窗口就可以
+/// 重新问服务器了，所以没有理由把负结果留得比窗口更久。
+const MODEL_MISSING_TTL: Duration = Duration::from_secs(30);
 
 /// 从仓库恢复会话，并给出「这个账号处在哪一档」。
 ///
@@ -513,6 +633,9 @@ impl VrccService {
             boards: Arc::new(RwLock::new(HashMap::new())),
             unread: Arc::new(RwLock::new(UnreadCache::default())),
             boards_cache: Arc::new(RwLock::new(HashMap::new())),
+            models_cache: Arc::new(RwLock::new(HashMap::new())),
+            model_details: Arc::new(RwLock::new(HashMap::new())),
+            model_missing: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -642,21 +765,97 @@ impl VrccService {
     }
 
     /// 记下这一份榜单，供限流窗口内复用。
-    fn remember_board(&self, limit: u32, sort: VrccBoardSort, board: &VrccBoard) {
+    /// 记下这一份榜单，供限流窗口内复用。
+    fn remember_board(&self, limit: u32, key: OwnedBoardKey, board: &VrccBoard) {
         let Ok(mut cache) = self.boards_cache.write() else {
             return;
         };
-        cache.insert(sort, (limit, board.clone()));
+        cache.insert(key, (limit, board.clone()));
     }
 
     /// 取上次那份榜单，条件严格：**排序方式和条数都要一样**。
     ///
     /// 条数不一样就不给：请求 50 条却拿到 20 条的旧数据，界面会以为这就是
     /// 全部内容。
-    fn cached_board(&self, limit: u32, sort: VrccBoardSort) -> Option<VrccBoard> {
+    fn cached_board(&self, limit: u32, key: OwnedBoardKey) -> Option<VrccBoard> {
         let cache = self.boards_cache.read().ok()?;
-        let (cached_limit, board) = cache.get(&sort)?;
+        let (cached_limit, board) = cache.get(&key)?;
         (*cached_limit == limit).then(|| board.clone())
+    }
+
+    /// 记下这一份模型榜，供限流窗口内复用。
+    fn remember_models(&self, limit: u32, key: OwnedModelBoardKey, board: &VrccModelBoard) {
+        let Ok(mut cache) = self.models_cache.write() else {
+            return;
+        };
+        cache.insert(key, (limit, board.clone()));
+    }
+
+    /// 取上次那份模型榜。条件同 [`Self::cached_board`]：排序和条数都一样才给。
+    fn cached_models(&self, limit: u32, key: OwnedModelBoardKey) -> Option<VrccModelBoard> {
+        let cache = self.models_cache.read().ok()?;
+        let (cached_limit, board) = cache.get(&key)?;
+        (*cached_limit == limit).then(|| board.clone())
+    }
+
+    /// 当前登录态对应的缓存分区。
+    ///
+    /// 取的是令牌里的 `star`：它标识「这条数据是在谁的登录态下拿到的」。
+    /// 未连接时是 `None`，那是一个独自分区——匿名拿到的公开数据不能顶替
+    /// 登录后拿到的数据，反之亦然。
+    ///
+    /// 每个碰缓存的地方都先取它，这样「忘了加账号维度」在编译期就过不去。
+    fn cache_scope(&self) -> VrccCacheScope {
+        VrccCacheScope(self.remote.connection().star)
+    }
+
+    /// 取缓存里的单模型详情；过期就当成没有。
+    fn cached_model_detail(&self, key: OwnedModelKey) -> Option<VrccModelDetail> {
+        let cache = self.model_details.read().ok()?;
+        let (at, detail) = cache.get(&key)?;
+        (at.elapsed() < MODEL_DETAIL_TTL).then(|| detail.clone())
+    }
+
+    /// 记下一份单模型详情；超量时淘汰最旧的一批，而不是整表清空。
+    fn remember_model_detail(&self, key: OwnedModelKey, detail: &VrccModelDetail) {
+        let Ok(mut cache) = self.model_details.write() else {
+            return;
+        };
+        if cache.len() >= MODEL_DETAIL_CACHE_MAX {
+            // 整表清空会让「刚看过的一屏模型」全部失效，下次点开又是满屏
+            // 转圈。按时间戳淘汰最旧的 1/4：两百条排序一次的开销可以忽略，
+            // 而且发生频率远低于每次写入。
+            let drop = MODEL_DETAIL_CACHE_MAX.div_ceil(4);
+            let mut by_age: Vec<(Instant, OwnedModelKey)> =
+                cache.iter().map(|(key, (at, _))| (*at, *key)).collect();
+            by_age.sort_unstable_by_key(|(at, _)| *at);
+            for (_, key) in by_age.into_iter().take(drop) {
+                cache.remove(&key);
+            }
+        }
+        cache.insert(key, (Instant::now(), detail.clone()));
+    }
+
+    /// 这个 id 在**当前登录态**下，最近是不是刚被确认过「不在榜上」。
+    fn recently_missing_model(&self, key: OwnedModelKey) -> bool {
+        let Ok(cache) = self.model_missing.read() else {
+            return false;
+        };
+        cache
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < MODEL_MISSING_TTL)
+    }
+
+    /// 记下「这个 id 不在榜上」，只留 [`MODEL_MISSING_TTL`]。
+    ///
+    /// 顺手把过期的条目清掉：正常浏览时这个表最多几十条，不清也不会长，
+    /// 但长时间挂着应用又反复点开不同模型时会慢慢攒。
+    fn remember_missing_model(&self, key: OwnedModelKey) {
+        let Ok(mut cache) = self.model_missing.write() else {
+            return;
+        };
+        cache.retain(|_, at| at.elapsed() < MODEL_MISSING_TTL);
+        cache.insert(key, Instant::now());
     }
 
     pub fn client_id(&self) -> String {
@@ -773,7 +972,8 @@ impl VrccService {
                 if sort == VrccBoardSort::Top || board.sort.is_none() {
                     self.note_boards(&board);
                 }
-                self.remember_board(limit, sort, &board);
+                let key = OwnedBoardKey::new(self.cache_scope(), sort);
+                self.remember_board(limit, key, &board);
                 Ok(board)
             }
             // 距上一次请求不到限流间隔：把上次那份还给他。
@@ -782,10 +982,13 @@ impl VrccService {
             // 而让用户点一下刷新就弹错误，比给旧数据更糟。客户端侧因此
             // 把「等太久」报成 `ThrottledLocally { reason: Gap }`（见
             // `MAX_ACQUIRE_WAIT`），这里接住它。没有缓存时才真的报错。
-            Err(error) if error.is_local_gap() => match self.cached_board(limit, sort) {
-                Some(board) => Ok(board),
-                None => Err(error),
-            },
+            Err(error) if error.is_local_gap() => {
+                let key = OwnedBoardKey::new(self.cache_scope(), sort);
+                match self.cached_board(limit, key) {
+                    Some(board) => Ok(board),
+                    None => Err(error),
+                }
+            }
             Err(error) => Err(error),
         }
     }
@@ -793,6 +996,101 @@ impl VrccService {
     /// 服务状态。
     pub async fn status(&self) -> std::result::Result<VrccStatus, VrccError> {
         self.remote.status().await
+    }
+
+    /// 模型榜（`GET /boards/models`，1.17.0 起）。不需要连接。
+    ///
+    /// 和 [`Self::boards`] 同一套降级：限流窗口内点刷新时把上次那份还给玩家，
+    /// 而不是弹一句「请求太频繁」。官方说这个榜也最多 5 分钟更新一次。
+    ///
+    /// **旧服务器没有这个接口**（`404 not_found`）时返回 `None`，和
+    /// [`Self::announcements`] / [`Self::stickers`] 一样：这是「这台服务器还
+    /// 没有模型榜」，不是故障，界面据此显示成空的即可。
+    ///
+    /// **不碰腕表缓存**：腕表显示的是「当前所在地图的名次」，和 BOOTH 模型
+    /// 无关，混进来只会把地图名次覆盖掉。
+    pub async fn models_board(
+        &self,
+        limit: u32,
+        sort: VrccBoardSort,
+    ) -> std::result::Result<Option<VrccModelBoard>, VrccError> {
+        match self.remote.models_board(limit, sort).await {
+            Ok(board) => {
+                let key = OwnedModelBoardKey::new(self.cache_scope(), sort);
+                self.remember_models(limit, key, &board);
+                Ok(Some(board))
+            }
+            Err(error) if error.is_local_gap() => {
+                let key = OwnedModelBoardKey::new(self.cache_scope(), sort);
+                match self.cached_models(limit, key) {
+                    Some(board) => Ok(Some(board)),
+                    None => Err(error),
+                }
+            }
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// 单个模型（`GET /models/{id}`）。不需要连接。
+    ///
+    /// 不在榜上时 `None`——那是正常状态，不是故障。
+    ///
+    /// **带本地缓存**：官方说信息最多 5 分钟更新一次，而玩家常常点开、关掉、
+    /// 再点开同一条。每次都发请求既慢又白占额度。缓存按 BOOTH 编号存，
+    /// 过期就重新问。
+    ///
+    /// `None`（不在榜上）只记 [`MODEL_MISSING_TTL`] 那么短：下架和重新上架都是
+    /// 会发生的事，把「没有」记 5 分钟会让玩家以为它消失了；但完全不记又会
+    /// 让「关掉再点开同一个已下架模型」撞上本地限流的 30 秒间隔，表现成
+    /// 一个假的网络故障。
+    ///
+    /// ## 没有做 single-flight
+    ///
+    /// 同一个 id 的两个并发调用会各自 miss、各发一次请求。这里**有意不做**：
+    ///
+    /// - 唯一的调用入口是玩家点开一张卡，前端同一时刻只允许一个弹窗，实际上
+    ///   并发窗口只有「连点两下」那么多；
+    /// - 要做就得在 `model()` 里持一把跨 `await` 的锁或记「正在请求」，而
+    ///   这个类型的其余部分刻意避免持锁跨 await（见 `cached_model_detail`）。
+    ///   为一条几乎不存在的路径引入这种结构，是拿可见的正确性去换不可见的
+    ///   一次请求。
+    ///
+    /// 真出现并发压力时，正确的做法是在调用侧合并（比如前端按 id 去重），
+    /// 而不是在这一层加锁。
+    pub async fn model(&self, id: i64) -> std::result::Result<Option<VrccModelDetail>, VrccError> {
+        if id <= 0 {
+            return Ok(None);
+        }
+
+        // 缓存按「登录态 + BOOTH 编号」分区。取分区放在这里，后面每个碰缓存的
+        // 地方都用同一个 key——谁想漏掉账号维度都过不了类型检查。
+        let key = OwnedModelKey::new(self.cache_scope(), id);
+
+        // 先看缓存。读锁用完立刻释放，不要在持锁期间 await。
+        if let Some(cached) = self.cached_model_detail(key) {
+            return Ok(Some(cached));
+        }
+
+        // 刚确认过「不在榜上」就不要再问：同一个 id 的本地限流间隔是 30 秒，
+        // 这段时间里再问会被 `MAX_ACQUIRE_WAIT` 直接拒掉，病根却只是玩家
+        // 关掉又点开了同一个已下架的模型——那不该表现为「评论加载失败」。
+        if self.recently_missing_model(key) {
+            return Ok(None);
+        }
+
+        match self.remote.model(id).await {
+            Ok(Some(detail)) => {
+                self.remember_model_detail(key, &detail);
+                Ok(Some(detail))
+            }
+            // 不在榜上：不长期缓存，只记 [`MODEL_MISSING_TTL`]。
+            Ok(None) => {
+                self.remember_missing_model(key);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// 批量查地图（`GET /maps?ids=`）。

@@ -1,0 +1,332 @@
+/* SPDX-License-Identifier: MPL-2.0 */
+
+/*
+ * 卡片 ↔ 弹窗的形变。
+ *
+ * **这个文件绝对不能包在 `@layer` 里。** Tailwind v4 的层序是
+ * `theme → base → components → utilities`，而 `DialogContent` 自带
+ * `data-open:animate-in zoom-in-95`、`data-closed:animate-out` 这些工具类。
+ * 按级联层规则**层序优先于选择器特异性**：写进 `@layer components` 的规则
+ * 无论多具体都输给 utilities，`animation` 会被静默盖掉，整条形变不播。
+ * 未分层规则压过所有分层规则，所以这里什么都不包。
+ * （`globals.css` 尾部也是一批不包层的规则，这是仓库既有做法。）
+ */
+
+/*
+ * 飞行层：从卡片原位出发的那一份副本。
+ *
+ * 它在 portal 里、`position: fixed`，因为要跨出滚动容器飞到窗口中间；
+ * `z-index: 60` 是为了压在遮罩（`z-50`）之上——遮罩后面是掏了一个洞的网格。
+ * 自己不接收指针事件：飞行期间用户不该点中它。
+ *
+ * ## 位移必须在这一层，不能和旋转写在一起
+ *
+ * 透视的除法发生在**整个矩阵乘完之后**。若 `translate` 和 `rotateY` 在同一个
+ * `transform` 里，位移本身也会被透视除法作用：
+ *
+ *     x' = dx / (1 + u/800)      u = 卡片上某点的深度（±半个卡宽）
+ *
+ * `dx` 是几百像素、`u` 在 ±80px 之间，于是 x' 会散开几十像素——转到 90° 时
+ * 剩下的不是一个点而是一块**梯形**。这就是「转过去之后还挂着一片斜卡片」的
+ * 真正成因（不是角度没走完，也不是厚度）。
+ *
+ * 把位移放到父层（屏幕空间、`transform-style` 保持默认的 flat）：子层先自己
+ * 投影成一条线，父层再平移这条线。子层的 `x' = 0 / (1 + u/800) = 0`，
+ * 90° 就是干干净净的零宽。
+ */
+/*
+ * 时间轴：**两半各自计时**，不是一条 800ms 切成两段。
+ *
+ * 这一点踩过：`--ease-out-ui` 是 `cubic-bezier(0.23, 1, 0.32, 1)`，极强的前快
+ * 后慢——**时间走到 50% 时，动画进度已经约 87%**。如果把交接点放在关键帧的
+ * 50%，卡片那一半会在约 104ms 内转完，剩下约 700ms 全留给弹窗慢慢长开，
+ * 观感极不平衡；而且因为它俩用同一条缓动、交接本身是对的，所以看不出来。
+ *
+ * 改成：卡片这半段跑 `--motion-expand` 的一半、吃一条完整缓动；弹窗那半段
+ * 延后同样的时长再跑一半。两半各有各的 ease-out，交接时刻仍然严格对齐。
+ */
+.vrcc-morph-flight {
+    position: fixed;
+    z-index: 60;
+    pointer-events: none;
+    animation: vrcc-morph-move var(--morph-expand-half) var(--ease-out-ui) both;
+}
+
+@keyframes vrcc-morph-move {
+    from {
+        /* 父层是平面上下文，透视不会作用在它身上，所以这里 `translate` 没问题；
+           子层才带着 `perspective()`，位移绝不能进去。 */
+        translate: 0 0;
+    }
+
+    to {
+        translate: var(--morph-card-dx, 0px) var(--morph-card-dy, 0px);
+    }
+}
+
+.vrcc-morph-flight__card {
+    animation: vrcc-morph-out var(--morph-expand-half) var(--ease-out-ui) both;
+    transform-style: preserve-3d;
+    backface-visibility: hidden;
+}
+
+@keyframes vrcc-morph-out {
+    from {
+        transform: perspective(800px) rotateY(0deg);
+    }
+
+    to {
+        transform: perspective(800px) rotateY(90deg);
+    }
+}
+
+/*
+ * 收起：弹窗先反向走回中点（550ms 的前一半），卡片副本再从那一点飞回原位。
+ *
+ * **必须用另一组动画名**，不能用 `animation-direction: reverse`：
+ * CSS 动画只在 `animation-name` 变化时重启，同名的话浏览器认为还是那个已经
+ * 播完的动画，收起会**完全不播**——这条踩过。
+ *
+ * 返程拆成和去程一样的两层，否则卡片会在屏幕中心原地转回来、不飞回格子：
+ * 父层负责位移（`vrcc-morph-return-move`），子层负责旋转
+ * （`vrcc-morph-return-spin`）。两者用同一个延时，所以同时开播。
+ */
+.vrcc-morph-flight[data-closing] {
+    animation: vrcc-morph-return-move var(--morph-collapse-half)
+        var(--ease-out-ui) var(--morph-collapse-half) both;
+}
+
+@keyframes vrcc-morph-return-move {
+    from {
+        translate: var(--morph-card-dx, 0px) var(--morph-card-dy, 0px);
+    }
+
+    to {
+        translate: 0 0;
+    }
+}
+
+.vrcc-morph-flight[data-closing] .vrcc-morph-flight__card {
+    animation: vrcc-morph-return-spin var(--morph-collapse-half)
+        var(--ease-out-ui) var(--morph-collapse-half) both;
+}
+
+@keyframes vrcc-morph-return-spin {
+    from {
+        transform: perspective(800px) rotateY(90deg);
+    }
+
+    to {
+        transform: perspective(800px) rotateY(0deg);
+    }
+}
+
+/*
+ * 弹窗本体。
+ *
+ * **关键帧里不再用 `transform: translate(-50%, -50%)`。** `DialogContent` 的
+ * 居中用的是 Tailwind 的 `-translate-x-1/2 -translate-y-1/2`，而 v4 把它们编译
+ * 成 **`translate` 属性**（不是 `transform`），两套机制独立生效：再在
+ * `transform` 里补一次 `-50%`，等于把弹窗整体又挪了半个自身尺寸，落点会偏到
+ * 左上——表现成「从卡片左上角冒出来」。
+ *
+ * 而位移本身必须写在 `translate` 属性里，不能和 `rotateY` 挤在同一个
+ * `transform`：见上面飞行层那段，透视除法会把两者混在一起散开。
+ * 所以关键帧里 `translate` 负责「居中 + 飞行位移」，`transform` 只留旋转和缩放，
+ * 并且 `-50%` 要自己带上（属性被关键帧接管后，工具类那两条就不再生效）。
+ */
+[data-slot='dialog-content'][data-morph] {
+    transform-origin: center;
+    /*
+     * 延后半个时长，只跑后一半：见文件头「两半各自计时」。
+     * 延时期间 `fill: both` 的 backwards 会把 from 状态顶住——那时它正好是
+     * 侧棱、零宽，看不见。
+     */
+    animation: vrcc-morph-in var(--morph-expand-half) var(--ease-out-ui)
+        var(--morph-expand-half) both;
+}
+
+@keyframes vrcc-morph-in {
+    /*
+     * 位移走 `translate` **属性**（屏幕空间），旋转和缩放留给 `transform`。
+     * 理由同飞行层：位移若和 `rotateY` 写在一起，会被透视除法散成梯形。
+     *
+     * 用属性也顺便绕开了另一个坑：`translate` 与 `transform` 是两套独立机制，
+     * 而居中已经是属性（`-translate-x-1/2 -translate-y-1/2`），所以这里必须
+     * 自己带上 `-50%`，否则弹窗会跳到左上角。
+     */
+    from {
+        translate: calc(-50% + var(--morph-dialog-dx, 0px))
+            calc(-50% + var(--morph-dialog-dy, 0px));
+        transform: perspective(800px) scale(var(--morph-from-scale, 1))
+            rotateY(-90deg);
+    }
+
+    /*
+     * 末态把 `transform` 交回 `none`。
+     *
+     * `fill: both` 会把这一帧一直留着，于是静止的弹窗上永远挂着一个
+     * `perspective(800px)`——它会在弹窗内部建立 3D 渲染上下文，让里面的
+     * `backdrop-filter`、固定定位和层叠顺序换一套规则。落地之后不再需要透视，
+     * 收干净。
+     */
+    to {
+        translate: -50% -50%;
+        transform: none;
+    }
+}
+
+/*
+ * 收起：另写一组关键帧，**不能**复用 `vrcc-morph-in` 配 `reverse`。
+ *
+ * CSS 动画只在 `animation-name` 变化时重启。入场那个动画此时已经播完并停在
+ * `fill: both` 的末态，同名再声明一次等于「更新一个已结束的动画」，浏览器不会
+ * 从头播——收起动画会完全不出现。
+ *
+ * 内容就是入场的反向：正面（0%）→ 半途侧棱（50%）→ 侧棱且透明（100%）。
+ */
+[data-slot='dialog-content'][data-morph][data-closed] {
+    /*
+     * **用 `--motion-collapse`，不是 `--morph-collapse`。**
+     *
+     * 这条写错过：`--morph-collapse` 从来没有定义过（定义的是
+     * `--morph-collapse-half` 和 `--motion-collapse`）。`var()` 没有 fallback
+     * 时替换失败，整条 `animation` 会在**计算值阶段**被判无效、退化成
+     * `animation: none`——收起动画一次都没播，而且没有任何报错。
+     *
+     * 连带效果：弹窗没有动画 → 底座立刻判定「动画已完成」→
+     * `onOpenChangeComplete` 当场触发 → 飞行副本也被立刻卸载，所以返程同样
+     * 看不见。
+     */
+    animation: vrcc-morph-collapse var(--motion-collapse) var(--ease-out-ui)
+        both;
+}
+
+/*
+ * 遮罩：**两半各管一半**，和卡片/弹窗的两半严格对应。
+ *
+ * 关系是这样的（展开）：
+ *
+ * | 时间 | 卡片/弹窗 | 遮罩 |
+ * | --- | --- | --- |
+ * | 0–50% | 卡片飞向中点并转到侧棱 | **不遮**——卡片还在「离开网格」 |
+ * | 50–100% | 弹窗从侧棱转回来并长大 | 淡入——弹窗出现在压暗的背景上 |
+ *
+ * 收起就是反过来：前一半遮罩保持（弹窗还在往侧棱收），后一半淡出（卡片飞回
+ * 格子，落地时网格刚好清楚）。
+ *
+ * 若不覆盖，底座给遮罩的默认是 150ms 淡入 / 100ms 淡出，两条都不与形变对齐：
+ *
+ * - 展开：150ms 就遮满了，于是卡片飞出格子的全程背景已经是模糊的；
+ * - 收起：100ms 淡完后 `tw-animate-css` 的 `--animate-out` 用的是
+ *   `fill-mode: none`，**播完弹回原样** → 模糊没了又突然回来，直到卸载才消失。
+ *
+ * 遮罩是 portal 里的兄弟节点，从弹窗侧选不到，所以用 `:has()` 认领。
+ */
+body:has([data-slot='dialog-content'][data-morph]:not([data-closed]))
+    [data-slot='dialog-overlay'] {
+    animation: vrcc-morph-overlay-in var(--motion-expand) var(--ease-out-ui)
+        both;
+}
+
+@keyframes vrcc-morph-overlay-in {
+    0%,
+    50% {
+        opacity: 0;
+        /*
+         * 缓动写在关键帧里，只作用于**从这一帧开始的那一段**。0→50% 那段
+         * 透明度没有变化，给什么缓动都看不出来；真正要缓动的是 50→100%。
+         */
+        animation-timing-function: var(--ease-out-ui);
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+
+body:has([data-slot='dialog-content'][data-morph][data-closed])
+    [data-slot='dialog-overlay'] {
+    animation: vrcc-morph-overlay var(--motion-collapse) var(--ease-out-ui) both;
+}
+
+@keyframes vrcc-morph-overlay {
+    /*
+     * 前一半（弹窗还在往侧棱收）遮罩保持不动——那时东西还在前面，
+     * 把背景揭开没有道理。后一半卡片往格子飞回去，遮罩同步淡出，
+     * 正好「卡片落地时网格已经清楚了」。
+     *
+     * 缓动写在关键帧里，只作用于**从这一帧开始的那一段**。0→50% 那段
+     * 透明度没有变化，给它什么缓动都看不出来。
+     */
+    0%,
+    50% {
+        opacity: 1;
+        animation-timing-function: var(--ease-out-ui);
+    }
+
+    100% {
+        opacity: 0;
+    }
+}
+
+@keyframes vrcc-morph-collapse {
+    from {
+        translate: -50% -50%;
+        transform: perspective(800px) scale(1) rotateY(0deg);
+        /*
+         * 缓动只给**这一段**。
+         *
+         * 这条动画总长 550ms，但真正有位移的只有前半段（275ms 转到侧棱），
+         * 后半段停在原地——那是留给卡片副本返程的时间，也是底座等退出动画的
+         * 时长。若把缓动写在 `animation` 上，它作用的是整条时间轴：
+         * `ease-out-ui` 在时间过半之前就跑到接近 100%，于是弹窗会在
+         * 七八十毫秒里就缩成一条线，然后干等四百多毫秒才卸载。
+         *
+         * 关键帧里的 `animation-timing-function` 只管**从这一帧开始的那一段**，
+         * 所以它会给 0%→50% 这 275ms 一条完整的 ease-out。
+         */
+        animation-timing-function: var(--ease-out-ui);
+    }
+
+    /*
+     * 到侧棱就该交还给卡片副本了：它从同一点接着转回正面。后一半停住，
+     * 也就一直看不见。
+     *
+     * 这里**不需要** `opacity`：位移走的是 `translate` 属性、旋转走 `transform`，
+     * 两者分开之后透视除法作用不到位移上，`rotateY(-90deg)` 是干净的零宽。
+     */
+    50%,
+    100% {
+        translate: calc(-50% + var(--morph-dialog-dx, 0px))
+            calc(-50% + var(--morph-dialog-dy, 0px));
+        transform: perspective(800px) scale(var(--morph-from-scale, 1))
+            rotateY(-90deg);
+    }
+}
+
+/*
+ * 减动效：两条通道都直接关掉动画。
+ * 飞行层整层不显示（JS 那边也会跳过它），弹窗照常出现，网格不掏洞。
+ */
+.reduce-effects .vrcc-morph-flight,
+.reduce-effects [data-slot='dialog-content'][data-morph],
+.reduce-effects [data-slot='dialog-content'][data-morph][data-closed] {
+    animation: none;
+}
+
+.reduce-effects .vrcc-morph-flight {
+    display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .vrcc-morph-flight,
+    [data-slot='dialog-content'][data-morph],
+    [data-slot='dialog-content'][data-morph][data-closed] {
+        animation: none;
+    }
+
+    .vrcc-morph-flight {
+        display: none;
+    }
+}
