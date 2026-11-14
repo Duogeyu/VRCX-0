@@ -5491,6 +5491,7 @@
                 "back_event_untitled": "未命名的活動",
                 "back_empty": "這個社團還沒有公告，也沒有在開的房間或活動",
                 "back_locked": "連接星遇同頻之後可以看到公告、房間和活動",
+                "back_partial": "這個社團現在有房間或活動，但明細拿不到",
                 "open_page": "社團頁",
                 "here": "{count} 顆星掛著",
                 "since": "{year} 年成立",

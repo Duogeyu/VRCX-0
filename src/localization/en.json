@@ -5511,6 +5511,7 @@
                 "back_event_untitled": "Untitled event",
                 "back_empty": "This club has no notice, no open rooms and no upcoming events",
                 "back_locked": "Connect to VRCC to see the notice, rooms and events",
+                "back_partial": "This club has a room or event running, but the details aren't available",
                 "open_page": "Club page",
                 "here": "{count} stars attached",
                 "since": "Since {year}",

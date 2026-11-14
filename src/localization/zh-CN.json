@@ -5500,6 +5500,7 @@
                 "back_event_untitled": "未命名的活动",
                 "back_empty": "这个社团还没有公告，也没有在开的房间或活动",
                 "back_locked": "连接星遇同频之后可以看到公告、房间和活动",
+                "back_partial": "这个社团现在有房间或活动，但明细拿不到",
                 "open_page": "社团页",
                 "here": "{count} 颗星挂着",
                 "since": "{year} 年成立",

@@ -21,6 +21,7 @@ import { useNowMs } from '@/lib/useNowMs';
 import { useTiltGrid } from '@/lib/useTiltGrid';
 import {
     clubCodeForGroup,
+    vrccMyClubQueryOptions,
     vrccPublicClubQueryOptions
 } from '@/repositories/vrccClubRepository';
 import { fetchVrccScopeGrants } from '@/repositories/vrccMapRepository';
@@ -84,21 +85,13 @@ export function GroupVrccClub({
         refetchOnWindowFocus: false
     });
 
-    const detailQuery = useQuery({
-        queryKey: ['group', 'vrcc-club-detail', code] as const,
-        queryFn: async () => {
-            const { commands } = await import('@/platform/tauri/bindings');
-            return commands.appVrccMyClub(code);
-        },
-        // 公开页已答 404 时没必要再问带令牌的。
-        enabled:
-            Boolean(code) &&
-            scopeQuery.data === true &&
-            Boolean(query.data?.club),
-        staleTime: 60_000,
-        gcTime: 5 * 60_000,
-        retry: 0
-    });
+    const detailQuery = useQuery(
+        vrccMyClubQueryOptions(
+            code,
+            // 公开页已答 404 时没必要再问带令牌的；没有 `clubs` 权限也别问。
+            scopeQuery.data === true && Boolean(query.data?.club)
+        )
+    );
 
     // 倾斜外壳：钩子只喂 CSS 变量，复合变换在 `vrcc-club-card.css` 里拼。
     // 9° 是实机试出来的：这张窄卡上 5° 看不出来，模型榜那套 12° 又晃眼。
@@ -150,9 +143,10 @@ export function GroupVrccClub({
     const here = typeof club.here === 'number' ? club.here : 0;
     const tags = Array.isArray(club.tags) ? club.tags.filter(Boolean) : [];
     // 群组成立年份。只在像年份的范围内显示——接口坏了给出 `0` 或时间戳时，
-    // 编一句「0 年成立」比不显示更糟。
+    // 编一句「0 年成立」比不显示更糟；小数（`2024.5`）同样不是年份。
     const since =
         typeof club.since === 'number' &&
+        Number.isInteger(club.since) &&
         club.since >= 1990 &&
         club.since <= 2100
             ? club.since
@@ -194,7 +188,20 @@ export function GroupVrccClub({
                   when: formatCompactDateTime(notice.until)
               })
             : '';
-    const backEmpty = !noticeText && rooms.length === 0 && events.length === 0;
+    // 「背面什么都没有」这个断言必须和正面的角标用同一份事实：`room` / `event`
+    // 是真的（正面写着「有房间在开」），只是 `rooms` / `events` 没给出明细时，
+    // 背面不能反过来宣称「没有在开的房间或活动」——同一张卡自相矛盾。
+    const backEmpty =
+        !noticeText &&
+        rooms.length === 0 &&
+        events.length === 0 &&
+        !roomOpen &&
+        !hasEvent;
+    const backPartial =
+        !noticeText &&
+        rooms.length === 0 &&
+        events.length === 0 &&
+        (roomOpen || hasEvent);
 
     /**
      * 整张卡都能点着翻面，但两种情况下不翻：
@@ -495,6 +502,14 @@ export function GroupVrccClub({
                                             : t(
                                                   'dialog.group.vrcc.back_locked'
                                               )}
+                                    </p>
+                                ) : null}
+
+                                {/* 角标说有房/有活动，但明细没给。此时唯一诚实的
+                                    说法是「看不到明细」，不是「没有」。 */}
+                                {backPartial ? (
+                                    <p className="text-muted-foreground/70 mt-2 min-w-0 text-[11px] leading-snug break-words">
+                                        {t('dialog.group.vrcc.back_partial')}
                                     </p>
                                 ) : null}
 

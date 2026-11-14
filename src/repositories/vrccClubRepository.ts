@@ -21,6 +21,31 @@ export function vrccPublicClubQueryOptions(code: string) {
     });
 }
 
+/**
+ * 同一个社团的**玩家视角**（`GET /me/clubs/{code}`）：公告、房间、活动、点赞、
+ * 关注都在这份回答里。需要 `clubs` 敏感权限。
+ *
+ * **两个消费者必须共用这个片段**（社团卡、房间列表）。各写一份 `queryOptions`
+ * 就会出现两个键、两次请求——而这接口在客户端侧带 30 秒 `min_gap`，第二次基本
+ * 会被本地限流打回，白白多一条注定失败的 IPC。
+ *
+ * `enabled` 由调用方决定：公开页已经答 404 的群组没必要再问带令牌的。
+ */
+export function vrccMyClubQueryOptions(code: string, enabled: boolean) {
+    const trimmed = code.trim();
+    return queryOptions({
+        queryKey: queryKeys.groupVrccClubDetail(trimmed),
+        queryFn: async () => {
+            const { commands } = await import('@/platform/tauri/bindings');
+            return commands.appVrccMyClub(trimmed);
+        },
+        enabled: enabled && Boolean(trimmed),
+        staleTime: 60_000,
+        gcTime: 5 * 60_000,
+        retry: 0
+    });
+}
+
 /** 短码形状，同官方 openapi 的 `pattern`。大小写不限（两种都实测 200）。 */
 export function isClubCodeShaped(code: string): boolean {
     return /^[A-Za-z0-9]{3,6}\.\d{4}$/.test(code.trim());

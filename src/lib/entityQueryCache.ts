@@ -238,6 +238,13 @@ export const queryKeys = Object.freeze({
     // 按**短码**分键而不是群组 ID：短码本身就是 `shortCode.discriminator`，
     // 同一个社团从别处打开也命中同一份缓存，不会问两遍。
     groupVrccClub: (code: string) => ['group', 'vrcc-club', code] as const,
+    // 同一个社团的**玩家视角**（`GET /me/clubs/{code}`）：公告、房间、活动、点赞、
+    // 关注全在这一份回答里。
+    //
+    // **卡片和房间列表共用这一个键**：两个组件各自建键的话，打开一次群组详情会
+    // 把同一个接口问两遍，而它在客户端侧带 30 秒 `min_gap`、还吃每日额度。
+    groupVrccClubDetail: (code: string) =>
+        ['group', 'vrcc-club-detail', code] as const,
     // 一张地图在榜上的状态（board / pending / off）。只有带令牌的接口能区分
     // 「未收录」和「待审核」，所以独立一个键，不与公开页共用。
     worldVrccMine: (worldId: string) =>
