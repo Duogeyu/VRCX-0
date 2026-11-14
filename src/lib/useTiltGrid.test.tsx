@@ -355,3 +355,164 @@ describe('useTiltGrid', () => {
         expect(frames.length).toBe(0);
     });
 });
+
+/** 卡片挂在一层「详情页」里，用来测 `track: 'area'`。 */
+function AreaGrid({
+    options,
+    withArea = true
+}: {
+    options?: TiltGridOptions;
+    withArea?: boolean;
+}) {
+    const ref = useTiltGrid<HTMLUListElement>(options);
+    const grid = (
+        <ul ref={ref} data-testid="grid">
+            <li data-tilt="" data-testid="card-0" />
+        </ul>
+    );
+    return withArea ? (
+        <div data-slot="dialog-content" data-testid="area">
+            {grid}
+        </div>
+    ) : (
+        grid
+    );
+}
+
+/** 详情页的几何：1200×800。卡片是 400×400（见 `stubRect`）。 */
+const AREA_W = 1200;
+const AREA_H = 800;
+
+/** 给元素一个任意尺寸的几何，左上角固定 0,0。 */
+function stubBox(element: Element, width: number, height: number) {
+    element.getBoundingClientRect = () =>
+        ({
+            left: 0,
+            top: 0,
+            width,
+            height,
+            right: width,
+            bottom: height,
+            x: 0,
+            y: 0,
+            toJSON: () => ({})
+        }) as DOMRect;
+}
+
+/** 在**区域**上派发事件；几何按卡片和区域各自给——两边都会读到自己的 rect。 */
+function moveInArea(area: Element, card: Element, x: number, y: number) {
+    stubBox(area, AREA_W, AREA_H);
+    stubRect(card);
+    const event = new MouseEvent('pointermove', {
+        bubbles: true,
+        clientX: x,
+        clientY: y
+    });
+    Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+    fireEvent(area, event);
+}
+
+describe('useTiltGrid · 整片区域跟随', () => {
+    const areaOptions: TiltGridOptions = {
+        track: 'area',
+        areaSelector: '[data-slot="dialog-content"]'
+    };
+
+    it('默认仍是「压在卡上才倾」：区域里但没压到卡片就不动', () => {
+        render(
+            <AreaGrid options={{ areaSelector: areaOptions.areaSelector }} />
+        );
+        const card = screen.getByTestId('card-0');
+
+        moveInArea(screen.getByTestId('area'), card, 600, 200);
+        tick(120);
+
+        expect(Math.abs(degrees(card, '--tilt-y'))).toBeLessThan(0.05);
+    });
+
+    it('卡片边缘是满幅——和「压在卡上」同一套归一化', () => {
+        render(<AreaGrid options={areaOptions} />);
+        const card = screen.getByTestId('card-0');
+
+        moveInArea(screen.getByTestId('area'), card, 400, 200);
+        tick(120);
+
+        expect(degrees(card, '--tilt-y')).toBeCloseTo(12, 1);
+    });
+
+    it('刚出卡片几乎不衰减——跨度是详情页，不是卡片', () => {
+        render(<AreaGrid options={areaOptions} />);
+        const card = screen.getByTestId('card-0');
+
+        // 卡片 400×400 居中于 (200,200)：x=600 是 2 倍半宽，才刚出卡片。
+        moveInArea(screen.getByTestId('area'), card, 600, 200);
+        tick(120);
+
+        const angle = degrees(card, '--tilt-y');
+        expect(angle).toBeGreaterThan(9);
+        expect(angle).toBeLessThan(12);
+    });
+
+    it('走到详情页边界才近乎归零', () => {
+        render(<AreaGrid options={areaOptions} />);
+        const card = screen.getByTestId('card-0');
+        const area = screen.getByTestId('area');
+
+        moveInArea(area, card, AREA_W, 200);
+        tick(240);
+
+        expect(Math.abs(degrees(card, '--tilt-y'))).toBeLessThan(1.5);
+        expect(Math.abs(degrees(card, '--tilt-x'))).toBeLessThan(0.1);
+    });
+
+    it('找不到那个范围时退回「压在卡上」，不会拿挂载点当整页', () => {
+        render(<AreaGrid options={areaOptions} withArea={false} />);
+        const card = screen.getByTestId('card-0');
+
+        // 指针落在容器上（等于挂在卡上的那层），但没压到卡片。
+        moveInArea(screen.getByTestId('grid'), card, 600, 200);
+        tick(120);
+
+        expect(Math.abs(degrees(card, '--tilt-y'))).toBeLessThan(0.05);
+    });
+
+    it('指针在详情页里、但不在卡片上时不亮高光', () => {
+        render(<AreaGrid options={areaOptions} />);
+        const card = screen.getByTestId('card-0');
+
+        // 卡片只占 0..400；这个点离得很远，但仍在详情页范围内。
+        moveInArea(screen.getByTestId('area'), card, 900, 600);
+        tick(240);
+
+        const glare = Number.parseFloat(
+            card.style.getPropertyValue('--tilt-glare') || '0'
+        );
+        expect(glare).toBeLessThan(0.02);
+    });
+
+    it('指针真的压到卡片上才淡入高光', () => {
+        render(<AreaGrid options={areaOptions} />);
+        const card = screen.getByTestId('card-0');
+
+        moveInArea(screen.getByTestId('area'), card, 200, 200);
+        tick(60);
+
+        const glare = Number.parseFloat(
+            card.style.getPropertyValue('--tilt-glare') || '0'
+        );
+        expect(glare).toBeGreaterThan(0.8);
+    });
+
+    it('卡片模式下压在卡上也亮高光——这条保证没把模型榜改坏', () => {
+        render(<Grid />);
+        const card = screen.getByTestId('card-0');
+
+        moveOn(card, 200, 200);
+        tick(60);
+
+        const glare = Number.parseFloat(
+            card.style.getPropertyValue('--tilt-glare') || '0'
+        );
+        expect(glare).toBeGreaterThan(0.8);
+    });
+});
