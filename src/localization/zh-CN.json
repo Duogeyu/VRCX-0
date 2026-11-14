@@ -831,6 +831,8 @@
             "comments_error": "评论没能加载出来，稍后再试。",
             "comments_note": "开放接口只给最多 2 条热评，也没有投票接口。想看完整页面请去星遇同频。",
             "week_count": "本周 {count}",
+            "total": "共 {total} 个",
+            "total_capped": "共 {total} 个 · 只列出前 {shown}",
             "open": "在星遇同频打开",
             "sort": {
                 "top": "总榜",

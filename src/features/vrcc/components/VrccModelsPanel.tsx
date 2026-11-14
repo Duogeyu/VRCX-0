@@ -241,6 +241,30 @@ export function VrccModelsPanel({
     // 永远不会来的东西。
     const showEmpty = rows.length === 0;
 
+    /**
+     * 条数说明：这个榜上到底有几个，我们手上有几个。
+     *
+     * 一次只取 100 条（接口上限），分页器按手上这 100 条算页数——不写这一句，
+     * 它等于向玩家断言「这个榜一共就 100 个」。`total` 是服务器 1.19.2 起才有
+     * 的字段，老服务器给 `null`，那时整条不渲染：宁可不说，也不能编一个数字。
+     *
+     * 只在**确实被截断**（总数比手上多）时才说明只列了前几条。榜本来就只有
+     * 三条的时候，多一句「只列出前 3」纯属噪音。
+     */
+    const boardTotal = models?.total ?? null;
+    let totalNote: string | null = null;
+    if (boardTotal != null && boardTotal > 0) {
+        totalNote =
+            boardTotal > rows.length
+                ? t('vrcc.models.total_capped', {
+                      total: boardTotal.toLocaleString(),
+                      shown: rows.length.toLocaleString()
+                  })
+                : t('vrcc.models.total', {
+                      total: boardTotal.toLocaleString()
+                  });
+    }
+
     return (
         <div className="flex h-full min-h-0 flex-col">
             <div className="text-muted-foreground flex shrink-0 items-center gap-2 px-1 pb-2 text-xs">
@@ -368,6 +392,14 @@ export function VrccModelsPanel({
                 回到 1 页时，底下那条一消失，整块内容往下窜一截。留着它、
                 让它全程占位，翻页时视线不用重新定位。 */}
             <nav className="flex shrink-0 items-center justify-end gap-0.5 pt-2">
+                {/* 条数说明靠左，翻页键留在右边。`mr-auto` 把它顶到行的另一头：
+                    用 `justify-between` 的话，这条不渲染时（老服务器没有 `total`）
+                    按钮会被留在左边。 */}
+                {totalNote ? (
+                    <span className="text-muted-foreground mr-auto truncate pr-2 text-xs tabular-nums">
+                        {totalNote}
+                    </span>
+                ) : null}
                 <Button
                     variant="ghost"
                     size="sm"

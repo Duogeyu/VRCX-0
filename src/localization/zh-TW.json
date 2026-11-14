@@ -831,6 +831,8 @@
             "comments_error": "評論沒能載入出來，稍後再試。",
             "comments_note": "開放介面只給最多 2 條熱評，也沒有投票介面。想看完整頁面請去星遇同頻。",
             "week_count": "本週 {count}",
+            "total": "共 {total} 個",
+            "total_capped": "共 {total} 個 · 只列出前 {shown}",
             "open": "在星遇同頻開啟",
             "sort": {
                 "top": "總榜",

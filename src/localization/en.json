@@ -831,6 +831,8 @@
             "comments_error": "Couldn't load the comments. Try again later.",
             "comments_note": "The open API only exposes the top 2 comments, and there is no endpoint to vote. Open the site for the full page.",
             "week_count": "{count} this week",
+            "total": "{total} models",
+            "total_capped": "{total} models · showing the first {shown}",
             "open": "Open on Xingyu Tongpin",
             "sort": {
                 "top": "All time",

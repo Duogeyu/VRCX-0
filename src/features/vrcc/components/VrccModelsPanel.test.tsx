@@ -437,4 +437,48 @@ describe('VrccModelsPanel', () => {
 
         expect(apiModel).toHaveBeenCalledTimes(2);
     });
+
+    it('榜比手上这一百条长时，明说只列了前一百个', () => {
+        // 一次只取 100 条（接口上限），分页器按手上这 100 条算页数。不写这一句，
+        // 它等于向玩家断言「这个榜一共只有 100 个」。
+        //
+        // 总数用三位数：`toLocaleString()` 会不会插千位分隔符取决于 Node 的
+        // ICU 数据，测试不该被那个牵着走。
+        renderPanel({
+            models: board(
+                Array.from({ length: 100 }, (_, index) =>
+                    model({ id: index + 1 })
+                ),
+                { total: 120 }
+            )
+        });
+
+        expect(
+            screen.getByText(
+                'vrcc.models.total_capped:{"total":"120","shown":"100"}'
+            )
+        ).toBeTruthy();
+    });
+
+    it('榜本来就没被截断时不提「只列出前几条」', () => {
+        renderPanel({
+            models: board(
+                [model({ id: 1, short: '一' }), model({ id: 2, short: '二' })],
+                { total: 2 }
+            )
+        });
+
+        expect(
+            screen.getByText('vrcc.models.total:{"total":"2"}')
+        ).toBeTruthy();
+        expect(screen.queryByText(/vrcc\.models\.total_capped/)).toBeNull();
+    });
+
+    it('服务器还没有 total 字段时整条不渲染，也不编一个数字', () => {
+        // 1.19.2 之前没有这个字段。老服务器上写「共 2 个」就是替服务器撒谎，
+        // 而且玩家没有别的办法看出这是本地算出来的。
+        renderPanel({ models: board([model({ id: 1 })], { total: null }) });
+
+        expect(screen.queryByText(/vrcc\.models\.total/)).toBeNull();
+    });
 });
