@@ -222,6 +222,15 @@ describe('时长常量与 CSS token 不漂', () => {
         );
     });
 
+    it('收起的两半同样由主 token 派生', () => {
+        // 展开那半一直是 `calc`，收起这半曾经写死 275ms。两个 550/2 恰好相等，
+        // 所以看不出差别——直到有人去调 `--motion-collapse`：那时收起就会变成
+        // 「弹窗缩回侧棱」和「卡片飞回去」各走各的长度，而全程零报错。
+        expect(globalsCss).toMatch(
+            /--morph-collapse-half:\s*calc\(var\(--motion-collapse\)\s*\/\s*2\)/
+        );
+    });
+
     it('卡片的展开动画用的是半个时长，不是整条', () => {
         expect(code).toMatch(
             /\.vrcc-morph-flight\s*\{[^}]*animation:\s*vrcc-morph-move\s+var\(--morph-expand-half\)/

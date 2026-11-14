@@ -30,8 +30,11 @@
     --morph-expand-half: calc(var(--motion-expand) / 2);
     /* 收起不必和展开等长：关窗动作拖 800ms 会显得迟疑。 */
     --motion-collapse: 550ms;
-    /* 收起的一半。弹窗先反向走到侧棱，卡片副本再从那里接回来。 */
-    --morph-collapse-half: 275ms;
+    /* 收起的一半。弹窗先反向走到侧棱，卡片副本再从那里接回来。
+       和展开那半一样用 `calc` 派生：写死 275ms 时，「收起的两个半段加起来等于
+       `--motion-collapse`」这条约束就只活在注释里——上面对不上，也不会有任何
+       报错，只会变成「弹窗缩回侧棱的时长」和「卡片飞回去的时长」各走各的。 */
+    --morph-collapse-half: calc(var(--motion-collapse) / 2);
     --ease-out-ui: cubic-bezier(0.23, 1, 0.32, 1);
     --popover: oklch(1 0 0);
     --popover-foreground: oklch(0.145 0 0);

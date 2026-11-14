@@ -444,4 +444,88 @@ describe('VrccModelsPanel 倾斜接线', () => {
             document.documentElement.classList.remove('reduce-effects');
         }
     });
+
+    it('过期的入场定时器不会把下一个弹窗提前收掉', async () => {
+        // 入场定时器有六个清理点：卸载、换页/换排序、`openCard` 起表之前、
+        // 无动画分支、`onSettled`、`onGone`。它们互为冗余——单删任意一处，其余
+        // 会兜住，所以只能从**外部行为**钉住「整个系统不会留下过期定时器」。
+        //
+        // 这里构造唯一能让过期定时器露头的序列：A 在入场途中被 404 收回（它的
+        // 定时器本该随之作废）→ 300ms 后打开 B → B 还在入场时要求关闭（排队）
+        // → 若 A 那个定时器还活着，它会在 t≈800 把 B 提前收掉，而不是等 B
+        // 自己的 t≈1100。
+        vi.useFakeTimers();
+        try {
+            apiModel.mockResolvedValueOnce(null); // 第一张：不在榜上
+            apiModel.mockResolvedValue({ model: null, hots: [], at: 1 }); // 第二张：正常
+
+            const { container } = render(
+                <VrccModelsPanel
+                    models={board([model({ id: 1 }), model({ id: 2 })])}
+                    sort="top"
+                    sortSupported
+                    available
+                    onSortChange={() => {}}
+                    onRefresh={() => {}}
+                />
+            );
+
+            const cards = () =>
+                container.querySelectorAll<HTMLElement>('[data-tilt]');
+            expect(cards()).toHaveLength(2);
+            stubRect(cards()[0]);
+            stubRect(cards()[1]);
+
+            // A：点开 → 404 回来 → 当场收回。
+            fireEvent.click(
+                cards()[0].querySelector<HTMLElement>(
+                    '.vrcc-model-card__cover'
+                )!
+            );
+            expect(document.querySelector('.vrcc-morph-flight')).not.toBeNull();
+            await act(async () => {
+                await Promise.resolve();
+            });
+            expect(document.querySelector('.vrcc-morph-flight')).toBeNull();
+
+            // t=300：打开 B。
+            act(() => {
+                vi.advanceTimersByTime(300);
+            });
+            fireEvent.click(
+                cards()[1].querySelector<HTMLElement>(
+                    '.vrcc-model-card__cover'
+                )!
+            );
+            await act(async () => {
+                await Promise.resolve();
+            });
+            expect(document.querySelector('.vrcc-morph-flight')).not.toBeNull();
+
+            // B 还在入场：此时要求关闭只是排队，不该在半空中掉头。
+            fireEvent.click(
+                document.querySelector<HTMLElement>(
+                    '[data-slot="dialog-close"]'
+                )!
+            );
+            expect(
+                document
+                    .querySelector('.vrcc-morph-flight')!
+                    .hasAttribute('data-closing')
+            ).toBe(false);
+
+            // 推到 t≈900：跨过 A 那个定时器本该触发的时刻，还没到 B 的 1100。
+            act(() => {
+                vi.advanceTimersByTime(600);
+            });
+            expect(document.querySelector('.vrcc-morph-flight')).not.toBeNull();
+            expect(
+                document
+                    .querySelector('.vrcc-morph-flight')!
+                    .hasAttribute('data-closing')
+            ).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });

@@ -250,10 +250,14 @@ export function VrccModelsPanel({
      *
      * 只在**确实被截断**（总数比手上多）时才说明只列了前几条。榜本来就只有
      * 三条的时候，多一句「只列出前 3」纯属噪音。
+     *
+     * `rows.length > 0` 挡的是一条不会说人话的文案：服务器给了正的总数、列表却
+     * 是空的（只可能来自它自己抽风），照公式会写出「共 5 个 · 只列出前 0」——
+     * 那等于把内部状态摊给玩家，还和旁边那句「暂无模型榜数据」自相矛盾。
      */
     const boardTotal = models?.total ?? null;
     let totalNote: string | null = null;
-    if (boardTotal != null && boardTotal > 0) {
+    if (boardTotal != null && boardTotal > 0 && rows.length > 0) {
         totalNote =
             boardTotal > rows.length
                 ? t('vrcc.models.total_capped', {

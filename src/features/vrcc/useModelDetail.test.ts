@@ -59,6 +59,22 @@ describe('useModelDetail 的会话缓存', () => {
         expect(cachedModelDetail(99)).not.toBeNull();
     });
 
+    it('上限之内的那些一个都不丢，不是只记得最后几个', () => {
+        // 上面那条只断言「最新几个还在」。把上限从 100 改成 3，它照样全绿——
+        // 淘汰逻辑没坏，坏的是容量。所以这里钉的是**容量本身**：一百个都还在，
+        // 只是最旧的那四分之一没了。
+        for (let id = 0; id < 100; id += 1) {
+            rememberModelDetail(id, detail(id));
+        }
+
+        rememberModelDetail(100, detail(100));
+
+        // 淘汰 0–24，25 到 100 全部保留。
+        expect(cachedModelDetail(24)).toBeNull();
+        expect(cachedModelDetail(25)).not.toBeNull();
+        expect(cachedModelDetail(70)).not.toBeNull();
+    });
+
     it('重置之后一切归零', () => {
         rememberModelDetail(1, detail(1));
         resetModelDetailCache();

@@ -132,10 +132,17 @@ function board(
     };
 }
 
-function renderPanel(
+/**
+ * 面板元素本身。
+ *
+ * 和 [`renderPanel`] 分开只为 `rerender`：换排序、换榜单那几条要拿同一条构造
+ * 路径再画一遍。手抄一遍六个 props 的话，抄漏一个就成了另一个场景，测的也就不
+ * 是原来那件事了。
+ */
+function panelElement(
     props: Partial<Parameters<typeof VrccModelsPanel>[0]> = {}
 ) {
-    return render(
+    return (
         <VrccModelsPanel
             models={board([])}
             sort="top"
@@ -146,6 +153,12 @@ function renderPanel(
             {...props}
         />
     );
+}
+
+function renderPanel(
+    props: Partial<Parameters<typeof VrccModelsPanel>[0]> = {}
+) {
+    return render(panelElement(props));
 }
 
 describe('VrccModelsPanel', () => {
@@ -480,5 +493,216 @@ describe('VrccModelsPanel', () => {
         renderPanel({ models: board([model({ id: 1 })], { total: null }) });
 
         expect(screen.queryByText(/vrcc\.models\.total/)).toBeNull();
+    });
+
+    it('总数比手上这些还少时，不冒出「只列出前几条」', () => {
+        // 榜单快照和本地这一份不可能同一毫秒抓下来。服务器生成得比我们手上这份
+        // 早，就会出现「总数比实际拿到的还少」。
+        //
+        // 「只列出前 N」只有在**真的被截断**时才成立，总数更小的时候写它，等于
+        // 凭空造一个截断。数字本身照服务器说的写：本地这份才是可能过期的那个，
+        // 拿它去改写服务器的数字，等于用旧的纠正新的。
+        renderPanel({
+            models: board(
+                [model({ id: 20 }), model({ id: 21 }), model({ id: 22 })],
+                { total: 2 }
+            )
+        });
+
+        expect(screen.queryByText(/total_capped/)).toBeNull();
+        expect(
+            screen.getByText('vrcc.models.total:{"total":"2"}')
+        ).toBeTruthy();
+    });
+
+    it('总数为 0 时不写「共 0 个」', () => {
+        // 空榜有自己的空态，再补一句「共 0 个」是同一件事说两遍；而分页条是
+        // 常驻的，那句话会一直挂在空态下面。
+        renderPanel({ models: board([], { total: 0 }) });
+
+        expect(screen.getByText('vrcc.models.empty')).toBeTruthy();
+        expect(screen.queryByText(/vrcc\.models\.total/)).toBeNull();
+    });
+
+    it('总数是负数时不写出来', () => {
+        // 负数只可能来自服务器自己算错。照着抄一个「共 -1 个」比什么都不说更糟，
+        // 而且玩家没有别的办法知道那是服务器的数字。
+        renderPanel({ models: board([model({ id: 23 })], { total: -1 }) });
+
+        expect(screen.queryByText(/vrcc\.models\.total/)).toBeNull();
+    });
+
+    it('一条都没列出来时不说「只列出前 0」', () => {
+        // 正的总数配空列表只可能来自服务器自己抽风。照公式会写出
+        // 「共 5 个 · 只列出前 0」——那等于把内部状态摊给玩家看，而且和旁边
+        // 那句「暂无模型榜数据」自相矛盾。一条都没列的时候，闭嘴更好。
+        renderPanel({ models: board([], { total: 5 }) });
+
+        expect(screen.queryByText(/vrcc\.models\.total/)).toBeNull();
+    });
+
+    it('total 这个键整个不在时，和 null 走同一条路', () => {
+        // 现在真实链路到不了这里：契约是 `Option<i64>`，`None` 会被序列化成
+        // `null`，键不会消失。但只要有人给那个字段加上 `skip_serializing_if`，
+        // 前端拿到的就是「没有这个键」——这条钉住 `models?.total ?? null` 那层。
+        const withoutTotal = board([model({ id: 24 })]);
+        delete withoutTotal.total;
+
+        renderPanel({ models: withoutTotal });
+
+        expect(screen.queryByText(/vrcc\.models\.total/)).toBeNull();
+    });
+
+    it('翻页不会把「只列出前 N」改成这一页的条数', async () => {
+        // 防的是「拿当前页那 24 条去算 shown」。分页只是切片，手上仍然是那
+        // 100 条，所以说明里必须一直是 100——错用成页大小的话，翻到第 5 页会
+        // 变成「只列出前 4」，那是个凭空造出来的数字。
+        renderPanel({
+            models: board(
+                Array.from({ length: 100 }, (_, index) =>
+                    model({ id: index + 1 })
+                ),
+                { total: 120 }
+            )
+        });
+
+        const capped = 'vrcc.models.total_capped:{"total":"120","shown":"100"}';
+        expect(screen.getByText(capped)).toBeTruthy();
+
+        const pageTwo = () =>
+            screen.getByRole('button', {
+                name: 'table.pagination.page_number:{"page":2}'
+            });
+
+        // 先确认这一下真的翻页了：点了没反应的话，下面那句「说明没变」就什么
+        // 也测不到。
+        expect(pageTwo().getAttribute('aria-current')).toBeNull();
+        await userEvent.click(pageTwo());
+        expect(pageTwo().getAttribute('aria-current')).toBe('page');
+
+        expect(screen.getByText(capped)).toBeTruthy();
+    });
+
+    it('换排序后条数说的是新榜的数字，不是上一份', () => {
+        // 总榜和本周榜是两份不同的榜，总数也不一样。说明必须跟着手上的 board
+        // 重算——留住旧数字的话，切到本周榜还写着总榜的「共 120 个」。
+        const { rerender } = renderPanel({
+            models: board(
+                Array.from({ length: 100 }, (_, index) =>
+                    model({ id: index + 1 })
+                ),
+                { total: 120 }
+            )
+        });
+        expect(
+            screen.getByText(
+                'vrcc.models.total_capped:{"total":"120","shown":"100"}'
+            )
+        ).toBeTruthy();
+
+        // 本周榜：一共 30 个，没被截断。
+        rerender(
+            panelElement({
+                sort: 'week',
+                models: board(
+                    Array.from({ length: 30 }, (_, index) =>
+                        model({ id: index + 1 })
+                    ),
+                    { sort: 'week', total: 30 }
+                )
+            })
+        );
+
+        expect(
+            screen.getByText('vrcc.models.total:{"total":"30"}')
+        ).toBeTruthy();
+        expect(screen.queryByText(/total_capped/)).toBeNull();
+    });
+
+    it('弹窗里的数字以榜单行为准，不被上一次的缓存盖住', async () => {
+        // 前端这层详情缓存没有 TTL。如果让缓存里的 `model` 盖住榜单行，
+        // 「看过一次」的模型整场会话的点赞数都不再更新——等于把后端 5 分钟的
+        // 过期完全抹掉。行是这次刷新刚拿到的，比缓存新，所以它优先。
+        //
+        // 两份数据故意在**店铺和点赞数上都不同**：只看点赞数的话，写成
+        // `detail?.model ?? model` 也只在「缓存先到」时才露馅。
+        apiModel.mockResolvedValue({
+            model: model({ id: 40, shop: '缓存店', likes: 1000 }),
+            at: 1,
+            hots: []
+        });
+
+        const { rerender } = renderPanel({
+            models: board([model({ id: 40, short: '星', likes: 42 })])
+        });
+
+        const openRow = () =>
+            screen.getByRole('button', { name: 'vrcc.models.comments: 星' });
+
+        await userEvent.click(openRow());
+        // 等详情真的到手：热评为空时那一行会写「还没有人写」。
+        await screen.findByText('vrcc.models.comments_empty');
+
+        expect(
+            screen.getByText(
+                '星屋 · ¥1,500 · vrcc.models.likes_count:{"count":42}'
+            )
+        ).toBeTruthy();
+
+        await userEvent.keyboard('{Escape}');
+
+        // 刷新后榜单行变成 99。缓存里还是那份 1000。
+        rerender(
+            panelElement({
+                models: board([model({ id: 40, short: '星', likes: 99 })])
+            })
+        );
+        await userEvent.click(openRow());
+
+        expect(
+            await screen.findByText(
+                '星屋 · ¥1,500 · vrcc.models.likes_count:{"count":99}'
+            )
+        ).toBeTruthy();
+        // 走的是缓存，没有第二次请求——否则这条测的就不是「行优先」了。
+        expect(apiModel).toHaveBeenCalledTimes(1);
+    });
+
+    it('榜单变短之后页码跟着夹回来，不会停在一屏空白上', async () => {
+        // 服务器最多 5 分钟重算一次，条数本来就会变。停在第 5 页时刷新回来只剩
+        // 两条，页码不夹紧就会去切 `[96, 120]` 这段空区：一张卡都不显示，而
+        // 「下一页 / 末页」因为 `safePage >= pageCount - 1` 全灰着，玩家只能
+        // 自己点回第 1 页。
+        const many = Array.from({ length: 100 }, (_, index) =>
+            model({ id: index + 1 })
+        );
+        const { rerender } = renderPanel({
+            models: board(many, { total: 100 })
+        });
+
+        // 用「下一页」挪到末页，不用数字页码：数字 `5` 和「跳到末页」两个按钮的
+        // aria-label 完全相同（都是 `page_number: pageCount`），按下标取会很脆。
+        for (let step = 0; step < 4; step += 1) {
+            await userEvent.click(
+                screen.getByRole('button', { name: 'table.pagination.next' })
+            );
+        }
+        // 到了末页：下一页变灰。
+        expect(
+            screen
+                .getByRole('button', { name: 'table.pagination.next' })
+                .hasAttribute('disabled')
+        ).toBe(true);
+
+        rerender(
+            panelElement({
+                models: board([model({ id: 1 }), model({ id: 2 })], {
+                    total: 2
+                })
+            })
+        );
+
+        // 夹紧 → 回到第 1 页，两张卡都还在。
+        expect(document.querySelectorAll('[data-tilt]')).toHaveLength(2);
     });
 });

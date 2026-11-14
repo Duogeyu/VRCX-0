@@ -98,6 +98,7 @@ vi.mock('react-i18next', async (importOriginal) => {
     };
 });
 
+import { cachedModelDetail, rememberModelDetail } from './useModelDetail';
 import { useVrccController } from './useVrccController';
 import { useVrccAnnouncementCache } from './vrccAnnouncementCache';
 
@@ -332,6 +333,35 @@ describe('useVrccController', () => {
             expect(result.current.connection?.connected).toBe(false)
         );
         expect(result.current.connection?.expired).toBe(true);
+    });
+
+    it('换账号（star 变了）就清空模型的两层会话缓存', async () => {
+        // 前端这两层缓存只活一个会话，所以「按账号分区」的等价做法是**换人就
+        // 整表清空**。改坏了界面上完全看不出来——只会把 A 的详情给 B 看。
+        const handlers: Record<string, () => void> = {};
+        mocks.subscribeNotices.mockImplementation(
+            (event: string, handler: () => void) => {
+                handlers[event] = handler;
+                return Promise.resolve(() => {});
+            }
+        );
+
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        await waitFor(() =>
+            expect(handlers.vrccConnectionChanged).toBeDefined()
+        );
+
+        // 挂载时那个 effect 已经清过一次，这里先塞一份进去。
+        rememberModelDetail(1, { model: null, hots: [], at: 1 });
+        expect(cachedModelDetail(1)).not.toBeNull();
+
+        // 同一台机器上换了账号：77 → 88。
+        mocks.connection.mockResolvedValue({ ...connected, star: 88 });
+        act(() => handlers.vrccConnectionChanged());
+
+        await waitFor(() => expect(result.current.connection?.star).toBe(88));
+        expect(cachedModelDetail(1)).toBeNull();
     });
 
     it('请求报令牌失效时也重读连接状态，界面不再挂着「已连接」', async () => {
@@ -769,5 +799,31 @@ describe('useVrccController', () => {
         act(() => result.current.setTab('models'));
 
         expect(mocks.models).toHaveBeenCalledTimes(1);
+    });
+
+    it('隔了一分钟以上再切回模型榜，必须重新请求', async () => {
+        // 上一轮 review 留下的缺口：60 秒内复用有测试，**过期那一侧没有**。
+        // 只测「不重新请求」的话，把复用做成永久缓存也能全绿——那样模型榜会
+        // 永远停在打开页面的那一刻，而且没有一条测试看得出来。
+        //
+        // 只把 `Date` 换掉，不动 `setTimeout`：`waitFor` 靠真定时器轮询。
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+            vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+            const { result } = renderHook(() => useVrccController());
+            await waitFor(() => expect(result.current.loading).toBe(false));
+            await waitFor(() => expect(mocks.models).toHaveBeenCalledTimes(1));
+
+            // 61 秒之后：越过 60 秒的复用窗口。
+            vi.setSystemTime(new Date('2026-01-01T00:01:01Z'));
+
+            act(() => result.current.setTab('maps'));
+            act(() => result.current.setTab('models'));
+
+            await waitFor(() => expect(mocks.models).toHaveBeenCalledTimes(2));
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
