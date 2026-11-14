@@ -39,7 +39,6 @@ import {
 } from './groupDialogUtils';
 import { GroupMembersPanel } from './GroupMembersPanel';
 import { GroupPostUserButton, RowList } from './GroupRowList';
-import { GroupVrccClubNotice } from './GroupVrccClubNotice';
 
 function GroupBannerFallback() {
     return (
@@ -351,11 +350,6 @@ export function GroupDialogTabPanels({
                         )}
                     </TranslatableText>
                 ) : null}
-
-                {/* 星遇同频社团的公告：插在「公告」（群组动态）之下、「规则」
-                    之上。它和上面那块不是同一种东西——上面是群组动态的第一条，
-                    这里是社团管理员写的置顶公告、带到期时间。 */}
-                <GroupVrccClubNotice group={group} />
 
                 {group.rules ? (
                     <TranslatableText

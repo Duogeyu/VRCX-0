@@ -2,9 +2,11 @@
 
 import { useQuery } from '@tanstack/react-query';
 import {
+    CalendarClockIcon,
     CircleIcon,
     ExternalLinkIcon,
     FlipHorizontal2Icon,
+    RadioIcon,
     SparklesIcon,
     ThumbsUpIcon,
     UserCheckIcon
@@ -12,8 +14,10 @@ import {
 import { useState, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { TranslatableText } from '@/components/translation/TranslatableText';
 import { formatCompactDateTime } from '@/lib/dateTime';
 import { queryKeys } from '@/lib/entityQueryCache';
+import { useNowMs } from '@/lib/useNowMs';
 import { useTiltGrid } from '@/lib/useTiltGrid';
 import {
     clubCodeForGroup,
@@ -113,6 +117,10 @@ export function GroupVrccClub({
 
     const [flipped, setFlipped] = useState(false);
 
+    // 公告的「已失效」要跟着时间走。`Date.now()` 在渲染期是副作用（React Compiler
+    // 的 purity 规则会拦），走仓库现成的钩子；到期的精度不需要秒级。
+    const nowMs = useNowMs({ intervalMs: 60_000 });
+
     if (!code || !query.data) {
         return null;
     }
@@ -141,6 +149,14 @@ export function GroupVrccClub({
     const lede = club.lede?.trim() || '';
     const here = typeof club.here === 'number' ? club.here : 0;
     const tags = Array.isArray(club.tags) ? club.tags.filter(Boolean) : [];
+    // 群组成立年份。只在像年份的范围内显示——接口坏了给出 `0` 或时间戳时，
+    // 编一句「0 年成立」比不显示更糟。
+    const since =
+        typeof club.since === 'number' &&
+        club.since >= 1990 &&
+        club.since <= 2100
+            ? club.since
+            : null;
     // 关注是三态：`null` 表示拿不到（没连接/没权限/失败），不显示。
     // 把 `null` 当「未关注」是在编造玩家没做过的选择。
     const detail = detailQuery.data?.club;
@@ -150,10 +166,35 @@ export function GroupVrccClub({
     // 没图标时退回首字（只给成员看的社团没有图）。
     const initial = Array.from(name)[0] ?? '?';
 
-    const intro = joinSegments(detail?.intro);
+    // **不画 `intro`**：星遇的「简介」就是审核过的 VRChat 群组简介，和这个对话框
+    // 上方「描述」那一块是同一份文字，逐字相同。抄到背面只是同一段话看两遍。
     const rooms = Array.isArray(detail?.rooms) ? detail.rooms : [];
     const events = Array.isArray(detail?.events) ? detail.events : [];
-    const backEmpty = !intro && rooms.length === 0 && events.length === 0;
+    // 公告到期**不影响显示**，只在背面挂一个「已失效」；`until` 缺失当作长期。
+    const notice = detail?.notice;
+    const noticeText = joinSegments(notice?.segs);
+    const noticeExpired =
+        typeof notice?.until === 'number' && notice.until <= nowMs;
+    const noticeLive = Boolean(noticeText) && !noticeExpired;
+    // 两个布尔位：「现在有公开房间在线」「有还没结束的活动」。它们是「值不值得点
+    // 进去」的即时判断，正面就得看见；具体内容翻到背面看。
+    //
+    // `event` 和 `events` **不是一回事**（实测有社团 `event: true` 但 `events: []`），
+    // 所以两个都认。
+    const roomOpen = detail?.room === true;
+    const hasEvent = detail?.event === true || events.length > 0;
+    // 标题行右侧的元信息：没过期给到期时间，过期了就说「已失效」，没有 `until`
+    // 就什么都不写——不编一个假的期限。
+    const noticeMeta = !noticeText
+        ? ''
+        : noticeExpired
+          ? t('dialog.group.vrcc.notice.expired')
+          : typeof notice?.until === 'number'
+            ? t('dialog.group.vrcc.notice.until', {
+                  when: formatCompactDateTime(notice.until)
+              })
+            : '';
+    const backEmpty = !noticeText && rooms.length === 0 && events.length === 0;
 
     /**
      * 整张卡都能点着翻面，但两种情况下不翻：
@@ -211,16 +252,26 @@ export function GroupVrccClub({
                                 <span className="text-muted-foreground min-w-0 truncate text-[10px] font-medium tracking-wide uppercase">
                                     {t('dialog.group.vrcc.club')}
                                 </span>
-                                <button
-                                    type="button"
-                                    className="text-muted-foreground/60 hover:text-foreground -mt-1 -mr-1 shrink-0 rounded p-1"
-                                    aria-label={t(
-                                        'dialog.group.vrcc.flip_back'
-                                    )}
-                                    onClick={() => setFlipped(true)}
-                                >
-                                    <FlipHorizontal2Icon className="size-3" />
-                                </button>
+                                <div className="relative shrink-0">
+                                    <button
+                                        type="button"
+                                        className="text-muted-foreground/60 hover:text-foreground -mt-1 -mr-1 rounded p-1"
+                                        aria-label={t(
+                                            'dialog.group.vrcc.flip_back'
+                                        )}
+                                        onClick={() => setFlipped(true)}
+                                    >
+                                        <FlipHorizontal2Icon className="size-3" />
+                                    </button>
+                                    {/* 背面有还没失效的公告时亮一个小点：藏一层
+                                        可以，但不能藏得毫无痕迹。 */}
+                                    {noticeLive ? (
+                                        <span
+                                            data-notice-live=""
+                                            className="bg-primary pointer-events-none absolute top-0 right-0 size-1.5 rounded-full"
+                                        />
+                                    ) : null}
+                                </div>
                             </div>
 
                             <div className="mt-1.5 flex min-w-0 items-center justify-between gap-2">
@@ -273,6 +324,14 @@ export function GroupVrccClub({
                                     ))}
                                 </div>
                             ) : null}
+                            {/* 成立年份单独一行：塞进上面的标签行会读成又一个标签。 */}
+                            {since !== null ? (
+                                <div className="text-muted-foreground/70 mt-2 min-w-0 truncate text-[11px]">
+                                    {t('dialog.group.vrcc.since', {
+                                        year: since
+                                    })}
+                                </div>
+                            ) : null}
                             {/* 三项都是只读：接口侧没有任何社团写入口。 */}
                             {followed !== null || likes !== null ? (
                                 <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[11px] tabular-nums">
@@ -309,6 +368,26 @@ export function GroupVrccClub({
                                     <SparklesIcon className="text-muted-foreground size-3" />
                                 </div>
                             ) : null}
+                            {/* 「现在值不值得点进去」：有房在开、有活动没结束。翻到背面
+                                才看得到详情，但翻之前得先知道有没有——所以放在正面。 */}
+                            {roomOpen || hasEvent ? (
+                                <div className="text-muted-foreground mt-1 flex min-w-0 items-center justify-end gap-2 text-[11px]">
+                                    {roomOpen ? (
+                                        <span className="inline-flex items-center gap-1">
+                                            <RadioIcon className="size-3" />
+                                            {t('dialog.group.vrcc.room_open')}
+                                        </span>
+                                    ) : null}
+                                    {hasEvent ? (
+                                        <span className="inline-flex items-center gap-1">
+                                            <CalendarClockIcon className="size-3" />
+                                            {t('dialog.group.vrcc.event_open')}
+                                        </span>
+                                    ) : null}
+                                </div>
+                            ) : null}
+                            {/* 来源那句话一句话说清「这是另一家平台的数据」。文案缩短后
+                                单行放得下，不再折行——折成两行会把卡片底边撑得很重。 */}
                             <div className="border-border/60 mt-2 flex min-w-0 items-center justify-between gap-2 border-t pt-1.5">
                                 <span className="text-muted-foreground/70 min-w-0 flex-1 truncate text-[10px] leading-tight">
                                     {t('dialog.group.vrcc.source')}
@@ -353,34 +432,79 @@ export function GroupVrccClub({
                                 </button>
                             </div>
 
-                            {backEmpty ? (
-                                <p className="text-muted-foreground/70 mt-2 min-w-0 text-[11px] leading-snug break-words">
-                                    {scopeQuery.data === true
-                                        ? t('dialog.group.vrcc.back_empty')
-                                        : t('dialog.group.vrcc.back_locked')}
-                                </p>
-                            ) : null}
-
-                            {intro ? (
-                                <div className="mt-2">
-                                    <div className={BACK_LABEL}>
-                                        {t('dialog.group.vrcc.back_intro')}
+                            {/*
+                             * 背面内容区。正反两面同占一格，卡片高度取两者较高的一份，
+                             * 所以这里必须**封顶 + 内部滚动**：一段长公告若原样铺开，
+                             * 会把正面也撑出一大块空白。`overscroll-contain` 让滚到底
+                             * 之后不再把左栏一起带走；标题行留在滚动区外面，滚到最底下
+                             * 也翻得回正面。
+                             */}
+                            <div
+                                className="mt-2 max-h-56 min-w-0 overflow-y-auto overscroll-contain pr-1"
+                                tabIndex={0}
+                                aria-label={t('dialog.group.vrcc.back_title')}
+                            >
+                                {noticeText ? (
+                                    <div>
+                                        {/* 到期时间是**公告**的属性，就挂在公告自己
+                                            这行标题右侧，不放到卡级标题上——放上面会被
+                                            读成「整张卡 01/06 过期」。 */}
+                                        <div className="flex min-w-0 items-center justify-between gap-2">
+                                            <div className={BACK_LABEL}>
+                                                {t(
+                                                    'dialog.group.vrcc.notice.title'
+                                                )}
+                                            </div>
+                                            {noticeMeta ? (
+                                                <span className="text-muted-foreground/70 shrink-0 text-[10px] leading-none tabular-nums">
+                                                    {noticeMeta}
+                                                </span>
+                                            ) : null}
+                                        </div>
+                                        <TranslatableText
+                                            source={noticeText}
+                                            entityId={`vrcc-club-notice:${code}`}
+                                            density="button"
+                                        >
+                                            {({
+                                                action,
+                                                meta,
+                                                error,
+                                                text: visibleText
+                                            }) => (
+                                                <div className="mt-0.5 min-w-0">
+                                                    {meta}
+                                                    <pre className="text-muted-foreground m-0 font-sans text-[11px] leading-snug whitespace-pre-wrap">
+                                                        {visibleText ||
+                                                            '\u2014'}
+                                                    </pre>
+                                                    {error}
+                                                    <div className="mt-0.5 flex min-w-0 items-center justify-between gap-2">
+                                                        {action}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </TranslatableText>
                                     </div>
-                                    <p className="text-muted-foreground mt-0.5 line-clamp-4 min-w-0 text-[11px] leading-snug break-words whitespace-pre-line">
-                                        {intro}
+                                ) : null}
+
+                                {backEmpty ? (
+                                    <p className="text-muted-foreground/70 mt-2 min-w-0 text-[11px] leading-snug break-words">
+                                        {scopeQuery.data === true
+                                            ? t('dialog.group.vrcc.back_empty')
+                                            : t(
+                                                  'dialog.group.vrcc.back_locked'
+                                              )}
                                     </p>
-                                </div>
-                            ) : null}
+                                ) : null}
 
-                            {rooms.length ? (
-                                <div className="mt-2">
-                                    <div className={BACK_LABEL}>
-                                        {t('dialog.group.vrcc.back_rooms')}
-                                    </div>
-                                    <ul className="mt-0.5 space-y-0.5">
-                                        {rooms
-                                            .slice(0, 3)
-                                            .map((room, index) => {
+                                {rooms.length ? (
+                                    <div className="mt-2">
+                                        <div className={BACK_LABEL}>
+                                            {t('dialog.group.vrcc.back_rooms')}
+                                        </div>
+                                        <ul className="mt-0.5 space-y-0.5">
+                                            {rooms.map((room, index) => {
                                                 const occupied =
                                                     typeof room.users ===
                                                     'number'
@@ -411,19 +535,17 @@ export function GroupVrccClub({
                                                     </li>
                                                 );
                                             })}
-                                    </ul>
-                                </div>
-                            ) : null}
-
-                            {events.length ? (
-                                <div className="mt-2">
-                                    <div className={BACK_LABEL}>
-                                        {t('dialog.group.vrcc.back_events')}
+                                        </ul>
                                     </div>
-                                    <ul className="mt-0.5 space-y-0.5">
-                                        {events
-                                            .slice(0, 2)
-                                            .map((event, index) => {
+                                ) : null}
+
+                                {events.length ? (
+                                    <div className="mt-2">
+                                        <div className={BACK_LABEL}>
+                                            {t('dialog.group.vrcc.back_events')}
+                                        </div>
+                                        <ul className="mt-0.5 space-y-0.5">
+                                            {events.map((event, index) => {
                                                 const when =
                                                     typeof event.at === 'number'
                                                         ? formatCompactDateTime(
@@ -452,9 +574,10 @@ export function GroupVrccClub({
                                                     </li>
                                                 );
                                             })}
-                                    </ul>
-                                </div>
-                            ) : null}
+                                        </ul>
+                                    </div>
+                                ) : null}
+                            </div>
                         </div>
                     </div>
                 </div>

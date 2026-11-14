@@ -275,16 +275,14 @@ describe('GroupVrccClub', () => {
         expect(screen.queryByText('北极星')).toBeNull();
     });
 
-    it('背面用详情里已经拿到的简介、房间和活动，不额外发请求', async () => {
+    it('背面用详情里已经拿到的房间和活动，不额外发请求', async () => {
         mocks.appVrccClub.mockResolvedValue(clubResponse);
         mocks.appVrccMyClub.mockResolvedValue({
             club: {
                 likes: 6,
                 followed: true,
-                intro: [
-                    { text: '我们是', hidden: false },
-                    { text: '安静的社团', hidden: false }
-                ],
+                // `intro` 是审核过的群组简介，上面「描述」那块已经显示过，背面不再抄。
+                intro: [{ text: '我们是安静的社团', hidden: false }],
                 rooms: [{ map: '孤', users: 8, cap: 16 }],
                 events: [{ title: '周会', at: 1700000000000 }]
             }
@@ -302,12 +300,13 @@ describe('GroupVrccClub', () => {
         await vi.waitFor(() => expect(mocks.appVrccMyClub).toHaveBeenCalled());
         fireEvent.click(flip);
 
-        expect(await screen.findByText('我们是安静的社团')).toBeTruthy();
-        expect(screen.getByText('孤')).toBeTruthy();
+        expect(await screen.findByText('孤')).toBeTruthy();
         expect(screen.getByText('8/16')).toBeTruthy();
         expect(screen.getByText('周会')).toBeTruthy();
         expect(screen.getByText('t:1700000000000')).toBeTruthy();
-        // 简介、房间、活动都来自第一次查详情的那份回答。
+        // 简介不重复画。
+        expect(screen.queryByText('我们是安静的社团')).toBeNull();
+        // 房间、活动都来自第一次查详情的那份回答。
         expect(mocks.appVrccMyClub).toHaveBeenCalledTimes(1);
     });
 
@@ -413,5 +412,163 @@ describe('GroupVrccClub', () => {
         expect(flippedNow()).toBe(false);
 
         selection?.removeAllRanges();
+    });
+
+    it('公告搬到背面：分段拼成一整段，联系方式照常显示', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+        mocks.appVrccMyClub.mockResolvedValue({
+            club: {
+                likes: 6,
+                followed: true,
+                notice: {
+                    segs: [
+                        {
+                            text: '星夜吧是 VRChat 里的星空主题酒吧',
+                            hidden: false
+                        },
+                        { text: 'QQ群：1081176823', hidden: true }
+                    ],
+                    until: 1799251199999
+                }
+            }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        fireEvent.click(
+            await screen.findByLabelText('dialog.group.vrcc.flip_back')
+        );
+
+        expect(
+            await screen.findByText(/星夜吧是 VRChat 里的星空主题酒吧/)
+        ).toBeTruthy();
+        expect(screen.getByText(/QQ群：1081176823/)).toBeTruthy();
+        // 没过期，不该有「已失效」，也不该说「什么都没有」。
+        expect(
+            screen.queryByText('dialog.group.vrcc.notice.expired')
+        ).toBeNull();
+        expect(screen.queryByText('dialog.group.vrcc.back_empty')).toBeNull();
+        // 标题行右侧给的是到期时间。
+        expect(screen.getByText('dialog.group.vrcc.notice.until')).toBeTruthy();
+    });
+
+    it('未过期的公告在正面亮一个小点，过期就不亮、内容照留', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+        mocks.appVrccMyClub.mockResolvedValue({
+            club: {
+                notice: {
+                    segs: [{ text: '国庆合照活动', hidden: false }],
+                    until: 1799251199999
+                }
+            }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        await screen.findByLabelText('dialog.group.vrcc.flip_back');
+        await vi.waitFor(() =>
+            expect(document.querySelector('[data-notice-live]')).toBeTruthy()
+        );
+
+        cleanup();
+
+        mocks.appVrccMyClub.mockResolvedValue({
+            club: {
+                notice: {
+                    segs: [{ text: '国庆合照活动', hidden: false }],
+                    until: 1
+                }
+            }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        fireEvent.click(
+            await screen.findByLabelText('dialog.group.vrcc.flip_back')
+        );
+
+        // 过期：正面不亮，但背面内容与「已失效」都还在。
+        expect(document.querySelector('[data-notice-live]')).toBeNull();
+        expect(await screen.findByText(/国庆合照活动/)).toBeTruthy();
+        expect(
+            screen.getByText('dialog.group.vrcc.notice.expired')
+        ).toBeTruthy();
+    });
+
+    it('成立年份单独一行，不像年份的值不显示', async () => {
+        mocks.appVrccClub.mockResolvedValue({
+            club: { ...clubResponse.club, since: 2024 }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        expect(await screen.findByText('dialog.group.vrcc.since')).toBeTruthy();
+
+        cleanup();
+
+        // 接口坏掉给出 `0` 时，宁可不说，也别编一句「0 年成立」。
+        mocks.appVrccClub.mockResolvedValue({
+            club: { ...clubResponse.club, since: 0 }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        await screen.findByText('dialog.group.vrcc.club');
+        expect(screen.queryByText('dialog.group.vrcc.since')).toBeNull();
+    });
+
+    it('有房在开 / 有活动时正面就点亮角标，翻之前就知道', async () => {
+        mocks.appVrccClub.mockResolvedValue(clubResponse);
+        mocks.appVrccMyClub.mockResolvedValue({
+            club: { likes: 6, followed: true, room: true, event: true }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        expect(
+            await screen.findByText('dialog.group.vrcc.room_open')
+        ).toBeTruthy();
+        expect(screen.getByText('dialog.group.vrcc.event_open')).toBeTruthy();
+
+        cleanup();
+
+        // 两个布尔位都是 false：整行不渲染，不留空壳。
+        mocks.appVrccMyClub.mockResolvedValue({
+            club: { likes: 6, followed: true, room: false, event: false }
+        });
+
+        renderWithQuery(
+            <GroupVrccClub
+                group={{ shortCode: 'KIPFEL', discriminator: '2104' }}
+            />
+        );
+
+        await screen.findByText('dialog.group.vrcc.club');
+        expect(screen.queryByText('dialog.group.vrcc.room_open')).toBeNull();
+        expect(screen.queryByText('dialog.group.vrcc.event_open')).toBeNull();
     });
 });
