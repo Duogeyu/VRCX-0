@@ -143,7 +143,12 @@ export function mergeGroupInstances(
             // 只认「给了值」的字段，好让输的一方把空缺补上。
             const winnerFields: Record<string, unknown> = {};
             for (const [key, value] of Object.entries(winner)) {
-                if (value === undefined || value === null || value === '') {
+                if (value === undefined || value === null) {
+                    continue;
+                }
+                // 纯空白不算「给了值」：一个 `'   '` 会把输家的真值（星遇给的
+                // 地图名、房间标题）覆盖成看不见的东西。
+                if (typeof value === 'string' && value.trim() === '') {
                     continue;
                 }
                 winnerFields[key] = value;
@@ -185,9 +190,14 @@ export function mergeGroupInstances(
                 friendCount,
                 // 合并后这一行归排名更高的来源。同排名时保留已有的那个，
                 // 免得「先到」被后到者悄悄改写成别的身份。
-                origin: seedWins
-                    ? (seed.origin ?? existing.origin)
-                    : (existing.origin ?? seed.origin)
+                //
+                // 两边都没标来源时要落 `'unknown'`（和新建行走同一个口径），
+                // 不能留 `undefined`——否则同一字段会出现两种「没有来源」的表示。
+                origin: parseInstanceOrigin(
+                    seedWins
+                        ? (seed.origin ?? existing.origin)
+                        : (existing.origin ?? seed.origin)
+                )
             });
         }
 

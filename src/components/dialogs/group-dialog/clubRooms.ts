@@ -46,9 +46,22 @@ export function launchLinkToLocation(link: string): LaunchTarget | null {
         return null;
     }
 
+    // **协议与路径也要认**：只查域名的话，`http://vrchat.com/…`（明文）和
+    // `https://vrchat.com/world/xxx?worldId=…`（参数恰好同名）都会被当成可加入
+    // 的房间。启动链接的规范形状是 `https://vrchat.com/home/launch?worldId=…`。
+    if (parsed.protocol !== 'https:') {
+        return null;
+    }
+    if (parsed.pathname.replace(/\/+$/, '') !== '/home/launch') {
+        return null;
+    }
+
     const worldId = (parsed.searchParams.get('worldId') || '').trim();
     const instanceId = (parsed.searchParams.get('instanceId') || '').trim();
-    if (!worldId.startsWith('wrld_') || !instanceId) {
+    // `wrld_` 后面必须有东西：只查前缀的话，空的 `wrld_` 会拼出一条
+    // `wrld_:12345` 这种打不开的行。这里不要求完整 UUID——形状不对的世界 id
+    // 最多让这一行打不开，而真正危险的是协议/域名/路径那三关。
+    if (!/^wrld_\S+$/.test(worldId) || !instanceId) {
         return null;
     }
 
