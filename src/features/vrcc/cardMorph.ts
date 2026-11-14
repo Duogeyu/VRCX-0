@@ -41,7 +41,11 @@ export type MorphPlan = {
     fromScale: number;
 };
 
-/** 弹窗宽度上限，和 `DialogContent` 的 `sm:max-w-lg` 保持一致。 */
+/** 弹窗宽度上限，和 `VrccModelDialog` 自己那句 `sm:max-w-lg` 覆盖保持一致。
+ *
+ * 注意基座 `DialogContent` 用的是 `sm:max-w-sm`（384），去那边核对会读到
+ * 384——照它「顺手改正」就是把整条几何改坏 25%，而测试全绿。
+ */
 const DIALOG_MAX_WIDTH = 512;
 
 /** 弹窗中心比视口正中低多少，和 `top-[calc(50%+1rem)]` 保持一致。 */
@@ -122,6 +126,6 @@ export const MORPH_ENTRY_MS = 800;
  * 的时长飞回原位。总时长等于 `--motion-collapse`。
  *
  * 目前 JS 侧不需要按它计时——收尾由底座的 `onOpenChangeComplete` 负责；这个
- * 常量存在是为了让 `cardMorph` 的测试能断言「CSS 与 JS 的时长别漂」。
+ * 常量存在是为了让 `cardMorphCss` 的测试能断言「CSS 与 JS 的时长别漂」。
  */
 export const MORPH_COLLAPSE_MS = 550;

@@ -88,11 +88,12 @@ function prefersReducedMotion(): boolean {
  * `price` 是 BOOTH 原文（`¥1,500` / `無料`），**不解析成数字**：各店写法不
  * 统一，自己解析只会显示错价。
  *
- * 同一时刻只允许一张翻着——网格是拿来扫的，全翻过去就谁也认不出谁了。
+ * 同一时刻只开一个弹窗——网格是拿来扫的，同时张开几张就谁也认不出谁了。
  *
- * 点卡片除了翻面，还打开 [`VrccModelDialog`] 显示该模型的热评。两件事现在
- * 同时发生：翻面是「展开」动画的第一版实现，后续会把它和弹窗的形变接成一段
- * 连续动作，那时背面不再需要留白，也不需要「翻回正面」的按钮。
+ * 点卡片打开 [`VrccModelDialog`] 看该模型的热评，而「打开」本身就是那段形变：
+ * 卡片飞向窗口中心、转到侧棱时交给弹窗，弹窗接着转回正面并长到本体尺寸；收起
+ * 走同一条曲线反向。几何在 `cardMorph.ts`，关键帧在 `card-morph.css`，状态机
+ * 在这个组件里（`flight` / `entryDone` / `pendingClose`）。
  */
 export function VrccModelsPanel({
     models,
@@ -357,7 +358,7 @@ export function VrccModelsPanel({
                                     }
                                 >
                                     <div className="vrcc-model-card__rotor">
-                                        <div className="vrcc-model-card__flip">
+                                        <div className="vrcc-model-card__stage">
                                             <ModelCardFace
                                                 model={model}
                                                 place={place}

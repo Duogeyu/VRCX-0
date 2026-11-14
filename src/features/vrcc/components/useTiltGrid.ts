@@ -140,8 +140,9 @@ export function useTiltGrid<T extends HTMLElement>() {
         let last = 0;
 
         const paint = (element: HTMLElement, state: CardState) => {
-            // 写 CSS 变量而不是直接写 transform：翻面那一层也在用 transform，
-            // 两边各拼自己那份才不会互相覆盖。
+            // 写 CSS 变量而不是直接写 `transform`：角度、缩放和位移在
+            // `model-card.css` 里拼成一条复合变换，这里只负责喂数。两边各拼
+            // 自己那份，谁改公式都不会把对方那次写入覆盖掉。
             const scale = 1 + (SCALE_ON_HOVER - 1) * state.lift.value;
             element.style.setProperty('--tilt-x', state.rx.value.toFixed(3));
             element.style.setProperty('--tilt-y', state.ry.value.toFixed(3));
