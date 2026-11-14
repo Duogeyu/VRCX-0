@@ -11,6 +11,7 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { queryKeys } from '@/lib/entityQueryCache';
+import { useTiltGrid } from '@/lib/useTiltGrid';
 import {
     clubCodeForGroup,
     vrccPublicClubQueryOptions
@@ -82,6 +83,14 @@ export function GroupVrccClub({
         retry: 0
     });
 
+    // 倾斜外壳：钩子只喂 CSS 变量，复合变换在 `vrcc-club-card.css` 里拼。
+    // 9° 是实机试出来的：这张窄卡上 5° 看不出来，模型榜那套 12° 又晃眼。
+    const tiltRef = useTiltGrid<HTMLDivElement>({
+        amplitude: 9,
+        scale: 1,
+        glare: true
+    });
+
     if (!code || !query.data) {
         return null;
     }
@@ -120,110 +129,122 @@ export function GroupVrccClub({
     const initial = Array.from(name)[0] ?? '?';
 
     return (
-        <div
-            data-tour="group-vrcc-club-card"
-            className="bg-card mt-3 min-w-0 rounded-lg border p-3"
-        >
-            <div className="text-muted-foreground min-w-0 truncate text-[10px] font-medium tracking-wide uppercase">
-                {t('dialog.group.vrcc.club')}
-            </div>
-
-            <div className="mt-1.5 flex min-w-0 items-center justify-between gap-2">
-                {club.icon ? (
-                    <img
-                        alt=""
-                        aria-hidden
-                        className="border-border/50 size-8 shrink-0 rounded-md border object-cover"
-                        loading="lazy"
-                        referrerPolicy="no-referrer"
-                        src={club.icon}
-                    />
-                ) : (
-                    <div className="border-border/50 bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-md border text-sm font-medium">
-                        {initial}
-                    </div>
-                )}
-                {/* 徽章不是按钮，trigger 用 `render` 挂普通 span。 */}
-                <Tooltip>
-                    <TooltipTrigger
-                        render={
-                            <span
-                                className={`inline-flex shrink-0 cursor-help items-center gap-1 rounded-full border bg-gradient-to-r px-2 py-0.5 text-[11px] font-medium ${gradeStyle}`}
-                            >
-                                <SparklesIcon className="size-3.5" />
-                                {gradeLabel}
-                            </span>
-                        }
-                    />
-                    <TooltipContent side="left">{gradeHint}</TooltipContent>
-                </Tooltip>
-            </div>
-
-            {lede ? (
-                <div className="text-muted-foreground mt-2 line-clamp-2 min-w-0 text-[11px] leading-snug break-words">
-                    {lede}
-                </div>
-            ) : null}
-            {tags.length ? (
-                <div className="mt-2 flex flex-wrap gap-1">
-                    {tags.slice(0, 4).map((tag) => (
-                        <span
-                            key={tag}
-                            className="bg-muted text-foreground/80 max-w-full truncate rounded px-2 py-0.5 text-[11px]"
-                        >
-                            {tag}
-                        </span>
-                    ))}
-                </div>
-            ) : null}
-            {/* 三项都是只读：接口侧没有任何社团写入口。 */}
-            {followed !== null || likes !== null ? (
-                <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[11px] tabular-nums">
-                    {followed === true ? (
-                        <span className="text-muted-foreground inline-flex items-center gap-1">
-                            <UserCheckIcon className="size-3" />
-                            {t('dialog.group.vrcc.followed')}
-                        </span>
-                    ) : followed === false ? (
-                        <span className="text-muted-foreground/70 inline-flex items-center gap-1">
-                            <CircleIcon className="size-3" />
-                            {t('dialog.group.vrcc.not_followed')}
-                        </span>
-                    ) : (
-                        <span />
-                    )}
-                    {likes !== null ? (
-                        <span className="inline-flex items-center gap-1">
-                            {t('dialog.group.vrcc.likes', { count: likes })}
-                            <ThumbsUpIcon className="text-muted-foreground size-3" />
-                        </span>
-                    ) : null}
-                </div>
-            ) : null}
-            {here > 0 ? (
-                <div className="text-foreground mt-1 flex items-center justify-end gap-1 text-[11px] tabular-nums">
-                    {t('dialog.group.vrcc.here', { count: here })}
-                    <SparklesIcon className="text-muted-foreground size-3" />
-                </div>
-            ) : null}
-            <div className="border-border/60 mt-2 flex min-w-0 items-center justify-between gap-2 border-t pt-1.5">
-                <span className="text-muted-foreground/70 min-w-0 flex-1 truncate text-[10px] leading-tight">
-                    {t('dialog.group.vrcc.source')}
-                </span>
-                {club.page ? (
-                    <button
-                        type="button"
-                        className="text-primary hover:text-primary/80 inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium"
-                        onClick={() => {
-                            if (club.page) {
-                                void openExternalLink(club.page);
-                            }
-                        }}
+        <div ref={tiltRef} className="mt-3 min-w-0">
+            <div data-tilt="" className="vrcc-club-card">
+                <div className="vrcc-club-card__rotor">
+                    <div
+                        data-tour="group-vrcc-club-card"
+                        className="bg-card relative rounded-lg border p-3"
                     >
-                        {t('dialog.group.vrcc.open_page')}
-                        <ExternalLinkIcon className="size-2.5" />
-                    </button>
-                ) : null}
+                        {/* 高光层：圆心与强度由 useTiltGrid 写成 `--tilt-gx/gy/glare`。 */}
+                        <div className="vrcc-club-card__glare" aria-hidden />
+                        <div className="text-muted-foreground min-w-0 truncate text-[10px] font-medium tracking-wide uppercase">
+                            {t('dialog.group.vrcc.club')}
+                        </div>
+
+                        <div className="mt-1.5 flex min-w-0 items-center justify-between gap-2">
+                            {club.icon ? (
+                                <img
+                                    alt=""
+                                    aria-hidden
+                                    className="border-border/50 size-8 shrink-0 rounded-md border object-cover"
+                                    loading="lazy"
+                                    referrerPolicy="no-referrer"
+                                    src={club.icon}
+                                />
+                            ) : (
+                                <div className="border-border/50 bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-md border text-sm font-medium">
+                                    {initial}
+                                </div>
+                            )}
+                            {/* 徽章不是按钮，trigger 用 `render` 挂普通 span。 */}
+                            <Tooltip>
+                                <TooltipTrigger
+                                    render={
+                                        <span
+                                            className={`inline-flex shrink-0 cursor-help items-center gap-1 rounded-full border bg-gradient-to-r px-2 py-0.5 text-[11px] font-medium ${gradeStyle}`}
+                                        >
+                                            <SparklesIcon className="size-3.5" />
+                                            {gradeLabel}
+                                        </span>
+                                    }
+                                />
+                                <TooltipContent side="left">
+                                    {gradeHint}
+                                </TooltipContent>
+                            </Tooltip>
+                        </div>
+
+                        {lede ? (
+                            <div className="text-muted-foreground mt-2 line-clamp-2 min-w-0 text-[11px] leading-snug break-words">
+                                {lede}
+                            </div>
+                        ) : null}
+                        {tags.length ? (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                                {tags.slice(0, 4).map((tag) => (
+                                    <span
+                                        key={tag}
+                                        className="bg-muted text-foreground/80 max-w-full truncate rounded px-2 py-0.5 text-[11px]"
+                                    >
+                                        {tag}
+                                    </span>
+                                ))}
+                            </div>
+                        ) : null}
+                        {/* 三项都是只读：接口侧没有任何社团写入口。 */}
+                        {followed !== null || likes !== null ? (
+                            <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[11px] tabular-nums">
+                                {followed === true ? (
+                                    <span className="text-muted-foreground inline-flex items-center gap-1">
+                                        <UserCheckIcon className="size-3" />
+                                        {t('dialog.group.vrcc.followed')}
+                                    </span>
+                                ) : followed === false ? (
+                                    <span className="text-muted-foreground/70 inline-flex items-center gap-1">
+                                        <CircleIcon className="size-3" />
+                                        {t('dialog.group.vrcc.not_followed')}
+                                    </span>
+                                ) : (
+                                    <span />
+                                )}
+                                {likes !== null ? (
+                                    <span className="inline-flex items-center gap-1">
+                                        {t('dialog.group.vrcc.likes', {
+                                            count: likes
+                                        })}
+                                        <ThumbsUpIcon className="text-muted-foreground size-3" />
+                                    </span>
+                                ) : null}
+                            </div>
+                        ) : null}
+                        {here > 0 ? (
+                            <div className="text-foreground mt-1 flex items-center justify-end gap-1 text-[11px] tabular-nums">
+                                {t('dialog.group.vrcc.here', { count: here })}
+                                <SparklesIcon className="text-muted-foreground size-3" />
+                            </div>
+                        ) : null}
+                        <div className="border-border/60 mt-2 flex min-w-0 items-center justify-between gap-2 border-t pt-1.5">
+                            <span className="text-muted-foreground/70 min-w-0 flex-1 truncate text-[10px] leading-tight">
+                                {t('dialog.group.vrcc.source')}
+                            </span>
+                            {club.page ? (
+                                <button
+                                    type="button"
+                                    className="text-primary hover:text-primary/80 inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium"
+                                    onClick={() => {
+                                        if (club.page) {
+                                            void openExternalLink(club.page);
+                                        }
+                                    }}
+                                >
+                                    {t('dialog.group.vrcc.open_page')}
+                                    <ExternalLinkIcon className="size-2.5" />
+                                </button>
+                            ) : null}
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     );

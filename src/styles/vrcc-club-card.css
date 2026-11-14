@@ -1,0 +1,66 @@
+/* SPDX-License-Identifier: MPL-2.0 */
+
+/**
+ * 群组详情左栏那张「星遇同频社团」卡的倾斜外壳。
+ *
+ * 分工照 `model-card.css`：`useTiltGrid` 只往卡片外壳写 `--tilt-x` /
+ * `--tilt-y` / `--tilt-scale` 三个变量，复合变换在这里拼，谁改公式都不会
+ * 覆盖掉对方那次写入。
+ *
+ * **`perspective` 在外壳、`transform` 在 rotor**：外壳一旦有 `overflow: hidden`
+ * 或圆角裁剪，`preserve-3d` 会被压平，倾斜退化成平面内的错位——看上去像卡在
+ * 抖，而不是有厚度。所以外壳只管透视，裁剪留给最里面那张卡。
+ *
+ * 角度由 `GroupVrccClub` 传 9°，比模型榜那张小：那边是 150–175px 的大方图卡，
+ * 12° 撑得住；这里是一张窄卡，底上直接压着正文。
+ */
+@layer components {
+    .vrcc-club-card {
+        perspective: 800px;
+    }
+
+    .vrcc-club-card__rotor {
+        transform: rotateX(calc(var(--tilt-x, 0) * 1deg))
+            rotateY(calc(var(--tilt-y, 0) * 1deg)) scale(var(--tilt-scale, 1));
+        transform-style: preserve-3d;
+    }
+
+    /*
+     * 高光。圆心与强度由 `useTiltGrid` 写成 `--tilt-gx/gy/glare`。
+     *
+     * 用前景色而不是纯白（`mix-blend` 也不用）：项目主题底色不固定，深色主题下
+     * 纯白会过曝，混色则会把卡片底衬染脏。峰值取 16%，比模型榜那张的 34% 低——
+     * 那张的底是整幅封面，这里底下直接压着正文。
+     */
+    .vrcc-club-card__glare {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+        border-radius: inherit;
+        opacity: var(--tilt-glare, 0);
+        background: radial-gradient(
+            farthest-corner circle at var(--tilt-gx, 50%) var(--tilt-gy, 50%),
+            color-mix(in oklch, var(--foreground) 16%, transparent) 0%,
+            color-mix(in oklch, var(--foreground) 11%, transparent) 24%,
+            color-mix(in oklch, var(--foreground) 5%, transparent) 40%,
+            transparent 62%
+        );
+    }
+
+    /*
+     * 钩子只在挂载时读一次「减少动态效果」，之后开关再变它不会重来一遍——
+     * 那之后的角度只能靠这里兜住。透视也要一起关，否则卡片会留在 3D 上下文里。
+     */
+    .reduce-effects .vrcc-club-card {
+        perspective: none;
+    }
+
+    .reduce-effects .vrcc-club-card__rotor {
+        transform: none;
+    }
+
+    .reduce-effects .vrcc-club-card__glare {
+        display: none;
+    }
+}
