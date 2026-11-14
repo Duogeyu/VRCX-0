@@ -47,18 +47,20 @@ const GRADE_STYLES: Record<number, string> = {
 const UNKNOWN_STYLE =
     'border-border from-slate-400/20 to-slate-500/15 text-muted-foreground';
 
-/** 背面小节标题：三处一样，抽出来免得改漏。 */
+/** 背面小节标题的统一字号与颜色。 */
 const BACK_LABEL =
     'text-muted-foreground/70 text-[10px] font-medium tracking-wide uppercase';
 
 /**
  * 群组详情左栏的「星遇同频社团」卡片。
  *
- * 正面只放 VRChat 那边没有的：图标、评级、标签、一句话、点赞、关注、挂星数。
- * 名字与成员数不重复画——群组详情里已有权威值，`members` 还是星遇的过期快照。
+ * 正面只放 VRChat 那边没有的东西：名字与成员数不重复画——群组详情里已有权威值，
+ * `members` 还是星遇的过期快照。
  *
- * 背面是 `/me/clubs/{code}` 里我们已经在拿、正面却没用上的那几项：简介、正在开
+ * 背面是 `/me/clubs/{code}` 里我们已经在拿、正面却没用上的那几项：公告、正在开
  * 的公开房间、下次活动。**不再多发一次请求**，那三样第一次查详情时就跟着回来了。
+ * 简介不在其中：它就是审核过的群组简介，和上面「描述」逐字相同。
+ *
  * 没有 `clubs` 权限时背面只说一句「连接后才看得到」，不假装社团什么都没写。
  *
  * 缺短码或 404（没入驻/审核中/下架/只给成员看，服务器回同一个码）时整块不
@@ -95,11 +97,7 @@ export function GroupVrccClub({
 
     // 倾斜外壳：钩子只喂 CSS 变量，复合变换在 `vrcc-club-card.css` 里拼。
     // 9° 是实机试出来的：这张窄卡上 5° 看不出来，模型榜那套 12° 又晃眼。
-    //
-    // `track: 'area'`：在群组详情整页范围内跟着光标走，不必把指针压在卡上。原点
-    // 仍是这张卡的中心，卡片内到边缘的算法不变；出了卡片方向不变、幅度按**详情页
-    // 的跨度**平滑衰减，到详情页边界归零。找不到 `[data-slot="dialog-content"]`
-    // 时钩子退回「指针压卡才倾」。
+    // `track: 'area'` 让它在整页范围内跟随光标，衰减规则见该选项的文档。
     const tiltRef = useTiltGrid<HTMLDivElement>({
         amplitude: 9,
         // 左栏是窄列，悬停放大 5% 会撞到相邻元素，所以显式关掉缩放。

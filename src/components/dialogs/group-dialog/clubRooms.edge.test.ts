@@ -80,7 +80,7 @@ describe('launchLinkToLocation · 域名与协议边界', () => {
 
     /**
      * 协议必须是 https。只查 hostname 的话，`http://vrchat.com/...` 这种明文链接
-     * 也会被当成可加入的房间——这一条原本钉的是「现状接受」，现在改成钉拒绝。
+     * 也会被当成可加入的房间。
      */
     it('只认 https，明文 http 拒绝', () => {
         expect(
