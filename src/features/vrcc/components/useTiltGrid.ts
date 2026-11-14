@@ -10,6 +10,28 @@ import { useCallback, useEffect, useState } from 'react';
  *
  * 整个网格只挂一个 `pointermove` 和一个 rAF，状态按元素存在 Map 里逐张推进，
  * 不是每张卡各起一套——那在 24 格里就是 24 套。
+ *
+ * ## 调用方要自己提供的东西
+ *
+ * 钩子只写 CSS 变量，**不动 `transform`**。要用它就得自己写那几行：
+ *
+ * ```css
+ * .card > .card__rotor {
+ *     transform: rotateX(calc(var(--tilt-x, 0) * 1deg))
+ *         rotateY(calc(var(--tilt-y, 0) * 1deg))
+ *         scale(var(--tilt-scale, 1));
+ *     transform-style: preserve-3d;
+ * }
+ * ```
+ *
+ * - 卡片根元素带 `data-tilt`；
+ * - 想要跟随标签，就在卡片里放一个 `data-tilt-tip`。**没有也行**——查不到时
+ *   整条标签链路直接短路，不推进弹簧、也不算速度；
+ * - 反光按 `--tilt-gx` / `--tilt-gy` / `--tilt-glare` 画；不画就关掉
+ *   [`TiltGridOptions.glare`]，省掉每帧三次写入；
+ * - 「减少动态效果」的守卫得自己写（`perspective: none` / `transform: none`）。
+ *   钩子只在挂载时读一次偏好，之后的翻转由 CSS 负责：画不出来，而且弹簧收敛
+ *   后循环会自己停，所以不订阅那个开关也出不了错。
  */
 
 /** 光标在卡片边缘时的倾角（度）。 */
@@ -28,6 +50,21 @@ const TIP_OMEGA = 18;
 const TIP_ZETA = 0.62;
 const TIP_MAX_DEG = 14;
 const TIP_SHOW_OMEGA = 16;
+
+/**
+ * 可调项。默认值就是上面那批手感常量——外面不传，行为与从前一致。
+ *
+ * 只开三个口子，不把 `SMOOTHNESS` 之类的弹簧参数也暴露出去：那些是「调坏了
+ * 会发散或抖」的量，不是「换个卡片类型就要改」的量。
+ */
+export type TiltGridOptions = {
+    /** 指针在卡片边缘时的倾角（度）。默认 `AMPLITUDE`。 */
+    amplitude?: number;
+    /** 悬停时的缩放倍数。默认 `SCALE_ON_HOVER`；传 `1` 表示不缩放。 */
+    scale?: number;
+    /** 写不写反光那三个变量。纯信息卡关掉，省掉每帧三次写入。默认开。 */
+    glare?: boolean;
+};
 
 type Spring = {
     value: number;
@@ -52,6 +89,17 @@ type CardState = {
     lastX: number;
     lastAt: number;
     hovering: boolean;
+    /**
+     * 卡片里的标签，建状态时查一次。
+     *
+     * 原来每帧都 `querySelector` 一遍——24 张卡 60fps 是每秒约 1400 次查询，
+     * 而没有标签的卡片（纯信息卡）每次都是空手而归。查不到就一直是 `null`，
+     * 整条标签链路短路。
+     *
+     * React 若把那个节点换掉，缓存会指向一个已经脱离文档的元素；用之前看一眼
+     * `isConnected`，失效就重查一次，不让它静默地往空气里写。
+     */
+    tipElement: HTMLElement | null;
 };
 
 function spring(value = 0): Spring {
@@ -89,7 +137,7 @@ function step(
     return !settled;
 }
 
-function clearCard(element: HTMLElement) {
+function clearCard(element: HTMLElement, tip: HTMLElement | null) {
     for (const name of [
         '--tilt-x',
         '--tilt-y',
@@ -101,7 +149,6 @@ function clearCard(element: HTMLElement) {
     ]) {
         element.style.removeProperty(name);
     }
-    const tip = element.querySelector<HTMLElement>('[data-tilt-tip]');
     if (tip) {
         tip.style.removeProperty('transform');
         tip.style.removeProperty('opacity');
@@ -115,7 +162,11 @@ function clearCard(element: HTMLElement) {
  * 渲染，`useRef.current` 是 `null`，而 `useEffect(…, [])` 只在挂载时跑一次——
  * 那一瞬间拿不到节点就永远接不上了。
  */
-export function useTiltGrid<T extends HTMLElement>() {
+export function useTiltGrid<T extends HTMLElement>({
+    amplitude = AMPLITUDE,
+    scale = SCALE_ON_HOVER,
+    glare = true
+}: TiltGridOptions = {}) {
     const [grid, setGrid] = useState<T | null>(null);
 
     const ref = useCallback((node: T | null) => {
@@ -143,14 +194,17 @@ export function useTiltGrid<T extends HTMLElement>() {
             // 写 CSS 变量而不是直接写 `transform`：角度、缩放和位移在
             // `model-card.css` 里拼成一条复合变换，这里只负责喂数。两边各拼
             // 自己那份，谁改公式都不会把对方那次写入覆盖掉。
-            const scale = 1 + (SCALE_ON_HOVER - 1) * state.lift.value;
+            const liftScale = 1 + (scale - 1) * state.lift.value;
             element.style.setProperty('--tilt-x', state.rx.value.toFixed(3));
             element.style.setProperty('--tilt-y', state.ry.value.toFixed(3));
-            element.style.setProperty('--tilt-scale', scale.toFixed(4));
+            element.style.setProperty('--tilt-scale', liftScale.toFixed(4));
 
+            if (!glare) {
+                return;
+            }
             // 反光圆心由倾角反推，不是直接跟指针：这样光和卡片一起转，
             // 像打在倾斜的表面上，而不是贴着一张跟着手跑的白纸。
-            const reach = Math.max(AMPLITUDE, 1);
+            const reach = Math.max(amplitude, 1);
             element.style.setProperty(
                 '--tilt-gx',
                 `${(50 + (state.ry.value / reach) * 46).toFixed(2)}%`
@@ -170,7 +224,12 @@ export function useTiltGrid<T extends HTMLElement>() {
         };
 
         const paintTip = (element: HTMLElement, state: CardState) => {
-            const tip = element.querySelector<HTMLElement>('[data-tilt-tip]');
+            // 缓存可能指向一个被 React 换掉、已经脱离文档的节点。
+            if (!state.tipElement?.isConnected) {
+                state.tipElement =
+                    element.querySelector<HTMLElement>('[data-tilt-tip]');
+            }
+            const tip = state.tipElement;
             if (!tip) {
                 return;
             }
@@ -193,10 +252,10 @@ export function useTiltGrid<T extends HTMLElement>() {
 
                 let moving = false;
                 moving =
-                    step(state.rx, -inputY * AMPLITUDE, OMEGA, ZETA, dt) ||
+                    step(state.rx, -inputY * amplitude, OMEGA, ZETA, dt) ||
                     moving;
                 moving =
-                    step(state.ry, inputX * AMPLITUDE, OMEGA, ZETA, dt) ||
+                    step(state.ry, inputX * amplitude, OMEGA, ZETA, dt) ||
                     moving;
                 moving =
                     step(
@@ -209,42 +268,46 @@ export function useTiltGrid<T extends HTMLElement>() {
 
                 paint(element, state);
 
-                moving =
-                    step(
-                        state.shown,
-                        state.hovering ? 1 : 0,
-                        TIP_SHOW_OMEGA,
-                        1,
-                        dt
-                    ) || moving;
-                const follow = 1 - Math.exp(-dt / TIP_FOLLOW_SECONDS);
-                state.tx += (state.px - state.tx) * follow;
-                state.ty += (state.py - state.ty) * follow;
-                if (
-                    Math.abs(state.px - state.tx) +
-                        Math.abs(state.py - state.ty) >
-                    0.2
-                ) {
-                    moving = true;
+                // 没有 `[data-tilt-tip]` 就把整条标签链路短路：纯信息卡不该为
+                // 「跟着手走的标签」每帧推进两条弹簧、算一次速度。
+                if (state.tipElement) {
+                    moving =
+                        step(
+                            state.shown,
+                            state.hovering ? 1 : 0,
+                            TIP_SHOW_OMEGA,
+                            1,
+                            dt
+                        ) || moving;
+                    const follow = 1 - Math.exp(-dt / TIP_FOLLOW_SECONDS);
+                    state.tx += (state.px - state.tx) * follow;
+                    state.ty += (state.py - state.ty) * follow;
+                    if (
+                        Math.abs(state.px - state.tx) +
+                            Math.abs(state.py - state.ty) >
+                        0.2
+                    ) {
+                        moving = true;
+                    }
+                    state.vx *= Math.exp(-dt / 0.08);
+                    moving =
+                        step(
+                            state.tip,
+                            Math.max(
+                                -TIP_MAX_DEG,
+                                Math.min(TIP_MAX_DEG, -state.vx * 0.012)
+                            ),
+                            TIP_OMEGA,
+                            TIP_ZETA,
+                            dt
+                        ) || moving;
+                    paintTip(element, state);
                 }
-                state.vx *= Math.exp(-dt / 0.08);
-                moving =
-                    step(
-                        state.tip,
-                        Math.max(
-                            -TIP_MAX_DEG,
-                            Math.min(TIP_MAX_DEG, -state.vx * 0.012)
-                        ),
-                        TIP_OMEGA,
-                        TIP_ZETA,
-                        dt
-                    ) || moving;
-                paintTip(element, state);
 
                 if (moving) {
                     busy = true;
                 } else if (!state.hovering) {
-                    clearCard(element);
+                    clearCard(element, state.tipElement);
                     states.delete(element);
                 }
             }
@@ -283,7 +346,9 @@ export function useTiltGrid<T extends HTMLElement>() {
                     vx: 0,
                     lastX: 0,
                     lastAt: 0,
-                    hovering: false
+                    hovering: false,
+                    tipElement:
+                        element.querySelector<HTMLElement>('[data-tilt-tip]')
                 };
                 states.set(element, state);
                 element.style.setProperty('will-change', 'transform');
@@ -381,12 +446,12 @@ export function useTiltGrid<T extends HTMLElement>() {
             if (raf) {
                 cancelAnimationFrame(raf);
             }
-            for (const element of states.keys()) {
-                clearCard(element);
+            for (const [element, state] of states) {
+                clearCard(element, state.tipElement);
             }
             states.clear();
         };
-    }, [grid]);
+    }, [grid, amplitude, scale, glare]);
 
     return ref;
 }

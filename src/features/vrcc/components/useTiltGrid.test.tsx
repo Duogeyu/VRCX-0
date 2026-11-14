@@ -10,7 +10,7 @@ import {
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useTiltGrid } from './useTiltGrid';
+import { useTiltGrid, type TiltGridOptions } from './useTiltGrid';
 
 /**
  * 把 rAF 换成手动驱动：弹簧一帧只走一小段，真等几百毫秒既慢又依赖机器速度。
@@ -94,13 +94,23 @@ function degrees(element: HTMLElement, name: string): number {
     return Number.parseFloat(element.style.getPropertyValue(name) || '0');
 }
 
-function Grid({ count = 1 }: { count?: number }) {
-    const ref = useTiltGrid<HTMLUListElement>();
+function Grid({
+    count = 1,
+    options,
+    withTip = true
+}: {
+    count?: number;
+    options?: TiltGridOptions;
+    withTip?: boolean;
+}) {
+    const ref = useTiltGrid<HTMLUListElement>(options);
     return (
         <ul ref={ref} data-testid="grid">
             {Array.from({ length: count }, (_, index) => (
                 <li key={index} data-tilt="" data-testid={`card-${index}`}>
-                    <span data-tilt-tip="" data-testid={`tip-${index}`} />
+                    {withTip ? (
+                        <span data-tilt-tip="" data-testid={`tip-${index}`} />
+                    ) : null}
                 </li>
             ))}
         </ul>
@@ -271,5 +281,77 @@ describe('useTiltGrid', () => {
         // 指针还在卡片上但已经收敛：此时不该再有排队的回调。
         const pendingAfterSettle = frames.length;
         expect(pendingAfterSettle).toBe(0);
+    });
+
+    it('关掉反光就不再写那三个变量，倾斜照旧', () => {
+        // 纯信息卡没有反光元素。每帧写三次没人读的 CSS 变量是纯空转。
+        render(<Grid options={{ glare: false }} />);
+        const card = screen.getByTestId('card-0');
+
+        moveOn(card, 400, 400);
+        tick(120);
+
+        expect(card.style.getPropertyValue('--tilt-gx')).toBe('');
+        expect(card.style.getPropertyValue('--tilt-gy')).toBe('');
+        expect(card.style.getPropertyValue('--tilt-glare')).toBe('');
+        expect(degrees(card, '--tilt-y')).toBeCloseTo(12, 1);
+    });
+
+    it('倾角可以按卡片类型调小', () => {
+        render(<Grid options={{ amplitude: 6 }} />);
+        const card = screen.getByTestId('card-0');
+
+        moveOn(card, 400, 400);
+        tick(120);
+
+        expect(degrees(card, '--tilt-y')).toBeCloseTo(6, 1);
+        expect(degrees(card, '--tilt-x')).toBeCloseTo(-6, 1);
+    });
+
+    it('scale 传 1 表示不缩放', () => {
+        render(<Grid options={{ scale: 1 }} />);
+        const card = screen.getByTestId('card-0');
+
+        moveOn(card, 200, 200);
+        tick(120);
+
+        expect(Number(card.style.getPropertyValue('--tilt-scale'))).toBeCloseTo(
+            1,
+            3
+        );
+    });
+
+    it('标签节点只查一次，不是每帧查', () => {
+        // 原来 `paintTip` 每帧 `querySelector('[data-tilt-tip]')`：24 张卡 60fps
+        // 是每秒约 1400 次查询，而卡片没有标签时全是空手而归。这条数查询次数。
+        const spy = vi.spyOn(Element.prototype, 'querySelector');
+        try {
+            render(<Grid />);
+            const card = screen.getByTestId('card-0');
+
+            moveOn(card, 300, 100);
+            tick(60);
+
+            const tipQueries = spy.mock.calls.filter(
+                ([selector]) => selector === '[data-tilt-tip]'
+            ).length;
+            // 建状态时一次，之后走缓存。
+            expect(tipQueries).toBeLessThanOrEqual(2);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it('卡片里没有标签时照样倾斜，循环照样会停', () => {
+        // 没有 `[data-tilt-tip]` 就该整条标签链路短路，而不是每帧对着空气
+        // querySelector、推进两条用不上的弹簧。
+        render(<Grid withTip={false} />);
+        const card = screen.getByTestId('card-0');
+
+        moveOn(card, 400, 400);
+        tick(300);
+
+        expect(degrees(card, '--tilt-y')).toBeCloseTo(12, 1);
+        expect(frames.length).toBe(0);
     });
 });
