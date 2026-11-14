@@ -37,6 +37,9 @@ export function VrccCover({
             aria-hidden
             loading="lazy"
             decoding="async"
+            // 连点两下会把图片当成可拖拽对象：一张半透明的图跟着光标飞出去，
+            // 松手后浏览器还可能去导航。封面是纯装饰，不该有这套行为。
+            draggable={false}
             className={className}
             onError={() => setFailed(true)}
         />

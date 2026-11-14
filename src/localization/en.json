@@ -800,6 +800,7 @@
         "reconnect_hint": "Reconnect from the \"Me\" tab",
         "missing_scope": "This needs the {scope} permission; reconnect once to get it",
         "tab": {
+            "models": "Models",
             "maps": "Map board",
             "notifications": "Notifications",
             "me": "Me",
@@ -816,6 +817,30 @@
                 "new": "New"
             },
             "week_count": "This week {count}"
+        },
+        "models": {
+            "hint": "One vote a day per model",
+            "empty": "No models on the board yet",
+            "unavailable": "This server has no model board yet",
+            "likes": "likes",
+            "comments": "Comments",
+            "likes_count": "{count} likes",
+            "hot_comments": "Top comments on Xingyu Tongpin",
+            "comments_empty": "Nobody has written a comment yet.",
+            "comments_gone": "This model is no longer on the board, so its comments are unavailable.",
+            "comments_error": "Couldn't load the comments. Try again later.",
+            "comments_note": "The open API only exposes the top 2 comments, and there is no endpoint to vote. Open the site for the full page.",
+            "week_count": "{count} this week",
+            "total": "{total} models",
+            "total_capped": "{total} models · showing the first {shown}",
+            "open": "Open on Xingyu Tongpin",
+            "sort": {
+                "top": "All time",
+                "week": "This week",
+                "new": "New"
+            },
+            "flip": "Flip card",
+            "flip_back": "Flip back"
         },
         "current_map": {
             "label": "Your current map",

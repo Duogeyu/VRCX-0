@@ -15,10 +15,11 @@
 use vrcx_0_application::vrcc::{VrccConnection, VrccFuture, VrccLocalUsage, VrccRemote};
 use vrcx_0_contracts::vrcc::{
     VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccCrossingCards,
-    VrccCrossings, VrccDeviceCode, VrccMapPage, VrccMutuals, VrccMyBoard, VrccMyBoardSort,
-    VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage, VrccNotes, VrccNotifications,
-    VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday,
-    VrccTokenResponse, VrccUnread, VrccVote, VrccVoteKind, VrccVoteResult,
+    VrccCrossings, VrccDeviceCode, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals,
+    VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage,
+    VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingText, VrccRecentNotifications,
+    VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread, VrccVote, VrccVoteKind,
+    VrccVoteResult,
 };
 use vrcx_0_vrcc_client::{now_millis, VrccSession, WINDOW_LIMIT};
 
@@ -50,6 +51,18 @@ impl VrccRemoteAdapter {
 impl VrccRemote for VrccRemoteAdapter {
     fn boards<'a>(&'a self, limit: u32, sort: VrccBoardSort) -> VrccFuture<'a, VrccBoard> {
         Box::pin(async move { self.client().boards(limit, sort).await })
+    }
+
+    fn models_board<'a>(
+        &'a self,
+        limit: u32,
+        sort: VrccBoardSort,
+    ) -> VrccFuture<'a, VrccModelBoard> {
+        Box::pin(async move { self.client().models_board(limit, sort).await })
+    }
+
+    fn model<'a>(&'a self, id: i64) -> VrccFuture<'a, Option<VrccModelDetail>> {
+        Box::pin(async move { self.client().model(id).await })
     }
 
     fn maps<'a>(&'a self, worlds: &'a [String]) -> VrccFuture<'a, VrccBoard> {

@@ -16,6 +16,8 @@ import { useRuntimeStore } from '@/state/runtimeStore';
 import { useVrccUnreadStore } from '@/state/vrccUnreadStore';
 import { useVrcNotificationStore } from '@/state/vrcNotificationStore';
 
+import { resetModelCoverCache } from './useModelCoverCache';
+import { resetModelDetailCache } from './useModelDetail';
 import { loadAnnouncements } from './vrccAnnouncementLoader';
 import {
     vrccApi,
@@ -27,6 +29,7 @@ import {
     type VrccCrossingCards,
     type VrccCrossings,
     type VrccDeviceAuthPrompt,
+    type VrccModelBoard,
     type VrccMutuals,
     type VrccMyMap,
     type VrccNotes,
@@ -118,7 +121,13 @@ export function describeVrccError(error: VrccError): string {
     return error.message || i18n.t('vrcc.error.unknown');
 }
 
-export type VrccTab = 'maps' | 'notifications' | 'mutuals' | 'crossings' | 'me';
+export type VrccTab =
+    | 'maps'
+    | 'models'
+    | 'notifications'
+    | 'mutuals'
+    | 'crossings'
+    | 'me';
 
 /** 「提醒」页签里看哪一个：最近的提醒，还是通知中心。 */
 export type VrccNotificationsView = 'recent' | 'notes';
@@ -135,6 +144,19 @@ type State = {
      * 为 false，界面藏起切换。
      */
     boardSortSupported: boolean;
+    /** 模型榜（1.17.0 起）。不需要连接。 */
+    models: VrccModelBoard | null;
+    /** 正在看的模型榜排序。 */
+    modelSort: VrccBoardSort;
+    /** 服务器认不认模型榜的 `sort`；语义同 `boardSortSupported`。 */
+    modelSortSupported: boolean;
+    /**
+     * 模型榜这台服务器上到底有没有（1.17.0 才有的接口）。
+     *
+     * 旧服务器回 `404 not_found`、后端收敛成 `null`，那是**「还没有这个功能」**
+     * 而不是故障：界面把这一页显示成「暂时没有」，不弹错误横幅。
+     */
+    modelsAvailable: boolean;
     recent: VrccRecentNotifications | null;
     /** 几处未读数；null 表示还没拿到，或服务器还没有 `me/unread`。 */
     unread: VrccUnread | null;
@@ -220,6 +242,10 @@ const initialState: State = {
     boards: null,
     boardSort: 'top',
     boardSortSupported: true,
+    models: null,
+    modelSort: 'top',
+    modelSortSupported: true,
+    modelsAvailable: true,
     recent: null,
     unread: null,
     notificationsView: 'recent',
@@ -262,6 +288,12 @@ export function useVrccController() {
     >({});
     /** 正在看的排序；重新加载时照它拉，而不是跳回总榜。 */
     const boardSortRef = useRef<VrccBoardSort>('top');
+    /** 各种排序最近拿到的模型榜，切回来时直接用。 */
+    const modelCache = useRef<
+        Partial<Record<VrccBoardSort, { board: VrccModelBoard; at: number }>>
+    >({});
+    /** 正在看的模型榜排序。 */
+    const modelSortRef = useRef<VrccBoardSort>('top');
     /**
      * 个人数据（所在地图、互相连上）的请求代次。
      *
@@ -364,6 +396,62 @@ export function useVrccController() {
             boardCache.current[sort] = { board: boards, at: Date.now() };
             boardSortRef.current = sort;
             patch({ boards, boardSort: sort });
+        },
+        [patch]
+    );
+
+    /**
+     * 模型榜。开放数据，不需要连接。
+     *
+     * 和 [`refreshBoards`] 同一套降级，但有**一处不同**：旧服务器上这个接口
+     * 根本不存在。后端已经把 `404 not_found` 收敛成 `null`，这里记成
+     * `modelsAvailable: false`，让那一页显示成空的，而不是弹错误横幅。
+     *
+     * 错误自己吞掉，不往上抛：模型榜是可选区块，失败不该连累地图榜，也不该在
+     * 页面顶上挂一条红横幅——保留旧数据，玩家再点一次刷新即可。
+     */
+    const refreshModels = useCallback(
+        async (sort: VrccBoardSort = 'top', reuse = false) => {
+            const cached = modelCache.current[sort];
+            if (reuse && cached && Date.now() - cached.at < BOARD_REUSE_MS) {
+                modelSortRef.current = sort;
+                patch({ models: cached.board, modelSort: sort });
+                return;
+            }
+            try {
+                // 和地图榜一样取满 100 条，面板在本地分页。
+                const models = await vrccApi.models(100, sort);
+                // `null`：旧服务器上没有这个接口。那是「这台服务器还没有
+                // 模型榜」，不是故障——显示成空的，不弹错误。
+                if (models == null) {
+                    patch({ models: null, modelsAvailable: false });
+                    return;
+                }
+                if (sort !== 'top' && models.sort == null) {
+                    modelCache.current.top = { board: models, at: Date.now() };
+                    modelSortRef.current = 'top';
+                    patch({
+                        models,
+                        modelSort: 'top',
+                        modelSortSupported: false,
+                        modelsAvailable: true
+                    });
+                    return;
+                }
+                modelCache.current[sort] = { board: models, at: Date.now() };
+                modelSortRef.current = sort;
+                patch({
+                    models,
+                    modelSort: sort,
+                    modelSortSupported: true,
+                    modelsAvailable: true
+                });
+            } catch (error) {
+                // 网络、限流之类的失败：保留旧数据，只把原因留给日志。
+                // 清空会把「这次没拿到」说成「一个都没有」。
+                patch({ modelsAvailable: true });
+                console.warn('[vrcc] model board refresh failed:', error);
+            }
         },
         [patch]
     );
@@ -644,6 +732,9 @@ export function useVrccController() {
         void refreshBoards(boardSortRef.current).catch((error) => {
             reportError(error, 'refreshBoards');
         });
+        // 模型榜和地图榜并列：都是开放数据，一起拉。旧服务器上它回 `null`，
+        // 那一页显示成空的，不弹错误；`refreshModels` 自己兜住异常。
+        void refreshModels(modelSortRef.current);
         if (connected) {
             // 所在地图要已连接才有意义：未连接时后端直接报 TokenMissing，
             // 会被判成 needsReauth，于是每开一次页面就弹一次「去重新连接」，
@@ -678,6 +769,7 @@ export function useVrccController() {
         refreshAnnouncements,
         refreshBoards,
         refreshConnection,
+        refreshModels,
         refreshMutuals,
         refreshMyMap,
         refreshRecent,
@@ -842,6 +934,23 @@ export function useVrccController() {
     }, [state.connection?.connected, state.unread, state.recent]);
 
     /**
+     * 登录态一变就把模型相关的会话缓存整表清掉。
+     *
+     * **不能假设「模型详情永远与登录无关」。** 今天 `/models/{id}` 是公开数据，
+     * 但权限可以再申请、接口也可能开始返回「你投过票没有」这类绑定登录态的
+     * 字段。那天到来时，一个跨账号共享的前端缓存会把 A 的详情给 B 看。
+     *
+     * 后端那边是把账号分区写进缓存键（`OwnedModelKey` / `OwnedBoardKey` /
+     * `OwnedModelBoardKey`）；前端这两层只活一个会话，所以用更省事的等价做法：
+     * **换了账号就整表清空**。挂在 `star` 上而不只是 `connected`——同一个人
+     * 断开重连不该白清，换人才该。
+     */
+    useEffect(() => {
+        resetModelDetailCache();
+        resetModelCoverCache();
+    }, [state.connection?.star]);
+
+    /**
      * 卸载时清掉侧边栏的角标。
      *
      * 只清数字不清连接态：玩家可能只是切到别的页面，连接仍然有效，角标在
@@ -868,6 +977,15 @@ export function useVrccController() {
     const setTab = useCallback(
         (tab: VrccTab) => {
             patch({ tab });
+            // 模型榜是开放数据，不需要连接，所以这一句**必须在下面那道
+            // `connected` 检查之前**：未连接的玩家也会切到模型榜，那时同样
+            // 该走缓存，而不是又发一次请求。
+            //
+            // 只有「切回这一页」时才复用：60 秒内看过的直接用，超过就当没有。
+            // 手动刷新和切排序各自有入口，不受这里影响。
+            if (tab === 'models') {
+                void refreshModels(modelSortRef.current, true);
+            }
             if (!state.connection?.connected) return;
             if (tab === 'notifications') {
                 refreshRecent(true).catch(() => {
@@ -905,6 +1023,7 @@ export function useVrccController() {
         [
             patch,
             refreshCrossings,
+            refreshModels,
             refreshMutuals,
             refreshRecent,
             refreshUnread,
@@ -921,6 +1040,16 @@ export function useVrccController() {
             });
         },
         [refreshBoards, reportError]
+    );
+
+    /** 切换模型榜的排序。同一套复用策略：60 秒内看过的那一份直接用。 */
+    const setModelSort = useCallback(
+        (sort: VrccBoardSort) => {
+            // 失败由 `refreshModels` 自己吞掉并记日志：模型榜是可选区块，
+            // 服务器上还没有它时不该在页面顶上挂一条红横幅。
+            void refreshModels(sort, true);
+        },
+        [refreshModels]
     );
 
     /**
@@ -1151,6 +1280,8 @@ export function useVrccController() {
         reload: load,
         refreshBoards: () => refreshBoards(boardSortRef.current),
         setBoardSort,
+        refreshModels: () => refreshModels(modelSortRef.current),
+        setModelSort,
         setNotificationsView,
         refreshMyMap,
         refreshMutuals,

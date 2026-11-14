@@ -33,3 +33,5 @@ tsconfig.tsbuildinfo
 # AgentTeams 的运行态账本（.agent-teams/<team>/team.json）。
 # 它不是产品文件：提交历史里带上它只会让每个 PR 无谓地多几千行。
 .agent-teams/
+# 视频素材渲染台与采集产物（本地临时，不入库）。
+.capture/

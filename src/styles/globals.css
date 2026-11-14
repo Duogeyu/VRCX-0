@@ -3,6 +3,8 @@
 @import 'shadcn/tailwind.css';
 @import '@fontsource-variable/geist';
 @import './object-row.css';
+@import './model-card.css';
+@import './card-morph.css';
 /* 导览的高亮层与气泡。driver.js 自带的那份只管结构与动画，
    配色在文件末尾的 `.driver-*` 覆盖里改成主题色。 */
 @import 'driver.js/dist/driver.css';
@@ -17,6 +19,20 @@
     --motion-fast: 120ms;
     --motion-standard: 160ms;
     --motion-slow: 220ms;
+    /* 卡片展开成弹窗的整条运动（位移 + 旋转 + 放大共用）。 */
+    --motion-expand: 800ms;
+    /* 展开的一半。卡片飞到侧棱、弹窗从侧棱转回来，两半各自计时、各吃一条
+       完整缓动——不能拿整条 800ms 切成两段，那样前快后慢的缓动会把时间
+       几乎全给后半段。
+       用 `calc` 派生而不是写死 400ms：改上面那一个数，两半自动跟着变。 */
+    --morph-expand-half: calc(var(--motion-expand) / 2);
+    /* 收起不必和展开等长：关窗动作拖 800ms 会显得迟疑。 */
+    --motion-collapse: 550ms;
+    /* 收起的一半。弹窗先反向走到侧棱，卡片副本再从那里接回来。
+       和展开那半一样用 `calc` 派生：写死 275ms 时，「收起的两个半段加起来等于
+       `--motion-collapse`」这条约束就只活在注释里——上面对不上，也不会有任何
+       报错，只会变成「弹窗缩回侧棱的时长」和「卡片飞回去的时长」各走各的。 */
+    --morph-collapse-half: calc(var(--motion-collapse) / 2);
     --ease-out-ui: cubic-bezier(0.23, 1, 0.32, 1);
     --popover: oklch(1 0 0);
     --popover-foreground: oklch(0.145 0 0);
