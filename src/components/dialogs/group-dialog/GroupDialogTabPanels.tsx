@@ -26,7 +26,6 @@ import {
 } from '../EntityDialogScaffold';
 import { PreviousInstancesPanel } from '../PreviousInstancesTableDialog';
 import { GroupEventsTab, GroupEventSummary } from './GroupDialogEvents';
-import { GroupDialogInstances } from './GroupDialogInstances';
 import type {
     GroupDialogTabCommands,
     GroupDialogTabModel
@@ -37,6 +36,7 @@ import {
     announcementUserId,
     announcementUserLabel
 } from './groupDialogUtils';
+import { GroupInstanceRows } from './GroupInstanceRows';
 import { GroupMembersPanel } from './GroupMembersPanel';
 import { GroupPostUserButton, RowList } from './GroupRowList';
 
@@ -316,8 +316,8 @@ export function GroupDialogTabPanels({
                 ) : null}
 
                 <GroupOverviewSection title={t('dialog.group.info.instances')}>
-                    <GroupDialogInstances
-                        activeInstances={activeInstances}
+                    <GroupInstanceRows
+                        instances={activeInstances}
                         currentUserId={currentUserId}
                     />
                 </GroupOverviewSection>

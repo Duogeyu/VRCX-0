@@ -102,8 +102,8 @@ export function GroupVrccClub({
     // 时钩子退回「指针压卡才倾」。
     const tiltRef = useTiltGrid<HTMLDivElement>({
         amplitude: 9,
+        // 左栏是窄列，悬停放大 5% 会撞到相邻元素，所以显式关掉缩放。
         scale: 1,
-        glare: true,
         track: 'area',
         areaSelector: '[data-slot="dialog-content"]'
     });
@@ -157,8 +157,9 @@ export function GroupVrccClub({
     const likes = typeof detail?.likes === 'number' ? detail.likes : null;
     const followed =
         typeof detail?.followed === 'boolean' ? detail.followed : null;
-    // 没图标时退回首字（只给成员看的社团没有图）。
-    const initial = Array.from(name)[0] ?? '?';
+    // 没图标时退回首字（只给成员看的社团没有图）。`name` 至少是短码，不会为空，
+    // 所以这里不需要再补一个兜底字符。
+    const initial = Array.from(name)[0];
 
     // **不画 `intro`**：星遇的「简介」就是审核过的 VRChat 群组简介，和这个对话框
     // 上方「描述」那一块是同一份文字，逐字相同。抄到背面只是同一段话看两遍。

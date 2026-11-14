@@ -21,6 +21,9 @@ import { clubRoomsToInstanceRows, type VrccClubRoom } from './clubRooms';
  * 来的，由 `mergeGroupInstances` 塞进**已经存在**的行；晚到的房间永远分不到
  * 好友。
  *
+ * 也**不要**把合并挪回渲染层那个组件里：那样社团房间会在好友分配之后才出现，
+ * 那几行永远是空的，好友头像和好友数全丢（这个坑踩过一次）。
+ *
  * 拿不到（没连接 / 没 `clubs` 权限 / `404 club_off` / 失败 / 缺短码）就返回
  * 空数组，补位失败不该让群组详情报错。公开的 `/clubs/{code}` 不返回 `rooms`，
  * 但不需要令牌也不占额度，先用它挡一道——大多数群组没入驻社团。

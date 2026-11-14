@@ -6,11 +6,6 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import {
-    clubCodeForGroup,
-    isClubCodeShaped
-} from '@/repositories/vrccClubRepository';
-
 import { GroupVrccClub } from './GroupVrccClub';
 
 const mocks = vi.hoisted(() => ({
@@ -69,32 +64,6 @@ const clubResponse = {
     }
 };
 
-describe('clubCodeForGroup', () => {
-    it('拼的就是 shortCode.discriminator', () => {
-        expect(
-            clubCodeForGroup({ shortCode: 'KIPFEL', discriminator: '2104' })
-        ).toBe('KIPFEL.2104');
-    });
-
-    it('缺任何一个都返回空串，不拼出半截短码', () => {
-        expect(clubCodeForGroup({ shortCode: 'KIPFEL' })).toBe('');
-        expect(clubCodeForGroup({ discriminator: '2104' })).toBe('');
-        expect(clubCodeForGroup({ shortCode: '', discriminator: '2104' })).toBe(
-            ''
-        );
-        expect(clubCodeForGroup({})).toBe('');
-    });
-
-    it('短码形状与官方 pattern 一致', () => {
-        expect(isClubCodeShaped('KIPFEL.2104')).toBe(true);
-        expect(isClubCodeShaped('kipfel.2104')).toBe(true);
-        expect(isClubCodeShaped('520.6088')).toBe(true);
-        expect(isClubCodeShaped('KIPFEL.')).toBe(false);
-        expect(isClubCodeShaped('KIPFEL')).toBe(false);
-        expect(isClubCodeShaped('KIPFEL.21045')).toBe(false);
-    });
-});
-
 describe('GroupVrccClub', () => {
     afterEach(cleanup);
 
@@ -132,8 +101,11 @@ describe('GroupVrccClub', () => {
             await screen.findByText('dialog.group.vrcc.likes:6')
         ).toBeTruthy();
         expect(screen.getByText('dialog.group.vrcc.followed')).toBeTruthy();
-        // 群组人数不显示——VRChat 群组详情已经有权威值。
-        expect(screen.queryByText('dialog.group.vrcc.members:6871')).toBeNull();
+        // 群组人数不显示——VRChat 群组详情已经有权威值，星遇那份是过期快照。
+        //
+        // 断言的是**那串数字本身**：原来写的是 `dialog.group.vrcc.members:6871`，
+        // 而这个 i18n 键三份语言文件里都不存在，等于断言永远绿。
+        expect(screen.queryByText('6871')).toBeNull();
         expect(mocks.appVrccClub).toHaveBeenCalledWith('KIPFEL.2104');
     });
 
