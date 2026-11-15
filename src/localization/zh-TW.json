@@ -801,6 +801,7 @@
         "missing_scope": "這一項需要 {scope} 權限，重新連線一次即可",
         "tab": {
             "models": "模型榜",
+            "clubs": "社團",
             "maps": "地圖榜",
             "notifications": "提醒",
             "me": "我的",
@@ -851,6 +852,29 @@
             },
             "flip": "翻面",
             "flip_back": "翻回正面"
+        },
+        "clubs": {
+            "total": "共 {count} 個",
+            "source_public": "公開列表：不需要連接",
+            "source_mine": "已連接：含只給成員看的社團",
+            "loading": "正在讀取社團列表…",
+            "error": "社團列表沒能載入出來，稍後再試。",
+            "empty": "還沒有公開的社團。",
+            "members": "{count} 人",
+            "likes": "{count} 個讚",
+            "followed": "已關注",
+            "open": "社團頁",
+            "grade_1": "三等星",
+            "grade_2": "二等星",
+            "grade_3": "一等星",
+            "grade_4": "北極星",
+            "grade_unknown": "未分級",
+            "sort": {
+                "default": "熱度",
+                "grade": "星級",
+                "members": "人數",
+                "name": "名稱"
+            }
         },
         "current_map": {
             "label": "你所在的地圖",

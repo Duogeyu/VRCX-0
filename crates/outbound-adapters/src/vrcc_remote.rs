@@ -14,7 +14,7 @@
 
 use vrcx_0_application::vrcc::{VrccConnection, VrccFuture, VrccLocalUsage, VrccRemote};
 use vrcx_0_contracts::vrcc::{
-    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccCrossingCards,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs, VrccCrossingCards,
     VrccCrossings, VrccDeviceCode, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals,
     VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage,
     VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingText, VrccRecentNotifications,
@@ -91,6 +91,10 @@ impl VrccRemote for VrccRemoteAdapter {
 
     fn club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccClubResponse> {
         Box::pin(async move { self.client().club(code).await })
+    }
+
+    fn clubs<'a>(&'a self, limit: u32, offset: u32) -> VrccFuture<'a, VrccClubs> {
+        Box::pin(async move { self.client().clubs(limit, offset).await })
     }
 
     fn my_map_page<'a>(

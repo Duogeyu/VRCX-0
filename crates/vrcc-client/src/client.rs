@@ -27,10 +27,10 @@ use serde_json::json;
 use vrcx_0_vrcc_contracts::resolve_client_id;
 use vrcx_0_vrcc_contracts::{
     ErrorDetail, ErrorLayer, HttpDetail, LocalThrottle, TransportKind, VrccAnnouncements,
-    VrccBoard, VrccBoardSort, VrccClubResponse, VrccCrossingCards, VrccCrossings, VrccDeviceCode,
-    VrccErrorBody, VrccMapDetail, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals,
-    VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage,
-    VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingInput, VrccRatingText,
+    VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs, VrccCrossingCards, VrccCrossings,
+    VrccDeviceCode, VrccErrorBody, VrccMapDetail, VrccMapPage, VrccModelBoard, VrccModelDetail,
+    VrccMutuals, VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap,
+    VrccMyMapPage, VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingInput, VrccRatingText,
     VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread,
     VrccVote, VrccVoteKind, VrccVoteResult, VRCC_API_BASE, VRCC_SITE_ORIGIN,
 };
@@ -1053,6 +1053,39 @@ impl VrccClient {
         .await
     }
 
+    /// 所有公开社团（`GET /clubs`，1.19.2 起）。
+    ///
+    /// 不用令牌，只要 `client` 头。每个社团的字段和 [`Self::club`] 的 `club`
+    /// **完全一样**——同一个 [`VrccClub`] 契约。
+    ///
+    /// # 顺序改不了
+    ///
+    /// 服务器把顺序定死：点赞多的在前，再按群组人数、短码。接口**没有 `sort`
+    /// 参数**，客户端只能翻页，不能重排。
+    ///
+    /// # 没有点赞数
+    ///
+    /// 榜是按点赞排的，但 [`VrccClub`] 里**不带 `likes`**。要显示「为什么排这个
+    /// 位置」只能再用带令牌的 [`Self::my_clubs`] 叠一层。
+    ///
+    /// 服务器最多 5 分钟更新一次（和地图榜一样），本机最小间隔给 30 秒——比
+    /// 服务器刷新快没意义，但比 `club()` 的 60 秒宽松，因为翻页会连着来。
+    pub async fn clubs(&self, limit: u32, offset: u32) -> Result<VrccClubs, VrccError> {
+        let path = clubs_path(limit, offset);
+        self.request(Call {
+            method: "GET",
+            path: &path,
+            body: None,
+            authed: false,
+            key: "clubs",
+            min_gap: Duration::from_secs(30),
+            bucket: None,
+            limiter: None,
+            bypass_gate: false,
+        })
+        .await
+    }
+
     /// 玩家所在星池里能看到的社团（`GET /me/clubs`，1.18.0 起）。
     ///
     /// **需要 `clubs` 敏感权限**。只读：不算社团曝光、不消红点。16–17 岁星池
@@ -1696,6 +1729,19 @@ impl VrccClient {
             bypass_gate: false,
         })
         .await
+    }
+}
+
+/// 公开社团列表的路径。
+///
+/// `offset=0` 时**不带这个参数**：第一页的和 1.19.2 之前的老写法一致，少一个
+/// 查询参数就少一处和服务器对不齐的机会。
+fn clubs_path(limit: u32, offset: u32) -> String {
+    let limit = limit.clamp(1, 100);
+    if offset == 0 {
+        format!("clubs?limit={limit}")
+    } else {
+        format!("clubs?limit={limit}&offset={offset}")
     }
 }
 
@@ -2890,6 +2936,18 @@ mod tests {
             boards_path(5, VrccBoardSort::New),
             "boards/maps?limit=5&sort=new"
         );
+    }
+
+    /// 社团列表的第一页不带 `offset`：和 1.19.2 之前的老写法一致。
+    ///
+    /// `limit` 也夹到 1–100——服务器对超出范围的写法要么按 100 处理要么回 400，
+    /// 与其让它替我们猜，不如自己夹住。
+    #[test]
+    fn club_paths_omit_the_offset_on_the_first_page() {
+        assert_eq!(clubs_path(20, 0), "clubs?limit=20");
+        assert_eq!(clubs_path(20, 40), "clubs?limit=20&offset=40");
+        assert_eq!(clubs_path(0, 0), "clubs?limit=1");
+        assert_eq!(clubs_path(1000, 0), "clubs?limit=100");
     }
 
     /// 星轨相交的两个端点都要遵守「要标才带 `mark=1`」。

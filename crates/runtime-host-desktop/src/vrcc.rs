@@ -10,7 +10,7 @@ use vrcx_0_application::vrcc::{
     classify_vrcc_error, StoredCredential, VrccErrorKind, VrccFailure, VrccService, VrccTokenStore,
 };
 use vrcx_0_contracts::vrcc::{
-    scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse,
+    scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs,
     VrccConnectionSnapshot, VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccModelBoard,
     VrccModelDetail, VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap,
     VrccMyMapPage, VrccNotes, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
@@ -417,6 +417,16 @@ impl DesktopVrccRuntime {
     pub async fn club(&self, code: &str) -> Result<Option<VrccClubResponse>, VrccFailure> {
         self.service
             .club(code)
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 所有公开社团（`GET /clubs`）。**不需要连接。**
+    ///
+    /// 顺序由服务器定死，这里不重排；`offset` / `limit` 原样往下传。
+    pub async fn clubs(&self, limit: u32, offset: u32) -> Result<VrccClubs, VrccFailure> {
+        self.service
+            .clubs(limit, offset)
             .await
             .map_err(|error| VrccFailure::from_error(&error))
     }

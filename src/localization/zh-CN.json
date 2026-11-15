@@ -801,6 +801,7 @@
         "missing_scope": "这一项需要 {scope} 权限，重新连接一次即可",
         "tab": {
             "models": "模型榜",
+            "clubs": "社团",
             "maps": "地图榜",
             "notifications": "提醒",
             "me": "我的",
@@ -851,6 +852,29 @@
             },
             "flip": "翻面",
             "flip_back": "翻回正面"
+        },
+        "clubs": {
+            "total": "共 {count} 个",
+            "source_public": "公开列表：不需要连接",
+            "source_mine": "已连接：含只给成员看的社团",
+            "loading": "正在读取社团列表…",
+            "error": "社团列表没能加载出来，稍后再试。",
+            "empty": "还没有公开的社团。",
+            "members": "{count} 人",
+            "likes": "{count} 个赞",
+            "followed": "已关注",
+            "open": "社团页",
+            "grade_1": "三等星",
+            "grade_2": "二等星",
+            "grade_3": "一等星",
+            "grade_4": "北极星",
+            "grade_unknown": "未分级",
+            "sort": {
+                "default": "热度",
+                "grade": "星级",
+                "members": "人数",
+                "name": "名称"
+            }
         },
         "current_map": {
             "label": "你所在的图",

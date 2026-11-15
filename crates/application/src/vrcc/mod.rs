@@ -13,13 +13,13 @@ use std::time::{Duration, Instant};
 use vrcx_0_application_core::Result;
 use vrcx_0_contracts::vrcc::{
     device_auth_scope, is_dev_client, missing_scopes, ErrorDetail, ErrorLayer, TransportKind,
-    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccConnectionSnapshot,
-    VrccCredentialState, VrccCrossingCards, VrccCrossings, VrccDeviceCode, VrccError,
-    VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals, VrccMyBoard,
-    VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage, VrccNotes,
-    VrccNotifications, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
-    VrccStickers, VrccToday, VrccTokenResponse, VrccUnread, VrccUsageSnapshot, VrccVote,
-    VrccVoteKind, VrccVoteResult, VrccWristSummary,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs,
+    VrccConnectionSnapshot, VrccCredentialState, VrccCrossingCards, VrccCrossings, VrccDeviceCode,
+    VrccError, VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals,
+    VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage,
+    VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingText, VrccRecentNotifications,
+    VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread, VrccUsageSnapshot,
+    VrccVote, VrccVoteKind, VrccVoteResult, VrccWristSummary,
 };
 
 /// 服务器回答 `me/unread` 是 `404 not_found`（还没更新到 1.13.0）之后，
@@ -128,6 +128,8 @@ pub trait VrccRemote: Send + Sync {
     fn map_page<'a>(&'a self, world: &'a str) -> VrccFuture<'a, VrccMapPage>;
     /// 社团公开页（`GET /clubs/{code}`，1.18.0 起）。**不需要连接。**
     fn club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccClubResponse>;
+    /// 所有公开社团（`GET /clubs`，1.19.2 起）。**不需要连接。**
+    fn clubs<'a>(&'a self, limit: u32, offset: u32) -> VrccFuture<'a, VrccClubs>;
     fn my_map_page<'a>(
         &'a self,
         world: &'a str,
@@ -1608,6 +1610,23 @@ impl VrccService {
         match self.remote.club(code).await {
             Ok(club) => Ok(Some(club)),
             Err(error) if error.is_absent() => Ok(None),
+            Err(error) => Err(self.settle(error)),
+        }
+    }
+
+    /// 所有公开社团（`GET /clubs`，1.19.2 起）。**不需要连接，也不吃个人额度。**
+    ///
+    /// 顺序由服务器定死（点赞多 → 群组人数多 → 短码），接口没有 `sort`：这一层
+    /// 不做任何重排，`offset` 原样往下传。
+    ///
+    /// 社团功能关着时服务器回空列表（不是错误），所以这里没有「不存在」这一档。
+    pub async fn clubs(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> std::result::Result<VrccClubs, VrccError> {
+        match self.remote.clubs(limit, offset).await {
+            Ok(clubs) => Ok(clubs),
             Err(error) => Err(self.settle(error)),
         }
     }

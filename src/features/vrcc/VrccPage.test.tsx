@@ -2,6 +2,7 @@
 
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, render } from '@testing-library/react';
 import type { PropsWithChildren } from 'react';
 import { MemoryRouter, useNavigate, useSearchParams } from 'react-router';
@@ -136,11 +137,18 @@ function RouteSpy() {
 }
 
 function renderPage(initialEntry: string) {
+    // 页面里有吃 react-query 的块（社团列表），没有 provider 会在挂载时就抛
+    // 「No QueryClient set」。这一组用例只关心页签解析，给个最小 client 即可。
+    const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } }
+    });
     return render(
-        <MemoryRouter initialEntries={[initialEntry]}>
-            <VrccPage />
-            <RouteSpy />
-        </MemoryRouter>
+        <QueryClientProvider client={client}>
+            <MemoryRouter initialEntries={[initialEntry]}>
+                <VrccPage />
+                <RouteSpy />
+            </MemoryRouter>
+        </QueryClientProvider>
     );
 }
 

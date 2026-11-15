@@ -13,11 +13,11 @@
 use tauri::State;
 use vrcx_0_application::vrcc::{VrccDeviceAuthPrompt, VrccDeviceAuthStep, VrccFailure};
 use vrcx_0_contracts::vrcc::{
-    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccConnectionSnapshot,
-    VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMyBoard, VrccMyBoardSort,
-    VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage, VrccNotes, VrccRatedMaps,
-    VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccUnread,
-    VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs,
+    VrccConnectionSnapshot, VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail,
+    VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage,
+    VrccNotes, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers,
+    VrccToday, VrccUnread, VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
 };
 
 use crate::{error::AppError, state::AppState};
@@ -261,6 +261,25 @@ pub async fn app__vrcc_club(
         .runtime_host()
         .vrcc()
         .club(&code)
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 所有公开社团（`GET /clubs`）。**不需要连接。**
+///
+/// 顺序由服务器定死（点赞多 → 群组人数多 → 短码），没有 `sort` 参数；翻页用
+/// `limit` / `offset`，回答里有 `total` 与 `next`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_clubs(
+    state: State<'_, AppState>,
+    limit: u32,
+    offset: u32,
+) -> Result<VrccClubs, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .clubs(limit, offset)
         .await
         .map_err(|failure| AppError::Vrcc { failure })
 }

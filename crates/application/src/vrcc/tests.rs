@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use vrcx_0_contracts::vrcc::{
-    HttpDetail, LocalThrottle, VrccBoardMap, VrccBoardModel, VrccCrossingCards, VrccCrossingStar,
-    VrccCrossings, VrccModelBoard, VrccModelDetail, VrccUnread,
+    HttpDetail, LocalThrottle, VrccBoardMap, VrccBoardModel, VrccClubs, VrccCrossingCards,
+    VrccCrossingStar, VrccCrossings, VrccModelBoard, VrccModelDetail, VrccUnread,
 };
 // ---------------------------------------------------------------------------
 // 造错误的几个便捷函数
@@ -178,6 +178,8 @@ struct FakeRemote {
     cards_mark: Mutex<Option<bool>>,
     /// 记录 `club` 收到的短码：短码要原样透传到远端，别在应用层被改掉。
     club_code: Mutex<Option<String>>,
+    /// 记录 `clubs` 收到的 `(limit, offset)`：翻页参数要原样透传。
+    clubs_calls: Mutex<Option<(u32, u32)>>,
     /// `models_board` 的返回；`None` 时按「旧服务器没这个接口」处理。
     models: Mutex<Option<VrccModelBoard>>,
     /// 记录 `models_board` 收到的 `(limit, sort)`。
@@ -390,6 +392,16 @@ impl VrccRemote for FakeRemote {
                 return Err(error);
             }
             Ok(VrccClubResponse::default())
+        })
+    }
+    /// 公开社团列表：不需要令牌。记下 `(limit, offset)` 供断言「原样透传」。
+    fn clubs<'a>(&'a self, limit: u32, offset: u32) -> VrccFuture<'a, VrccClubs> {
+        Box::pin(async move {
+            *self.clubs_calls.lock().unwrap() = Some((limit, offset));
+            if let Some(error) = self.take_error() {
+                return Err(error);
+            }
+            Ok(VrccClubs::default())
         })
     }
     fn my_map_page<'a>(
@@ -1657,6 +1669,23 @@ async fn the_club_code_is_passed_through_untouched() {
     assert_eq!(
         remote.club_code.lock().unwrap().as_deref(),
         Some("KIPFEL.2104")
+    );
+}
+
+/// 公开社团列表同样不需要连接，而且 `limit` / `offset` 原样往下传。
+///
+/// 这一条和 [`the_club_page_does_not_need_a_connection`] 是同一个道理：榜单是
+/// 公开数据，没连星遇同频的玩家也该看得到。
+#[tokio::test]
+async fn the_club_list_needs_no_connection_and_keeps_the_paging() {
+    let (service, remote, _store) = disconnected_service();
+
+    let clubs = service.clubs(20, 40).await.unwrap();
+    assert!(clubs.clubs.is_empty(), "假端口回的是空列表");
+    assert_eq!(
+        remote.clubs_calls.lock().unwrap().to_owned(),
+        Some((20, 40)),
+        "翻页参数要原样透传"
     );
 }
 

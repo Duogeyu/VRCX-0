@@ -138,6 +138,7 @@ export function describeVrccError(error: VrccError): string {
 export type VrccTab =
     | 'maps'
     | 'models'
+    | 'clubs'
     | 'notifications'
     | 'mutuals'
     | 'crossings'
