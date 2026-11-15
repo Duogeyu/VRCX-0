@@ -8544,224 +8544,216 @@ export type VrccMyBoardSort =
  * 比 [`VrccClub`] 多「我的视角」：语言、点赞数、现在有没有房、有没有活动、
  * 关注了没、挂着没。
  */
-export type VrccMyClub =
+export type VrccMyClub = {
     /**
-     * 公开页上的那一份。
+     * 群组短码，形如 `KIPFEL.2104`。大小写都收。
      */
-    {
-        /**
-         * 群组短码，形如 `KIPFEL.2104`。大小写都收。
-         */
-        code?: string | null;
-        /**
-         * 群组名字（来自 VRChat）。
-         */
-        name?: string | null;
-        /**
-         * 社团自己写的一句话；没写是 `null`。
-         */
-        lede?: string | null;
-        /**
-         * 标签名（「聊天」「新人友好」这些）。**这是社团的标签，不是地图的玩法分类**
-         * ——地图那边的玩法分类在接口里根本不存在。
-         */
-        tags?: string[];
-        /**
-         * VRChat 群组人数；不知道时是 `null`。
-         *
-         * 实测可以到 6871 这种量级，界面要按需要做千分位。
-         */
-        members?: number | null;
-        /**
-         * **挂着这个社团的星有几颗**（本站用户），不是群组人数。
-         *
-         * 和 [`Self::members`] 是两回事，界面上不能混在一起。
-         */
-        here?: number;
-        /**
-         * 群组成立的年份；不知道时是 `null`。
-         */
-        since?: number | null;
-        /**
-         * 评级：`1` 三等星、`2` 二等星、`3` 一等星、`4` 北极星；没有时是 `null`。
-         *
-         * 实测 15 个社团里有 3 个是 `null`，所以**不能假设一定有评级**。
-         */
-        grade?: number | null;
-        /**
-         * 评级的名字（「北极星」这种）；跟着 [`Self::grade`] 一起缺席。
-         */
-        gradeName?: string | null;
-        /**
-         * 群组图标地址；只给成员看的社团没有。
-         */
-        icon?: string | null;
-        /**
-         * 群组横幅地址；只给成员看的社团没有。
-         */
-        banner?: string | null;
-        /**
-         * 社团公开页 `https://vrcc.cc/c/<短码>`；只给成员看的社团是 `null`。
-         */
-        page?: string | null;
-        /**
-         * VRChat 上的群组页（「在 VRChat 加入」）。
-         */
-        group?: string | null;
-    } & {
-        /**
-         * 社团说的语言（「中文」「英语」「日语」这种）。
-         */
-        langs?: string[];
-        /**
-         * 点赞数（验证过 VRChat 的星点的）。
-         */
-        likes?: number;
-        /**
-         * **现在有公开房间在线**。和 `rooms` 不是一回事：这里只说有没有。
-         */
-        room?: boolean;
-        /**
-         * **有还没结束的公开活动**。
-         *
-         * ⚠️ 和 [`VrccMyClubDetail::events`] **不是一回事**：实测有社团
-         * `event: true` 但 `events: []`。所以「有活动」只能用来点亮角标，
-         * 不能据此期望拿得到活动详情。
-         */
-        event?: boolean;
-        /**
-         * 我关注了这个社团。
-         */
-        followed?: boolean;
-        /**
-         * **我挂着这个社团**（和 [`VrccMyClubs::mine`] 是同一件事的两种表达）。
-         */
-        member?: boolean;
-    };
+    code?: string | null;
+    /**
+     * 群组名字（来自 VRChat）。
+     */
+    name?: string | null;
+    /**
+     * 社团自己写的一句话；没写是 `null`。
+     */
+    lede?: string | null;
+    /**
+     * 标签名（「聊天」「新人友好」这些）。**这是社团的标签，不是地图的玩法分类**
+     * ——地图那边的玩法分类在接口里根本不存在。
+     */
+    tags?: string[];
+    /**
+     * VRChat 群组人数；不知道时是 `null`。
+     *
+     * 实测可以到 6871 这种量级，界面要按需要做千分位。
+     */
+    members?: number | null;
+    /**
+     * **挂着这个社团的星有几颗**（本站用户），不是群组人数。
+     *
+     * 和 [`Self::members`] 是两回事，界面上不能混在一起。
+     */
+    here?: number;
+    /**
+     * 群组成立的年份；不知道时是 `null`。
+     */
+    since?: number | null;
+    /**
+     * 评级：`1` 三等星、`2` 二等星、`3` 一等星、`4` 北极星；没有时是 `null`。
+     *
+     * 实测 15 个社团里有 3 个是 `null`，所以**不能假设一定有评级**。
+     */
+    grade?: number | null;
+    /**
+     * 评级的名字（「北极星」这种）；跟着 [`Self::grade`] 一起缺席。
+     */
+    gradeName?: string | null;
+    /**
+     * 群组图标地址；只给成员看的社团没有。
+     */
+    icon?: string | null;
+    /**
+     * 群组横幅地址；只给成员看的社团没有。
+     */
+    banner?: string | null;
+    /**
+     * 社团公开页 `https://vrcc.cc/c/<短码>`；只给成员看的社团是 `null`。
+     */
+    page?: string | null;
+    /**
+     * VRChat 上的群组页（「在 VRChat 加入」）。
+     */
+    group?: string | null;
+} & {
+    /**
+     * 社团说的语言（「中文」「英语」「日语」这种）。
+     */
+    langs?: string[];
+    /**
+     * 点赞数（验证过 VRChat 的星点的）。
+     */
+    likes?: number;
+    /**
+     * **现在有公开房间在线**。和 `rooms` 不是一回事：这里只说有没有。
+     */
+    room?: boolean;
+    /**
+     * **有还没结束的公开活动**。
+     *
+     * ⚠️ 和 [`VrccMyClubDetail::events`] **不是一回事**：实测有社团
+     * `event: true` 但 `events: []`。所以「有活动」只能用来点亮角标，
+     * 不能据此期望拿得到活动详情。
+     */
+    event?: boolean;
+    /**
+     * 我关注了这个社团。
+     */
+    followed?: boolean;
+    /**
+     * **我挂着这个社团**（和 [`VrccMyClubs::mine`] 是同一件事的两种表达）。
+     */
+    member?: boolean;
+};
 /**
  * 社团页（`GET /me/clubs/{code}` 的 `club`）：列表那一行 + 详情。
  */
-export type VrccMyClubDetail =
+export type VrccMyClubDetail = ({
     /**
-     * 公开页上的那一份。
+     * 群组短码，形如 `KIPFEL.2104`。大小写都收。
      */
-    ({
-        /**
-         * 群组短码，形如 `KIPFEL.2104`。大小写都收。
-         */
-        code?: string | null;
-        /**
-         * 群组名字（来自 VRChat）。
-         */
-        name?: string | null;
-        /**
-         * 社团自己写的一句话；没写是 `null`。
-         */
-        lede?: string | null;
-        /**
-         * 标签名（「聊天」「新人友好」这些）。**这是社团的标签，不是地图的玩法分类**
-         * ——地图那边的玩法分类在接口里根本不存在。
-         */
-        tags?: string[];
-        /**
-         * VRChat 群组人数；不知道时是 `null`。
-         *
-         * 实测可以到 6871 这种量级，界面要按需要做千分位。
-         */
-        members?: number | null;
-        /**
-         * **挂着这个社团的星有几颗**（本站用户），不是群组人数。
-         *
-         * 和 [`Self::members`] 是两回事，界面上不能混在一起。
-         */
-        here?: number;
-        /**
-         * 群组成立的年份；不知道时是 `null`。
-         */
-        since?: number | null;
-        /**
-         * 评级：`1` 三等星、`2` 二等星、`3` 一等星、`4` 北极星；没有时是 `null`。
-         *
-         * 实测 15 个社团里有 3 个是 `null`，所以**不能假设一定有评级**。
-         */
-        grade?: number | null;
-        /**
-         * 评级的名字（「北极星」这种）；跟着 [`Self::grade`] 一起缺席。
-         */
-        gradeName?: string | null;
-        /**
-         * 群组图标地址；只给成员看的社团没有。
-         */
-        icon?: string | null;
-        /**
-         * 群组横幅地址；只给成员看的社团没有。
-         */
-        banner?: string | null;
-        /**
-         * 社团公开页 `https://vrcc.cc/c/<短码>`；只给成员看的社团是 `null`。
-         */
-        page?: string | null;
-        /**
-         * VRChat 上的群组页（「在 VRChat 加入」）。
-         */
-        group?: string | null;
-    } & {
-        /**
-         * 社团说的语言（「中文」「英语」「日语」这种）。
-         */
-        langs?: string[];
-        /**
-         * 点赞数（验证过 VRChat 的星点的）。
-         */
-        likes?: number;
-        /**
-         * **现在有公开房间在线**。和 `rooms` 不是一回事：这里只说有没有。
-         */
-        room?: boolean;
-        /**
-         * **有还没结束的公开活动**。
-         *
-         * ⚠️ 和 [`VrccMyClubDetail::events`] **不是一回事**：实测有社团
-         * `event: true` 但 `events: []`。所以「有活动」只能用来点亮角标，
-         * 不能据此期望拿得到活动详情。
-         */
-        event?: boolean;
-        /**
-         * 我关注了这个社团。
-         */
-        followed?: boolean;
-        /**
-         * **我挂着这个社团**（和 [`VrccMyClubs::mine`] 是同一件事的两种表达）。
-         */
-        member?: boolean;
-    }) & {
-        /**
-         * 群组简介，**分段**：`[[文字, 0|1], …]`。
-         *
-         * `1` 表示这一段是联系方式，官方要求「请打码」——网页上是默认遮住、
-         * 点了才显示。实测那些段里是**纯文字**（`"QQ群：917883584"`），没有
-         * URL，所以打码只能靠点击展开，做不了可点链接。
-         *
-         * 段里还会有 `["\n", 0]` 这种只换行的段，渲染时别当空段落丢掉。
-         *
-         * **类型只有一层 `Vec`**：每一段就是一个 `["文字", 0|1]` 两元素数组，
-         * [`VrccClubTextSeg`] 自己负责解它。写成 `Vec<Vec<…>>` 会把 `"文字"`
-         * 和 `0` 当成两个段去解，结果全是空段。
-         */
-        intro?: VrccClubTextSeg[] | null;
-        /**
-         * 社团公告；没有时是 `null`。
-         */
-        notice?: VrccClubNotice | null;
-        /**
-         * 正在开的公开房间。
-         */
-        rooms?: VrccClubRoom[];
-        /**
-         * 下次活动，最多 3 个。
-         */
-        events?: VrccClubEvent[];
-    };
+    code?: string | null;
+    /**
+     * 群组名字（来自 VRChat）。
+     */
+    name?: string | null;
+    /**
+     * 社团自己写的一句话；没写是 `null`。
+     */
+    lede?: string | null;
+    /**
+     * 标签名（「聊天」「新人友好」这些）。**这是社团的标签，不是地图的玩法分类**
+     * ——地图那边的玩法分类在接口里根本不存在。
+     */
+    tags?: string[];
+    /**
+     * VRChat 群组人数；不知道时是 `null`。
+     *
+     * 实测可以到 6871 这种量级，界面要按需要做千分位。
+     */
+    members?: number | null;
+    /**
+     * **挂着这个社团的星有几颗**（本站用户），不是群组人数。
+     *
+     * 和 [`Self::members`] 是两回事，界面上不能混在一起。
+     */
+    here?: number;
+    /**
+     * 群组成立的年份；不知道时是 `null`。
+     */
+    since?: number | null;
+    /**
+     * 评级：`1` 三等星、`2` 二等星、`3` 一等星、`4` 北极星；没有时是 `null`。
+     *
+     * 实测 15 个社团里有 3 个是 `null`，所以**不能假设一定有评级**。
+     */
+    grade?: number | null;
+    /**
+     * 评级的名字（「北极星」这种）；跟着 [`Self::grade`] 一起缺席。
+     */
+    gradeName?: string | null;
+    /**
+     * 群组图标地址；只给成员看的社团没有。
+     */
+    icon?: string | null;
+    /**
+     * 群组横幅地址；只给成员看的社团没有。
+     */
+    banner?: string | null;
+    /**
+     * 社团公开页 `https://vrcc.cc/c/<短码>`；只给成员看的社团是 `null`。
+     */
+    page?: string | null;
+    /**
+     * VRChat 上的群组页（「在 VRChat 加入」）。
+     */
+    group?: string | null;
+} & {
+    /**
+     * 社团说的语言（「中文」「英语」「日语」这种）。
+     */
+    langs?: string[];
+    /**
+     * 点赞数（验证过 VRChat 的星点的）。
+     */
+    likes?: number;
+    /**
+     * **现在有公开房间在线**。和 `rooms` 不是一回事：这里只说有没有。
+     */
+    room?: boolean;
+    /**
+     * **有还没结束的公开活动**。
+     *
+     * ⚠️ 和 [`VrccMyClubDetail::events`] **不是一回事**：实测有社团
+     * `event: true` 但 `events: []`。所以「有活动」只能用来点亮角标，
+     * 不能据此期望拿得到活动详情。
+     */
+    event?: boolean;
+    /**
+     * 我关注了这个社团。
+     */
+    followed?: boolean;
+    /**
+     * **我挂着这个社团**（和 [`VrccMyClubs::mine`] 是同一件事的两种表达）。
+     */
+    member?: boolean;
+}) & {
+    /**
+     * 群组简介，**分段**：`[[文字, 0|1], …]`。
+     *
+     * `1` 表示这一段是联系方式，官方要求「请打码」——网页上是默认遮住、
+     * 点了才显示。实测那些段里是**纯文字**（`"QQ群：917883584"`），没有
+     * URL，所以打码只能靠点击展开，做不了可点链接。
+     *
+     * 段里还会有 `["\n", 0]` 这种只换行的段，渲染时别当空段落丢掉。
+     *
+     * **类型只有一层 `Vec`**：每一段就是一个 `["文字", 0|1]` 两元素数组，
+     * [`VrccClubTextSeg`] 自己负责解它。写成 `Vec<Vec<…>>` 会把 `"文字"`
+     * 和 `0` 当成两个段去解，结果全是空段。
+     */
+    intro?: VrccClubTextSeg[] | null;
+    /**
+     * 社团公告；没有时是 `null`。
+     */
+    notice?: VrccClubNotice | null;
+    /**
+     * 正在开的公开房间。
+     */
+    rooms?: VrccClubRoom[];
+    /**
+     * 下次活动，最多 3 个。
+     */
+    events?: VrccClubEvent[];
+};
 /**
  * `GET /me/clubs/{code}` 的外层。
  */

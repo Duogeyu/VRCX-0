@@ -2278,7 +2278,12 @@ pub struct VrccClub {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VrccMyClub {
-    /// 公开页上的那一份。
+    // 公开页上的那一份。
+    //
+    // 这里**故意用普通注释而不是 `///`**：`flatten` 字段的文档会被 specta 生成到
+    // 交集类型的等号后面（`export type VrccMyClub = /** … */ ({ … }) & { … }`），
+    // 而 oxfmt 单趟格式化处理不掉那个位置——生成物与再格式化一遍的产物不一致，
+    // CI 的「Tauri Bindings Up-to-date」会因为一个纯格式问题红掉。
     #[serde(flatten)]
     pub club: VrccClub,
     /// 社团说的语言（「中文」「英语」「日语」这种）。
