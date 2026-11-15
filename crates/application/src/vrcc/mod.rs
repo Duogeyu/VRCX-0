@@ -652,6 +652,29 @@ impl VrccService {
         }
     }
 
+    /// 登录账号变了（登录、登出、换号）：按新账号重新恢复会话。
+    ///
+    /// 令牌、凭据结局和引导表态都按账号存，而 [`Self::new`] 发生在装配阶段，
+    /// 那时还没登录——仓库对「没有账号」一律答「没有」，所以那一次恢复对连过
+    /// 的玩家永远是「从没连过」：每次重启都要重新授权，首连引导也会再弹一遍。
+    /// 真正的恢复要等登录作用域就位之后再做；换号、登出时也一样，上一个账号的
+    /// 令牌、游标和未读数不能留给下一个账号。
+    ///
+    /// **只清本地，不吊销**：换号不等于玩家要在服务器上断开那个账号的授权，
+    /// 换回来时还要接着用。
+    pub fn reload_account(&self) {
+        self.remote.disconnect();
+        self.forget_unread();
+        let credential_state = restore_credential(&self.store, &self.remote);
+        let guidance_state = self.store.load_guidance().unwrap_or_default();
+        if let Ok(mut credential) = self.credential.write() {
+            *credential = credential_state;
+        }
+        if let Ok(mut guidance) = self.guidance.write() {
+            *guidance = guidance_state;
+        }
+    }
+
     /// 腕表摘要。`world_id` 由调用方给（腕表的渲染侧知道玩家在哪张图）。
     ///
     /// 纯内存读取，不发请求。返回 `None` 的三种情况：还没连上、还没拉到

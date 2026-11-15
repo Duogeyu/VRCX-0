@@ -9,6 +9,7 @@ use serde_json::json;
 use vrcx_0_application::vrcc::{
     classify_vrcc_error, StoredCredential, VrccErrorKind, VrccFailure, VrccService, VrccTokenStore,
 };
+use vrcx_0_application_core::{RuntimeAuthScopeObserver, RuntimeAuthScopeSnapshot};
 use vrcx_0_contracts::vrcc::{
     scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs,
     VrccConnectionSnapshot, VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccModelBoard,
@@ -70,6 +71,16 @@ impl VrccTokenStore for TokenStoreAdapter {
 
     fn save_guidance(&self, state: VrccGuidanceState) -> vrcx_0_application_core::Result<()> {
         self.inner.save_guidance(state)
+    }
+}
+
+/// 登录账号一变，就按新账号重新恢复星遇同频的会话（见 [`VrccService::reload_account`]）。
+///
+/// 宿主在装配时把它挂到登录作用域上。作用域只存弱引用，`DesktopVrccRuntime`
+/// 由宿主状态持有，所以订阅与宿主同寿。
+impl RuntimeAuthScopeObserver for DesktopVrccRuntime {
+    fn runtime_auth_scope_changed(&self, _snapshot: &RuntimeAuthScopeSnapshot) {
+        self.service.reload_account();
     }
 }
 
