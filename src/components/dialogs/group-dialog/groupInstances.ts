@@ -1,7 +1,9 @@
 import type {
     GroupDialogInstanceRow,
-    GroupInstanceRecord
+    GroupInstanceRecord,
+    InstanceOrigin
 } from '@/domain/entities/group';
+import { parseInstanceOrigin } from '@/domain/entities/group';
 import type { EntityRecord } from '@/domain/entities/shared';
 import { presenceLiveInstanceTag, presenceOf } from '@/domain/friends/presence';
 import type { FriendRosterById } from '@/domain/friends/types';
@@ -9,6 +11,17 @@ import { groupInstanceLocation } from '@/domain/instances/groupInstanceFacts';
 import { parseLocation } from '@/shared/utils/location';
 import { normalizeString } from '@/shared/utils/string';
 import type { CurrentUserSnapshotState } from '@/state/runtimeStore';
+
+/** 来源的权威排名：数字大的赢。加来源时**必须**在这里补一行。 */
+const ORIGIN_RANK: Record<InstanceOrigin, number> = {
+    vrchat: 100,
+    vrcc: 10,
+    unknown: 0
+};
+
+function originRank(origin: unknown): number {
+    return ORIGIN_RANK[parseInstanceOrigin(origin)];
+}
 
 type InstanceUser = EntityRecord & {
     displayName?: string;
@@ -37,6 +50,29 @@ function entityRows(value: unknown): EntityRecord[] {
     return Array.isArray(value)
         ? value.filter((row): row is EntityRecord => Boolean(entityRecord(row)))
         : [];
+}
+
+/**
+ * 两份 `users` 取并集，按 id 去重。
+ *
+ * 合并同一个 location 的两行时不能简单选一侧：好友是 `addUser` 之后才填的，
+ * 那之前这一行已有的 `users` 可能已经攒了人（同源重复时尤其明显）。并集
+ * 只会变多不会变少，任何一侧都不丢。
+ */
+function mergeUsers(left: unknown, right: unknown): EntityRecord[] {
+    const seen = new Set<string>();
+    const merged: EntityRecord[] = [];
+    for (const user of [...entityRows(left), ...entityRows(right)]) {
+        const id = normalizeString(user.id || user.userId);
+        if (id) {
+            if (seen.has(id)) {
+                continue;
+            }
+            seen.add(id);
+        }
+        merged.push(user);
+    }
+    return merged;
 }
 
 export function normalizeLocation(value: unknown) {
@@ -97,25 +133,71 @@ export function mergeGroupInstances(
             entityRecord(seed.world) || entityRecord(embeddedInstance?.world);
         const existing = byLocation.get(normalizedLocation);
         if (existing) {
-            const worldId = normalizeString(
-                seed.worldId || world?.id || parsed.worldId || existing.worldId
+            // 按来源排名决定谁赢：`'vrchat'` 权威，其余只补空缺。
+            // 排名相同（含都是 `'unknown'`）时回落到「后到者优先」。
+            const seedWins =
+                originRank(seed.origin) >= originRank(existing.origin);
+            const winner: GroupInstanceRecord = seedWins ? seed : existing;
+            const loser: GroupInstanceRecord = seedWins ? existing : seed;
+
+            // 只认「给了值」的字段，好让输的一方把空缺补上。
+            const winnerFields: Record<string, unknown> = {};
+            for (const [key, value] of Object.entries(winner)) {
+                if (value === undefined || value === null) {
+                    continue;
+                }
+                // 纯空白不算「给了值」：一个 `'   '` 会把输家的真值（星遇给的
+                // 地图名、房间标题）覆盖成看不见的东西。
+                if (typeof value === 'string' && value.trim() === '') {
+                    continue;
+                }
+                winnerFields[key] = value;
+            }
+
+            const merged = {
+                ...loser,
+                ...winnerFields
+            } as GroupInstanceRecord;
+
+            const mergedWorldId = normalizeString(
+                merged.worldId || world?.id || parsed.worldId
             );
-            const instanceId = normalizeString(
-                seed.instanceId ||
-                    seed.id ||
+            const mergedInstanceId = normalizeString(
+                merged.instanceId ||
+                    merged.id ||
                     parsed.instanceId ||
                     existing.instanceId
             );
-            const ref =
-                entityRecord(seed.ref) || embeddedInstance || existing.ref;
-            return Object.assign(existing, embeddedInstance, seed, {
-                worldId,
-                instanceId,
-                ref,
+            // `users` / `friendCount` 取并、取大：好友是 `addUser` 之后才填的，
+            // 这一行已有的可能已经攒了人，选一侧会丢数据。
+            const users = mergeUsers(existing.users, entityRows(seed.users));
+            const friendCount = Math.max(
+                Number(existing.friendCount) || 0,
+                Number(seed.friendCount) || 0
+            );
+
+            return Object.assign(existing, merged, {
+                worldId: mergedWorldId,
+                instanceId: mergedInstanceId,
+                ref:
+                    entityRecord(merged.ref) ||
+                    entityRecord(winner.ref) ||
+                    embeddedInstance ||
+                    existing.ref,
                 location: normalizedLocation,
                 tag: normalizedLocation,
-                users: existing.users,
-                friendCount: existing.friendCount
+                users,
+                friendCount,
+                // 合并后这一行归排名更高的来源。同排名时保留已有的那个，
+                // 免得「先到」被后到者悄悄改写成别的身份。
+                //
+                // 两边都没标来源时要落 `'unknown'`（和新建行走同一个口径），
+                // 不能留 `undefined`——否则同一字段会出现两种「没有来源」的表示。
+                origin: parseInstanceOrigin(
+                    seedWins
+                        ? (seed.origin ?? existing.origin)
+                        : (existing.origin ?? seed.origin)
+                )
             });
         }
 
@@ -125,6 +207,13 @@ export function mergeGroupInstances(
                 seed.id ||
                 parsed.instanceId
         );
+        // 显式的 `friendCount` 优先，`0` 也算——`||` 会把 `0` 当假值，
+        // 于是「明确没有好友」会被 `userCount`（总人数）顶掉。
+        // VRChat 的实例本来就没有这个字段，那边仍然回落到 `userCount`。
+        const declaredFriendCount =
+            typeof seed.friendCount === 'number'
+                ? seed.friendCount
+                : Number(seed.userCount || 0) || 0;
         const row: GroupDialogInstanceRow = {
             ...embeddedInstance,
             ...seed,
@@ -136,8 +225,10 @@ export function mergeGroupInstances(
             ),
             instanceId,
             users: entityRows(seed.users),
-            friendCount: Number(seed.friendCount || seed.userCount || 0) || 0,
-            ref: entityRecord(seed.ref) || embeddedInstance || seed
+            friendCount: declaredFriendCount,
+            ref: entityRecord(seed.ref) || embeddedInstance || seed,
+            // 认不出的来源落进 `'unknown'`，不会静悄悄当成 VRChat。
+            origin: parseInstanceOrigin(seed.origin)
         };
         byLocation.set(normalizedLocation, row);
         return row;

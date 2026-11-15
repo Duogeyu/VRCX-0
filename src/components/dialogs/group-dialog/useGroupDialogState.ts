@@ -25,6 +25,7 @@ import { useRuntimeStore } from '@/state/runtimeStore';
 
 import type { GroupActionStatus } from './groupDialogTypes';
 import { buildGroupDialogViewState } from './groupDialogViewState';
+import { useGroupClubInstanceRecords } from './useGroupClubInstanceRecords';
 import { useGroupDialogActiveInstances } from './useGroupDialogActiveInstances';
 import { useGroupOwnerProfile } from './useGroupOwnerProfile';
 
@@ -111,10 +112,22 @@ export function useGroupDialogState({
         groupId: normalizedGroupId,
         endpoint: currentEndpoint
     });
+    // 社团房间必须在 `useGroupDialogActiveInstances` **之前**算出来：好友是
+    // 按 location 塞进已经存在的行的，晚到就永远没人。
+    const clubInstanceRecords = useGroupClubInstanceRecords(group);
     const { activeInstances, rawActiveInstances } =
         useGroupDialogActiveInstances({
             groupId: normalizedGroupId,
-            groupInstances,
+            // VRChat 那份在这里打上来源标记——它的来源只有这个边界知道。
+            // 顺序不再影响谁赢，权威由 `origin` 决定。
+            groupInstances: [
+                ...clubInstanceRecords,
+                ...groupInstances.map((instance) =>
+                    instance.origin
+                        ? instance
+                        : { ...instance, origin: 'vrchat' as const }
+                )
+            ],
             friendsById,
             currentUserSnapshot,
             currentLocation

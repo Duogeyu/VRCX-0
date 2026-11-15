@@ -5,6 +5,7 @@
 @import './object-row.css';
 @import './model-card.css';
 @import './card-morph.css';
+@import './vrcc-club-card.css';
 /* 导览的高亮层与气泡。driver.js 自带的那份只管结构与动画，
    配色在文件末尾的 `.driver-*` 覆盖里改成主题色。 */
 @import 'driver.js/dist/driver.css';

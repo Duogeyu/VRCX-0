@@ -10,11 +10,12 @@ use vrcx_0_application::vrcc::{
     classify_vrcc_error, StoredCredential, VrccErrorKind, VrccFailure, VrccService, VrccTokenStore,
 };
 use vrcx_0_contracts::vrcc::{
-    scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot,
-    VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail,
-    VrccMyBoard, VrccMyBoardSort, VrccMyMap, VrccMyMapPage, VrccNotes, VrccRatedMaps,
-    VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccUnread,
-    VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult, VrccWristSummary,
+    scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse,
+    VrccConnectionSnapshot, VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccModelBoard,
+    VrccModelDetail, VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap,
+    VrccMyMapPage, VrccNotes, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
+    VrccStickers, VrccToday, VrccUnread, VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
+    VrccWristSummary,
 };
 use vrcx_0_outbound_adapters::LocalVrccTokenStore;
 use vrcx_0_persistence::config::ConfigRepository;
@@ -405,6 +406,36 @@ impl DesktopVrccRuntime {
     pub async fn map_page(&self, world: &str) -> Result<Option<VrccMapPage>, VrccFailure> {
         self.service
             .map_page(world)
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 社团公开页（1.18.0 起）。**不需要连接。**
+    ///
+    /// 没入驻、审核中、下架、只给成员看、不展示的，服务器一律回同样的 `404`
+    /// ——看不出是哪一种，所以统一返回 `None`，界面那块不显示就是了。
+    pub async fn club(&self, code: &str) -> Result<Option<VrccClubResponse>, VrccFailure> {
+        self.service
+            .club(code)
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 玩家能看到的社团（`GET /me/clubs`）。需要 `clubs` 敏感权限。
+    ///
+    /// 16–17 岁星池、社团功能关着时也返回 `None`（`404 club_off`），
+    /// 那是正常结论不是故障。
+    pub async fn my_clubs(&self) -> Result<Option<VrccMyClubs>, VrccFailure> {
+        self.service
+            .my_clubs()
+            .await
+            .map_err(|error| VrccFailure::from_error(&error))
+    }
+
+    /// 一个社团的社团页（`GET /me/clubs/{code}`）。需要 `clubs`。
+    pub async fn my_club(&self, code: &str) -> Result<Option<VrccMyClubResponse>, VrccFailure> {
+        self.service
+            .my_club(code)
             .await
             .map_err(|error| VrccFailure::from_error(&error))
     }

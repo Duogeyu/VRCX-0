@@ -83,6 +83,13 @@ vi.mock('@/state/friendRosterStore', () => ({
     ): T => selector({ friendsById: {} })
 }));
 
+// 这个 hook 现在会去问星遇同频社团的房间（`useGroupClubInstanceRecords`），
+// 那条链路是 react-query。整条链路用假数据替换掉：这里的用例测的是**群组
+// 实例投影**，社团房间另有自己的测试。
+vi.mock('./useGroupClubInstanceRecords', () => ({
+    useGroupClubInstanceRecords: () => []
+}));
+
 vi.mock('@/state/modalStore', () => ({
     useModalStore: <T,>(
         selector: (state: { confirm: typeof mocks.confirm }) => T

@@ -62,6 +62,7 @@ import { staffRoleIdsOf } from './GroupMembersPanel';
 import { GroupPostEditorDialog } from './GroupPostEditorDialog';
 import { GroupProfileEditDialog } from './GroupProfileEditDialog';
 import { GroupRolesDialog } from './GroupRolesDialog';
+import { GroupVrccClub } from './GroupVrccClub';
 import { useGroupDialogLanguageRows } from './useGroupDialogLanguageRows';
 import { useGroupDialogMembers } from './useGroupDialogMembers';
 import { useGroupDialogPosts } from './useGroupDialogPosts';
@@ -791,10 +792,20 @@ export function GroupDialogTabbedView({
             <EntityDialogTwoColumnLayout
                 railWidth="19rem"
                 rail={
-                    <GroupDialogHeaderSection
-                        headerModel={headerModel}
-                        headerCommands={headerCommands}
-                    />
+                    <>
+                        <GroupDialogHeaderSection
+                            headerModel={headerModel}
+                            headerCommands={headerCommands}
+                        />
+                        {/* 星遇同频社团单独成块，与群组头部平级、留出间隔。
+                            塞进头部卡片内部的话，它会和成员数、可见性、链接
+                            挤成一片，读不出「这是另一家平台的数据」——和世界
+                            详情左边那张评分卡是同一个道理。
+
+                            绝大多数群组没入驻星遇同频，那时它自己返回 `null`
+                            整块不渲染，左栏不会有任何占位。 */}
+                        <GroupVrccClub group={group} />
+                    </>
                 }
             >
                 {canEditProfile && profileMediaOpen ? (

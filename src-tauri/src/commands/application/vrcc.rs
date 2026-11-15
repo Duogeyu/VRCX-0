@@ -13,10 +13,11 @@
 use tauri::State;
 use vrcx_0_application::vrcc::{VrccDeviceAuthPrompt, VrccDeviceAuthStep, VrccFailure};
 use vrcx_0_contracts::vrcc::{
-    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccGuidanceState,
-    VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMyBoard, VrccMyBoardSort, VrccMyMap,
-    VrccMyMapPage, VrccNotes, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
-    VrccStickers, VrccToday, VrccUnread, VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccConnectionSnapshot,
+    VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMyBoard, VrccMyBoardSort,
+    VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage, VrccNotes, VrccRatedMaps,
+    VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccUnread,
+    VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult,
 };
 
 use crate::{error::AppError, state::AppState};
@@ -239,6 +240,59 @@ pub async fn app__vrcc_map_page(
         .runtime_host()
         .vrcc()
         .map_page(&world)
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 社团公开页（1.18.0 起）。**不需要连接。**
+///
+/// `code` 是 VRChat 群组短码，形如 `KIPFEL.2104`——就是群组自己的
+/// `shortCode` + `.` + `discriminator`，所以群组详情里现成能拼出来。
+///
+/// 没入驻、审核中、下架、只给成员看、不展示的，服务器一律回同样的 `404`
+/// ——**看不出是哪一种**，所以这里统一返回 `null`，界面上那块不显示就是。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_club(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<Option<VrccClubResponse>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .club(&code)
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 玩家能看到的社团（`GET /me/clubs`）。需要 `clubs` 敏感权限。
+///
+/// 16–17 岁星池、社团功能关着时也返回 `null`（`404 club_off`），那是正常
+/// 结论；缺权限则照常报错，界面据此引导玩家重新授权。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_my_clubs(
+    state: State<'_, AppState>,
+) -> Result<Option<VrccMyClubs>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .my_clubs()
+        .await
+        .map_err(|failure| AppError::Vrcc { failure })
+}
+
+/// 一个社团的社团页（`GET /me/clubs/{code}`）。需要 `clubs`。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_my_club(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<Option<VrccMyClubResponse>, AppError> {
+    state
+        .runtime_host()
+        .vrcc()
+        .my_club(&code)
         .await
         .map_err(|failure| AppError::Vrcc { failure })
 }

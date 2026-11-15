@@ -300,6 +300,16 @@ export function GroupInstanceRows({
                             />
                         </div>
                         <InstanceUserTiles instance={normalizedInstance} />
+                        {/* 来源说明挂在每一条自己的卡片里，不做列表级总结：
+                            一个列表里可能混着实时房间和补位房间，底部一句话
+                            说不清哪几条不是实时的。
+                            只认 `'vrcc'`——`'unknown'` 是什么都不知道，不能替它
+                            声称来自星遇。 */}
+                        {instance.origin === 'vrcc' ? (
+                            <div className="text-muted-foreground/70 mt-1.5 text-[10px] leading-tight">
+                                {t('dialog.group.vrcc.rooms_source')}
+                            </div>
+                        ) : null}
                     </div>
                 );
             })}

@@ -13,12 +13,13 @@ use std::time::{Duration, Instant};
 use vrcx_0_application_core::Result;
 use vrcx_0_contracts::vrcc::{
     device_auth_scope, is_dev_client, missing_scopes, ErrorDetail, ErrorLayer, TransportKind,
-    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccConnectionSnapshot, VrccCredentialState,
-    VrccCrossingCards, VrccCrossings, VrccDeviceCode, VrccError, VrccGuidanceState, VrccMapPage,
-    VrccModelBoard, VrccModelDetail, VrccMutuals, VrccMyBoard, VrccMyBoardSort, VrccMyMap,
-    VrccMyMapPage, VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingText,
-    VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread,
-    VrccUsageSnapshot, VrccVote, VrccVoteKind, VrccVoteResult, VrccWristSummary,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccConnectionSnapshot,
+    VrccCredentialState, VrccCrossingCards, VrccCrossings, VrccDeviceCode, VrccError,
+    VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals, VrccMyBoard,
+    VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage, VrccNotes,
+    VrccNotifications, VrccRatedMaps, VrccRatingText, VrccRecentNotifications, VrccStatus,
+    VrccStickers, VrccToday, VrccTokenResponse, VrccUnread, VrccUsageSnapshot, VrccVote,
+    VrccVoteKind, VrccVoteResult, VrccWristSummary,
 };
 
 /// 服务器回答 `me/unread` 是 `404 not_found`（还没更新到 1.13.0）之后，
@@ -125,6 +126,8 @@ pub trait VrccRemote: Send + Sync {
     fn announcements<'a>(&'a self) -> VrccFuture<'a, VrccAnnouncements>;
     fn stickers<'a>(&'a self) -> VrccFuture<'a, VrccStickers>;
     fn map_page<'a>(&'a self, world: &'a str) -> VrccFuture<'a, VrccMapPage>;
+    /// 社团公开页（`GET /clubs/{code}`，1.18.0 起）。**不需要连接。**
+    fn club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccClubResponse>;
     fn my_map_page<'a>(
         &'a self,
         world: &'a str,
@@ -161,6 +164,10 @@ pub trait VrccRemote: Send + Sync {
     fn notes<'a>(&'a self) -> VrccFuture<'a, VrccNotes>;
     fn today<'a>(&'a self) -> VrccFuture<'a, VrccToday>;
     fn mutuals<'a>(&'a self) -> VrccFuture<'a, VrccMutuals>;
+    /// 玩家能看到的社团（`GET /me/clubs`，1.18.0 起）。需要 `clubs` 敏感权限。
+    fn my_clubs<'a>(&'a self) -> VrccFuture<'a, VrccMyClubs>;
+    /// 一个社团的社团页（`GET /me/clubs/{code}`）。需要 `clubs`。
+    fn my_club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccMyClubResponse>;
     /// 星轨相交列表。`mark` 只在玩家真正打开该页时为 true。
     fn crossings<'a>(&'a self, mark: bool) -> VrccFuture<'a, VrccCrossings>;
     /// 只看「星轨相交对这个玩家可见吗」，不标已读。
@@ -1574,6 +1581,59 @@ impl VrccService {
             .mutuals()
             .await
             .map_err(|error| self.settle(error))
+    }
+
+    /// 一个社团的公开页（`GET /clubs/{code}`，1.18.0 起）。**不需要连接。**
+    ///
+    /// # 404 是一条正常结论，不是错误
+    ///
+    /// 没入驻、审核中、下架、只给成员看、不展示的，官方一律回同样的
+    /// `404 not_found`——**看不出是哪一种**。所以这里转成 `Ok(None)`，
+    /// 界面上只能说「这个群组没有星遇同频社团」，不能猜原因，更不能报故障。
+    ///
+    /// 这和 [`Self::map_page`] 是同一个套路：把「没有这一份数据」和「请求
+    /// 失败」分开，否则一次 404 会让群组详情整块变红。
+    pub async fn club(
+        &self,
+        code: &str,
+    ) -> std::result::Result<Option<VrccClubResponse>, VrccError> {
+        match self.remote.club(code).await {
+            Ok(club) => Ok(Some(club)),
+            Err(error) if error.is_absent() => Ok(None),
+            Err(error) => Err(self.settle(error)),
+        }
+    }
+
+    /// 玩家能看到的社团（`GET /me/clubs`）。需要 `clubs` 敏感权限。
+    ///
+    /// **`404 club_off` 也转成 `Ok(None)`**：16–17 岁星池和「社团功能关着」
+    /// 都走这一条，两种对玩家都是「没有这一块」，不该弹错误。
+    ///
+    /// 缺权限（`403 scope`）**不吞**：那要引导玩家重新授权，是个需要说出来
+    /// 的状态，和「这个星池没有社团」是两回事。
+    pub async fn my_clubs(&self) -> std::result::Result<Option<VrccMyClubs>, VrccError> {
+        self.ensure_connected()?;
+        match self.remote.my_clubs().await {
+            Ok(clubs) => Ok(Some(clubs)),
+            Err(error) if error.is_absent() => Ok(None),
+            Err(error) => Err(self.settle(error)),
+        }
+    }
+
+    /// 一个社团的社团页（`GET /me/clubs/{code}`）。需要 `clubs`。
+    ///
+    /// `404 club_gone` / `club_off` 同样转成 `Ok(None)`——玩家看不到这个社团
+    /// 是**正常结论**，界面上那块不显示就是了。
+    pub async fn my_club(
+        &self,
+        code: &str,
+    ) -> std::result::Result<Option<VrccMyClubResponse>, VrccError> {
+        self.ensure_connected()?;
+        match self.remote.my_club(code).await {
+            Ok(club) => Ok(Some(club)),
+            Err(error) if error.is_absent() => Ok(None),
+            Err(error) => Err(self.settle(error)),
+        }
     }
 
     /// 星轨相交：在同房间偶遇过的玩家列表（需要 `crossings` 敏感权限）。

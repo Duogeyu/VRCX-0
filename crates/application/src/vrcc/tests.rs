@@ -176,6 +176,8 @@ struct FakeRemote {
     /// 记录两个星轨接口收到的 `mark`。
     crossings_mark: Mutex<Option<bool>>,
     cards_mark: Mutex<Option<bool>>,
+    /// 记录 `club` 收到的短码：短码要原样透传到远端，别在应用层被改掉。
+    club_code: Mutex<Option<String>>,
     /// `models_board` 的返回；`None` 时按「旧服务器没这个接口」处理。
     models: Mutex<Option<VrccModelBoard>>,
     /// 记录 `models_board` 收到的 `(limit, sort)`。
@@ -379,6 +381,17 @@ impl VrccRemote for FakeRemote {
             Ok(VrccMapPage::default())
         })
     }
+    /// 社团公开页：同样不需要令牌，默认给一份空回答。
+    fn club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccClubResponse> {
+        let code = code.to_string();
+        Box::pin(async move {
+            *self.club_code.lock().unwrap() = Some(code);
+            if let Some(error) = self.take_error() {
+                return Err(error);
+            }
+            Ok(VrccClubResponse::default())
+        })
+    }
     fn my_map_page<'a>(
         &'a self,
         _world: &'a str,
@@ -466,6 +479,28 @@ impl VrccRemote for FakeRemote {
     }
     fn mutuals<'a>(&'a self) -> VrccFuture<'a, VrccMutuals> {
         Box::pin(async move {
+            if let Some(error) = self.take_error() {
+                return Err(error);
+            }
+            Err(token_missing())
+        })
+    }
+
+    /// 社团列表：只有「已连接 + 有 clubs」才该走到这里。
+    fn my_clubs<'a>(&'a self) -> VrccFuture<'a, VrccMyClubs> {
+        Box::pin(async move {
+            if let Some(error) = self.take_error() {
+                return Err(error);
+            }
+            Err(token_missing())
+        })
+    }
+
+    /// 社团页：同样记录收到的短码。
+    fn my_club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccMyClubResponse> {
+        let code = code.to_string();
+        Box::pin(async move {
+            *self.club_code.lock().unwrap() = Some(code);
             if let Some(error) = self.take_error() {
                 return Err(error);
             }
@@ -1148,9 +1183,10 @@ async fn device_auth_asks_for_the_scope_that_fits_the_client() {
         ("dev-test", "profile notifications maps"),
         (
             "app_0123456789abcdef",
-            // 三项敏感权限都在：`crossings` 是「星轨相交」页要用的，漏了它，
-            // 那个页签对每个玩家都永远是「缺权限」，功能等于没做。
-            "profile notifications maps mutuals crossings maps.rate maps.write",
+            // 敏感权限都在：`crossings` 是「星轨相交」页要用的、`clubs` 是
+            // 社团页要用的。漏了哪一个，对应那块对每个玩家都永远是「缺权限」，
+            // 功能等于没做——而令牌签发后改不了，事后补只能靠重新授权。
+            "profile notifications maps mutuals crossings maps.rate maps.write clubs",
         ),
     ];
     for (client, expected) in cases {
@@ -1412,6 +1448,16 @@ fn connected_service() -> (VrccService, Arc<FakeRemote>, Arc<MemoryStore>) {
     (service, remote, store)
 }
 
+/// 已连接的那个之外，再要一个**没连上**的服务。
+///
+/// 没有令牌、也没标记 connected：个人接口该在本地就拒掉，公开接口照常能走。
+fn disconnected_service() -> (VrccService, Arc<FakeRemote>, Arc<MemoryStore>) {
+    let store = Arc::new(MemoryStore::default());
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store.clone(), Arc::clone(&remote) as Arc<dyn VrccRemote>);
+    (service, remote, store)
+}
+
 /// 地图页是没有令牌也能读的公开接口。
 ///
 /// 带令牌的地图页：404 同样是「不在榜上」，不是故障。
@@ -1564,6 +1610,82 @@ async fn an_empty_world_never_reaches_the_network() {
 
     assert!(service.map_page("").await.unwrap().is_none());
     assert!(service.map_page("   ").await.unwrap().is_none());
+}
+
+/// 社团公开页：**没入驻/审核中/下架/只给成员看，服务器全回同一个 404**，
+/// 所以它必须被读成「这个群组没有星遇同频社团」，而不是故障。
+///
+/// 这条和 [`a_map_that_is_not_on_the_board_is_absent_not_broken`] 是同一个
+/// 套路，但更容易翻车：群组详情左栏那块卡片如果因为 404 报错，玩家会以为
+/// 整个群组坏了。
+#[tokio::test]
+async fn a_group_without_a_club_is_absent_not_broken() {
+    let (service, remote, _store) = connected_service();
+    remote.set_error(http(404, "not_found"));
+
+    assert!(
+        service.club("KIPFEL.2104").await.unwrap().is_none(),
+        "404 应当读成「这个群组没有社团」，不是失败"
+    );
+
+    // 5xx 仍然要报出去——那是真的坏了，不该被当成「没有社团」。
+    remote.set_error(http(500, "server"));
+    let error = service.club("KIPFEL.2104").await.unwrap_err();
+    assert_eq!(error.layer, ErrorLayer::Server);
+}
+
+/// 社团公开页不需要连接：没连星遇同频的玩家也该看得到社团卡片。
+#[tokio::test]
+async fn the_club_page_does_not_need_a_connection() {
+    let (service, _remote, _store) = disconnected_service();
+
+    // 假端口回的是空回答，只要不是 `TokenMissing` 就说明没走「先拒掉」那条路。
+    let club = service.club("KIPFEL.2104").await.unwrap();
+    assert!(club.is_some(), "公开接口不该因为没连接就拒绝");
+}
+
+/// 短码原样透传到远端：应用层不该改写大小写或加前缀。
+#[tokio::test]
+async fn the_club_code_is_passed_through_untouched() {
+    let (service, remote, _store) = connected_service();
+    let _ = service.club("KIPFEL.2104").await;
+
+    assert_eq!(
+        remote.club_code.lock().unwrap().as_deref(),
+        Some("KIPFEL.2104")
+    );
+}
+
+/// 玩家社团列表与社团页：`404 club_off` / `club_gone` 都是正常结论。
+///
+/// 16–17 岁星池、社团功能关着、玩家看不到这个社团——三种对玩家都是
+/// 「没有这一块」，不该弹错误。
+#[tokio::test]
+async fn clubs_stay_quiet_when_the_player_cannot_see_them() {
+    let (service, remote, _store) = connected_service();
+
+    remote.set_error(http(404, "club_off"));
+    assert!(service.my_clubs().await.unwrap().is_none());
+
+    remote.set_error(http(404, "club_gone"));
+    assert!(service.my_club("KIPFEL.2104").await.unwrap().is_none());
+
+    // 缺权限**不吞**：那要引导玩家重新授权，和「这个星池没有社团」不一样。
+    remote.set_error(http(403, "scope"));
+    let error = service.my_clubs().await.unwrap_err();
+    assert_eq!(error.layer, ErrorLayer::Server);
+}
+
+/// 没连接时社团列表先拒绝，不把一个必然 `TokenMissing` 的请求发出去。
+#[tokio::test]
+async fn personal_clubs_refuse_before_sending_when_disconnected() {
+    let (service, _remote, _store) = disconnected_service();
+
+    let error = service.my_clubs().await.unwrap_err();
+    assert_eq!(error.layer, ErrorLayer::Session);
+
+    let error = service.my_club("KIPFEL.2104").await.unwrap_err();
+    assert_eq!(error.layer, ErrorLayer::Session);
 }
 
 /// 贴纸是装饰素材：旧服务器没有这个接口（404）时给 `None`，

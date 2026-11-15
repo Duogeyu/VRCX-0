@@ -27,12 +27,12 @@ use serde_json::json;
 use vrcx_0_vrcc_contracts::resolve_client_id;
 use vrcx_0_vrcc_contracts::{
     ErrorDetail, ErrorLayer, HttpDetail, LocalThrottle, TransportKind, VrccAnnouncements,
-    VrccBoard, VrccBoardSort, VrccCrossingCards, VrccCrossings, VrccDeviceCode, VrccErrorBody,
-    VrccMapDetail, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals, VrccMyBoard,
-    VrccMyBoardSort, VrccMyMap, VrccMyMapPage, VrccNotes, VrccNotifications, VrccRatedMaps,
-    VrccRatingInput, VrccRatingText, VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday,
-    VrccTokenResponse, VrccUnread, VrccVote, VrccVoteKind, VrccVoteResult, VRCC_API_BASE,
-    VRCC_SITE_ORIGIN,
+    VrccBoard, VrccBoardSort, VrccClubResponse, VrccCrossingCards, VrccCrossings, VrccDeviceCode,
+    VrccErrorBody, VrccMapDetail, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals,
+    VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage,
+    VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingInput, VrccRatingText,
+    VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread,
+    VrccVote, VrccVoteKind, VrccVoteResult, VRCC_API_BASE, VRCC_SITE_ORIGIN,
 };
 
 use super::throttle::{backoff_for, RateLimiter, MAX_BACKOFF, NOTIFICATIONS_MIN_GAP};
@@ -450,6 +450,36 @@ impl VrccClient {
         Err(VrccError::new(
             ErrorLayer::Input,
             ErrorDetail::InvalidArgument("world"),
+        ))
+    }
+
+    /// 群组短码的形状检查：`^[A-Za-z0-9]{3,6}\.\d{4}$`。
+    ///
+    /// 官方 openapi 里那个 `pattern` 就是这么写的，`KIPFEL.2104` 是典型值。
+    /// **为什么要在本地先挡一遍**：短码会被直接拼进路径，而
+    /// [`Self::validate_path`] 只拒绝绝对地址。不检查形状的话，一个形如
+    /// `../me/card` 的输入能拼出 `clubs/../me/card` 这种越权路径——服务器
+    /// 也许会规范化掉，但**我们不该把这个判断交给服务器**。
+    ///
+    /// 只做形状判断，**不做规范化**：大小写原样发出去（实测服务器两种都收），
+    /// 由服务器决定认不认。
+    fn validate_club_code(code: &str) -> Result<(), VrccError> {
+        let code = code.trim();
+        let Some((head, tail)) = code.split_once('.') else {
+            return Err(VrccError::new(
+                ErrorLayer::Input,
+                ErrorDetail::InvalidArgument("code"),
+            ));
+        };
+        let head_ok =
+            (3..=6).contains(&head.len()) && head.chars().all(|ch| ch.is_ascii_alphanumeric());
+        let tail_ok = tail.len() == 4 && tail.chars().all(|ch| ch.is_ascii_digit());
+        if head_ok && tail_ok {
+            return Ok(());
+        }
+        Err(VrccError::new(
+            ErrorLayer::Input,
+            ErrorDetail::InvalidArgument("code"),
         ))
     }
 
@@ -983,6 +1013,93 @@ impl VrccClient {
             key: "map",
             min_gap: Duration::from_secs(30),
             bucket: None,
+            limiter: None,
+            bypass_gate: false,
+        })
+        .await
+    }
+
+    /// 一个社团的公开页（`GET /clubs/{code}`，1.18.0 起）。**不需要令牌。**
+    ///
+    /// 内容和 `https://vrcc.cc/c/<短码>` 一样（就是社团放在 VRChat 群组链接
+    /// 栏里的那个链接）。`{code}` 是群组短码，形如 `KIPFEL.2104`，**大小写
+    /// 都收**（实测 `kipfel.2104` 同样 200）。
+    ///
+    /// 短码就是 VRChat 群组自己的 `shortCode` + `.` + `discriminator`，
+    /// 所以群组详情里现成能拼出来，不需要额外接口反查。
+    ///
+    /// # 404 是常态
+    ///
+    /// 没入驻、审核中、下架、只给成员看、不展示的，**一律同样的
+    /// `404 not_found`**——看不出是哪一种。调用方应当把它当成「这个群组没有
+    /// 星遇同频社团」这一条**正常结论**，而不是错误弹给玩家。
+    ///
+    /// 服务器最多 1 分钟更新一次，所以本机最小间隔给 60 秒：同一分钟里反复
+    /// 打开同一个群组详情，问到的本来就是同一份。
+    pub async fn club(&self, code: &str) -> Result<VrccClubResponse, VrccError> {
+        Self::validate_club_code(code)?;
+        let path = format!("clubs/{}", encode_query_value(code.trim()));
+        self.request(Call {
+            method: "GET",
+            path: &path,
+            body: None,
+            authed: false,
+            key: "club",
+            min_gap: Duration::from_secs(60),
+            bucket: None,
+            limiter: None,
+            bypass_gate: false,
+        })
+        .await
+    }
+
+    /// 玩家所在星池里能看到的社团（`GET /me/clubs`，1.18.0 起）。
+    ///
+    /// **需要 `clubs` 敏感权限**。只读：不算社团曝光、不消红点。16–17 岁星池
+    /// 或社团功能关着时回 `404 club_off`，那是**预期的结果**，调用方该把
+    /// 「没有社团」和「网络坏了」分开说。
+    ///
+    /// 算第二份读（`MoreReads`，每天 1000 次）。顺序由服务器定（点赞多的在
+    /// 前，再按群组人数），网页上每天换一次，接口不换。
+    ///
+    /// 本机最小间隔 60 秒：这个列表一天里几乎不变，而打开任何群组详情都可能
+    /// 要查它一次，问太勤只是白花额度。
+    pub async fn my_clubs(&self) -> Result<VrccMyClubs, VrccError> {
+        self.request(Call {
+            method: "GET",
+            path: "me/clubs",
+            body: None,
+            authed: true,
+            key: "my_clubs",
+            min_gap: Duration::from_secs(60),
+            bucket: Some(QuotaBucket::MoreReads),
+            limiter: None,
+            bypass_gate: false,
+        })
+        .await
+    }
+
+    /// 一个社团的社团页（`GET /me/clubs/{code}`，1.18.0 起）。
+    ///
+    /// **需要 `clubs` 敏感权限。** 比公开的 [`Self::club`] 多简介、公告、
+    /// 正在开的公开房间、下次活动。
+    ///
+    /// 玩家看不到的社团（不在 TA 的星池、只给成员看但 TA 没挂、不展示、
+    /// 下架）回 `404 club_gone`；16–17 岁星池回 `404 club_off`。这两种和
+    /// 公开页的 `not_found` 一样都算**正常结论**。
+    ///
+    /// 限流键按短码分开：连续打开三个社团的详情不该互相卡住。
+    pub async fn my_club(&self, code: &str) -> Result<VrccMyClubResponse, VrccError> {
+        Self::validate_club_code(code)?;
+        let path = format!("me/clubs/{}", encode_query_value(code.trim()));
+        self.request(Call {
+            method: "GET",
+            path: &path,
+            body: None,
+            authed: true,
+            key: "my_club",
+            min_gap: Duration::from_secs(30),
+            bucket: Some(QuotaBucket::MoreReads),
             limiter: None,
             bypass_gate: false,
         })
@@ -1785,6 +1902,64 @@ mod tests {
         }
     }
 
+    /// 短码的形状检查。
+    ///
+    /// 短码会被直接拼进路径（`clubs/{code}`、`me/clubs/{code}`），而
+    /// [`VrccClient::validate_path`] **只拒绝绝对地址**，不管路径穿越。
+    /// 所以这一层必须自己挡：`../me/card` 拼出来的
+    /// `clubs/../me/card` 在规范化之后会落到另一个接口上。
+    #[test]
+    fn only_club_codes_of_the_documented_shape_pass() {
+        // 实测存在的两个。
+        assert!(VrccClient::validate_club_code("KIPFEL.2104").is_ok());
+        assert!(VrccClient::validate_club_code("VRCN.0483").is_ok());
+        // 全数字的头部也合法（实测有 `520.6088`、`114514.0398` 里的 114514
+        // 其实是 6 位，`520` 是 3 位）。
+        assert!(VrccClient::validate_club_code("520.6088").is_ok());
+        // 大小写都收：服务器两种都认。
+        assert!(VrccClient::validate_club_code("kipfel.2104").is_ok());
+        // 前后空白先 trim 再说。
+        assert!(VrccClient::validate_club_code("  KIPFEL.2104  ").is_ok());
+
+        for bad in [
+            "",
+            "   ",
+            // 没有点、点多一个、尾部不是 4 位
+            "KIPFEL2104",
+            "KIPFEL.2104.1",
+            "KIPFEL.210",
+            "KIPFEL.21045",
+            // 头部长度不在 3..=6
+            "KI.2104",
+            "KIPFELX.2104",
+            // 非 ASCII、路径穿越
+            "中文.2104",
+            "../me/card",
+            "KIPFEL.2104/../../me/card",
+            "KIPFEL.2104?x=1",
+        ] {
+            assert!(
+                VrccClient::validate_club_code(bad).is_err(),
+                "{bad} 不该通过"
+            );
+        }
+    }
+
+    /// 形状不对的短码不会让请求跑出去（公开版与带令牌版都要挡）。
+    #[tokio::test]
+    async fn a_club_code_of_the_wrong_shape_never_reaches_the_network() {
+        let client = client();
+        for code in ["../me/card", "KIPFEL2104", ""] {
+            let error = client.club(code).await.expect_err("形状不对应当本地拒绝");
+            assert!(error.is_our_bug(), "{code} → {error:?}");
+            let error = client
+                .my_club(code)
+                .await
+                .expect_err("形状不对应当本地拒绝");
+            assert!(error.is_our_bug(), "{code} → {error:?}");
+        }
+    }
+
     /// 形状不对的 ID 不会让请求跑出去。
     ///
     /// 这条走的是写接口：评分请求带着一个坏 ID 发出去，落点就是另一个 `me/…`
@@ -2031,8 +2206,19 @@ mod tests {
         // 敏感权限只出现在正式标识那一串；`dev-` 要了会连码都拿不到。
         assert!(VRCC_DEVICE_AUTH_SCOPE.contains("crossings"));
         assert!(!VRCC_DEV_DEVICE_AUTH_SCOPE.contains("crossings"));
+        // 社团（1.18.0）同样是敏感权限：只给正式标识。
+        assert!(VRCC_DEVICE_AUTH_SCOPE.contains("clubs"));
+        assert!(!VRCC_DEV_DEVICE_AUTH_SCOPE.contains("clubs"));
+        // `clubs` 必须作为**独立词**出现——写成 `clubss` 或 `xclubs`
+        // 都能过 `contains`，但服务器会整串判权限，等于没申请。
+        assert!(VRCC_DEVICE_AUTH_SCOPE
+            .split(' ')
+            .any(|item| item == "clubs"));
         for scope in [VRCC_DEVICE_AUTH_SCOPE, VRCC_DEV_DEVICE_AUTH_SCOPE] {
             assert!(scope.starts_with("profile notifications maps"));
+            // 权限之间用**单个空格**分隔：多空格或逗号都不会让服务器认错，
+            // 但会让「按空格 split 再比对」的本地判断（上面那条）出错。
+            assert!(!scope.contains("  "));
         }
     }
 

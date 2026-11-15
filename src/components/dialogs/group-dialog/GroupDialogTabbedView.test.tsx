@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
     cleanup,
     fireEvent,
-    render,
+    render as testingLibraryRender,
     screen,
     waitFor
 } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { GroupProfileRecord } from '@/domain/entities/group';
@@ -259,6 +260,20 @@ const editableGroup: GroupProfileRecord = {
     myMember: { permissions: ['group-data-manage'] }
 };
 
+/**
+ * 群组详情左栏那块「星遇同频社团」卡片要 `useQuery`，所以渲染它得有一个
+ * `QueryClientProvider`。每条用例单独建一个 client（`retry: false`、`gcTime: 0`）：
+ * 共用一个会让上一条的缓存在下一条里命中，断言就变成看前一条的脸色。
+ */
+function renderWithQuery(ui: ReactElement) {
+    const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } }
+    });
+    return testingLibraryRender(
+        <QueryClientProvider client={client}>{ui}</QueryClientProvider>
+    );
+}
+
 describe('GroupDialogTabbedView profile editing', () => {
     afterEach(cleanup);
 
@@ -271,7 +286,7 @@ describe('GroupDialogTabbedView profile editing', () => {
 
     it('replaces only the icon when a group data manager picks a new one', async () => {
         const onUpdateProfile = vi.fn().mockResolvedValue(true);
-        render(
+        renderWithQuery(
             <GroupDialogTabbedView
                 groupControls={{ ...groupControls, onUpdateProfile }}
                 groupResource={{ ...groupResource, group: editableGroup }}
@@ -301,7 +316,7 @@ describe('GroupDialogTabbedView profile editing', () => {
     });
 
     it('opens the details editor for a group data manager', () => {
-        render(
+        renderWithQuery(
             <GroupDialogTabbedView
                 groupControls={groupControls}
                 groupResource={{ ...groupResource, group: editableGroup }}
@@ -315,7 +330,7 @@ describe('GroupDialogTabbedView profile editing', () => {
     });
 
     it('records a group moderation tool open when opening moderation from the dialog', () => {
-        render(
+        renderWithQuery(
             <GroupDialogTabbedView
                 groupControls={groupControls}
                 groupResource={{ ...groupResource, group: editableGroup }}
@@ -336,7 +351,7 @@ describe('GroupDialogTabbedView profile editing', () => {
     });
 
     it('does not offer profile editing to moderators without group data permission', () => {
-        render(
+        renderWithQuery(
             <GroupDialogTabbedView
                 groupControls={groupControls}
                 groupResource={{
@@ -378,7 +393,7 @@ describe('GroupDialogTabbedView remote loading', () => {
             }
         ]);
 
-        render(
+        renderWithQuery(
             <GroupDialogTabbedView
                 groupControls={groupControls}
                 groupResource={groupResource}
@@ -405,7 +420,7 @@ describe('GroupDialogTabbedView remote loading', () => {
                 }
             ]);
 
-        render(
+        renderWithQuery(
             <GroupDialogTabbedView
                 groupControls={groupControls}
                 groupResource={groupResource}
@@ -429,7 +444,7 @@ describe('GroupDialogTabbedView remote loading', () => {
     });
 
     it('loads following calendars only after opening the Events tab', async () => {
-        render(
+        renderWithQuery(
             <GroupDialogTabbedView
                 groupControls={groupControls}
                 groupResource={groupResource}

@@ -53,6 +53,17 @@ export const entityQueryPolicies = Object.freeze({
         retry: 1,
         refetchOnWindowFocus: false
     }),
+    // 群组对应的星遇同频社团（`GET /clubs/{code}`）。官方写「最多 1 分钟更新
+    // 一次」，所以半小时缓存完全够——图标、人数、一句话这些一天里几乎不动。
+    //
+    // **重试 0**：绝大多数群组没入驻星遇同频，`404` 才是常态。重试只会把
+    // 一个已经确定的空结论多问两遍，白花额度也白等。
+    vrccClub: Object.freeze({
+        staleTime: 30 * MINUTE_MS,
+        gcTime: 120 * MINUTE_MS,
+        retry: 0,
+        refetchOnWindowFocus: false
+    }),
     groupCollection: Object.freeze({
         staleTime: 60 * SECOND_MS,
         gcTime: 300 * SECOND_MS,
@@ -222,6 +233,18 @@ export const queryKeys = Object.freeze({
     ) => withEndpoint(['world', worldId, 'vrcc', 'signedIn', sort], endpoint),
     // 当前令牌是否有某项权限。全局一份，按 scope 名分键。
     vrccScope: (scope: string) => ['vrcc', 'scope', scope] as const,
+    // 群组对应的星遇同频社团（`GET /clubs/{code}`）。
+    //
+    // 按**短码**分键而不是群组 ID：短码本身就是 `shortCode.discriminator`，
+    // 同一个社团从别处打开也命中同一份缓存，不会问两遍。
+    groupVrccClub: (code: string) => ['group', 'vrcc-club', code] as const,
+    // 同一个社团的**玩家视角**（`GET /me/clubs/{code}`）：公告、房间、活动、点赞、
+    // 关注全在这一份回答里。
+    //
+    // **卡片和房间列表共用这一个键**：两个组件各自建键的话，打开一次群组详情会
+    // 把同一个接口问两遍，而它在客户端侧带 30 秒 `min_gap`、还吃每日额度。
+    groupVrccClubDetail: (code: string) =>
+        ['group', 'vrcc-club-detail', code] as const,
     // 一张地图在榜上的状态（board / pending / off）。只有带令牌的接口能区分
     // 「未收录」和「待审核」，所以独立一个键，不与公开页共用。
     worldVrccMine: (worldId: string) =>

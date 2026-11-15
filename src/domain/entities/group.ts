@@ -201,7 +201,26 @@ export type GroupInstanceRecord = EntityRecord & {
     thumbnailUrl?: string;
     thumbnailImageUrl?: string;
     imageUrl?: string;
+    /**
+     * 这一行房间的数据来源；缺省按 `'unknown'` 处理。
+     *
+     * 只有 `'vrchat'` 是权威：同一个 location 撞车时其它来源一律让位，只填
+     * 它没给的字段。合并后这里表示「最后是谁在说话」。
+     */
+    origin?: InstanceOrigin;
 };
+
+/** 房间数据的来源。`'unknown'` 收纳一切认不出的值，排在最低权威。 */
+export const INSTANCE_ORIGINS = ['vrchat', 'vrcc', 'unknown'] as const;
+
+export type InstanceOrigin = (typeof INSTANCE_ORIGINS)[number];
+
+/** 认得出的给本名，认不出的一律 `'unknown'`。 */
+export function parseInstanceOrigin(raw: unknown): InstanceOrigin {
+    return (INSTANCE_ORIGINS as readonly unknown[]).includes(raw)
+        ? (raw as InstanceOrigin)
+        : 'unknown';
+}
 
 export type GroupDialogInstanceRow = GroupInstanceRecord & {
     friendCount: number;

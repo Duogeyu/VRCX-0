@@ -64,6 +64,20 @@ export type TiltGridOptions = {
     scale?: number;
     /** 写不写反光那三个变量。纯信息卡关掉，省掉每帧三次写入。默认开。 */
     glare?: boolean;
+    /**
+     * 指针从哪算起。
+     *
+     * - `'card'`（默认）：指针压在卡片上才倾，角度按**卡片自己**的尺寸归一化。
+     * - `'area'`：指针在 `areaSelector` 圈定的范围里动，卡片就跟着倾——卡片不必
+     *   在指针底下。用在一整页只有一张卡、希望它随着光标方向歪的场合。
+     *
+     * `'area'` 的原点仍是**这张卡的中心**：卡片内到边缘的算法与 `'card'` 一模一样
+     * （边缘 = 满幅），出了卡片方向不变、幅度按**详情页的跨度**平滑衰减，到详情页
+     * 边界归零。所以「光标跑到详情页边缘卡片还满幅歪着」也不会发生。
+     */
+    track?: 'card' | 'area';
+    /** `track: 'area'` 时用：从挂载点往上找最近的这个祖先当跟踪范围。 */
+    areaSelector?: string;
 };
 
 type Spring = {
@@ -89,6 +103,16 @@ type CardState = {
     lastX: number;
     lastAt: number;
     hovering: boolean;
+    /**
+     * 指针**真的压在卡片上**。
+     *
+     * 和 `hovering` 必须分开：`track: 'area'` 时整页都在跟踪、`hovering` 一直为真，
+     * 但高光只应该在指针真的进到卡片里时亮——否则光标在详情页另一头，卡片上也会
+     * 莫名其妙浮起一层光。
+     */
+    overCard: boolean;
+    /** 高光的显隐弹簧（0..1），由 [`CardState.overCard`] 驱动。 */
+    light: Spring;
     /**
      * 卡片里的标签，建状态时查一次。
      *
@@ -165,7 +189,9 @@ function clearCard(element: HTMLElement, tip: HTMLElement | null) {
 export function useTiltGrid<T extends HTMLElement>({
     amplitude = AMPLITUDE,
     scale = SCALE_ON_HOVER,
-    glare = true
+    glare = true,
+    track = 'card',
+    areaSelector
 }: TiltGridOptions = {}) {
     const [grid, setGrid] = useState<T | null>(null);
 
@@ -189,6 +215,20 @@ export function useTiltGrid<T extends HTMLElement>({
         let active: HTMLElement | null = null;
         let raf = 0;
         let last = 0;
+
+        /**
+         * 跟踪范围。默认就是挂载点自己——指针必须压在卡片上。
+         *
+         * `track: 'area'` 时换成圈定的那个祖先（详情页），指针在整页里动都算。
+         * **圈不到就退回卡片模式**（不是「拿挂载点当整页」）：那种情况下调用方
+         * 想要的整页跟随本来就不成立，按卡片自己的规矩走才不会突然变样。
+         */
+        const areaAncestor =
+            track === 'area' && areaSelector
+                ? (grid.closest<HTMLElement>(areaSelector) ?? null)
+                : null;
+        const areaFollow = areaAncestor !== null;
+        const area = areaAncestor ?? grid;
 
         const paint = (element: HTMLElement, state: CardState) => {
             // 写 CSS 变量而不是直接写 `transform`：角度、缩放和位移在
@@ -217,9 +257,12 @@ export function useTiltGrid<T extends HTMLElement>({
                 1,
                 Math.hypot(state.rx.value, state.ry.value) / reach
             );
+            // 高光只在指针真的压在卡片上时亮：倾斜可以整页跟随，光不行。
             element.style.setProperty(
                 '--tilt-glare',
-                Math.max(state.lift.value, energy).toFixed(3)
+                (
+                    state.light.value * Math.max(state.lift.value, energy)
+                ).toFixed(3)
             );
         };
 
@@ -265,6 +308,10 @@ export function useTiltGrid<T extends HTMLElement>({
                         Math.max(ZETA, 0.85),
                         dt
                     ) || moving;
+                // 高光单独一条弹簧：只在指针真的压在卡片上时淡入淡出。
+                moving =
+                    step(state.light, state.overCard ? 1 : 0, 14, 1, dt) ||
+                    moving;
 
                 paint(element, state);
 
@@ -347,6 +394,8 @@ export function useTiltGrid<T extends HTMLElement>({
                     lastX: 0,
                     lastAt: 0,
                     hovering: false,
+                    overCard: false,
+                    light: spring(),
                     tipElement:
                         element.querySelector<HTMLElement>('[data-tilt-tip]')
                 };
@@ -361,6 +410,74 @@ export function useTiltGrid<T extends HTMLElement>({
             if (event.pointerType !== 'mouse') {
                 return;
             }
+
+            // 「整片区域跟随」：原点仍是每张卡自己的中心，卡片内与 `'card'` 一致
+            // （到边缘即满幅）；出了卡片方向不变、幅度按**详情页**的跨度平滑衰减，
+            // 到详情页边界正好归零。
+            //
+            // 衰减跨度不能用卡片自己的尺寸：那样移开两三个卡片宽就只剩一两度，
+            // 看起来就是「移出去就死了」。这里按「沿方向到详情页边界」的比例算。
+            if (areaFollow) {
+                const areaRect = area.getBoundingClientRect();
+                const cards = grid.querySelectorAll<HTMLElement>('[data-tilt]');
+                for (const element of cards) {
+                    const rect = element.getBoundingClientRect();
+                    const halfW = Math.max(1, rect.width) / 2;
+                    const halfH = Math.max(1, rect.height) / 2;
+                    const cx = rect.left + halfW;
+                    const cy = rect.top + halfH;
+                    let nx = (event.clientX - cx) / halfW;
+                    let ny = (event.clientY - cy) / halfH;
+                    const radius = Math.hypot(nx, ny);
+                    if (radius > 1) {
+                        // 详情页最远那个角，在「卡片半宽归一化」的同一套坐标里。
+                        const reach = Math.max(
+                            Math.hypot(
+                                (areaRect.left - cx) / halfW,
+                                (areaRect.top - cy) / halfH
+                            ),
+                            Math.hypot(
+                                (areaRect.right - cx) / halfW,
+                                (areaRect.top - cy) / halfH
+                            ),
+                            Math.hypot(
+                                (areaRect.left - cx) / halfW,
+                                (areaRect.bottom - cy) / halfH
+                            ),
+                            Math.hypot(
+                                (areaRect.right - cx) / halfW,
+                                (areaRect.bottom - cy) / halfH
+                            )
+                        );
+                        const span = Math.max(0.001, reach - 1);
+                        const t = Math.min(1, (radius - 1) / span);
+                        // smoothstep：两端导数为 0，离开卡片和抵达边界时都不会突然跳。
+                        const decay = 1 - t * t * (3 - 2 * t);
+                        const unit = decay / radius;
+                        nx *= unit;
+                        ny *= unit;
+                    }
+                    const state = stateFor(element);
+                    state.nx = nx;
+                    state.ny = ny;
+                    state.hovering = true;
+                    // 高光只看「指针是否真的落在这张卡的矩形里」。
+                    const inX =
+                        event.clientX >= rect.left &&
+                        event.clientX <= rect.left + rect.width;
+                    const inY =
+                        event.clientY >= rect.top &&
+                        event.clientY <= rect.top + rect.height;
+                    state.overCard = inX && inY;
+                    if (state.tipElement) {
+                        state.px = event.clientX - rect.left;
+                        state.py = event.clientY - rect.top;
+                    }
+                }
+                wake();
+                return;
+            }
+
             const target = (
                 event.target as Element | null
             )?.closest<HTMLElement>('[data-tilt]');
@@ -369,6 +486,7 @@ export function useTiltGrid<T extends HTMLElement>({
                     const state = states.get(active);
                     if (state) {
                         state.hovering = false;
+                        state.overCard = false;
                     }
                     active = null;
                     wake();
@@ -380,6 +498,7 @@ export function useTiltGrid<T extends HTMLElement>({
                 const previous = states.get(active);
                 if (previous) {
                     previous.hovering = false;
+                    previous.overCard = false;
                 }
             }
             active = target;
@@ -407,6 +526,8 @@ export function useTiltGrid<T extends HTMLElement>({
             state.px = event.clientX - rect.left;
             state.py = event.clientY - rect.top;
             state.hovering = true;
+            // 卡片模式里指针本来就是压在卡上的（`closest` 认出来的）。
+            state.overCard = true;
 
             // 横向速度：标签靠它甩。首次移动没有参照，跳过。
             const nowAt = performance.now();
@@ -432,17 +553,18 @@ export function useTiltGrid<T extends HTMLElement>({
         const onLeave = () => {
             for (const state of states.values()) {
                 state.hovering = false;
+                state.overCard = false;
             }
             active = null;
             wake();
         };
 
-        grid.addEventListener('pointermove', onMove);
-        grid.addEventListener('pointerleave', onLeave);
+        area.addEventListener('pointermove', onMove);
+        area.addEventListener('pointerleave', onLeave);
 
         return () => {
-            grid.removeEventListener('pointermove', onMove);
-            grid.removeEventListener('pointerleave', onLeave);
+            area.removeEventListener('pointermove', onMove);
+            area.removeEventListener('pointerleave', onLeave);
             if (raf) {
                 cancelAnimationFrame(raf);
             }
@@ -451,7 +573,7 @@ export function useTiltGrid<T extends HTMLElement>({
             }
             states.clear();
         };
-    }, [grid, amplitude, scale, glare]);
+    }, [grid, amplitude, scale, glare, track, areaSelector]);
 
     return ref;
 }

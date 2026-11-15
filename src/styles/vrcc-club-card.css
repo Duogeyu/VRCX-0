@@ -1,0 +1,157 @@
+/* SPDX-License-Identifier: MPL-2.0 */
+
+/**
+ * 群组详情左栏那张「星遇同频社团」卡的倾斜外壳。
+ *
+ * 分工照 `model-card.css`：`useTiltGrid` 只往卡片外壳写 `--tilt-x` /
+ * `--tilt-y` / `--tilt-scale` 三个变量，复合变换在这里拼，谁改公式都不会
+ * 覆盖掉对方那次写入。
+ *
+ * **`perspective` 在外壳、`transform` 在 rotor**：外壳一旦有 `overflow: hidden`
+ * 或圆角裁剪，`preserve-3d` 会被压平，倾斜退化成平面内的错位——看上去像卡在
+ * 抖，而不是有厚度。所以外壳只管透视，裁剪留给最里面那张卡。
+ */
+@layer components {
+    .vrcc-club-card {
+        perspective: 800px;
+    }
+
+    .vrcc-club-card__rotor {
+        transform: rotateX(calc(var(--tilt-x, 0) * 1deg))
+            rotateY(calc(var(--tilt-y, 0) * 1deg)) scale(var(--tilt-scale, 1));
+        transform-style: preserve-3d;
+    }
+
+    /*
+     * 翻面：正反两片同占一格（`grid-area: 1 / 1`），所以卡片高度取两者较高的一份，
+     * 翻到一半时不会突然变高。`backface-visibility` 让背对镜头的那片不画，
+     * 但不负责命中测试——所以隐藏的那片还要靠 `inert`（写在组件里）挡掉点击和焦点。
+     */
+    .vrcc-club-card__flipper {
+        display: grid;
+        /*
+         * `minmax(0, 1fr)` 不是可有可无的：网格轨道的默认下限是 `auto`，会被内容
+         * 的 min-content 撑开。左栏是窄列，没有这一行卡片会比列还宽，右半边（徽章、
+         * 赞数、翻面按钮）直接被裁掉，还会把整个对话框撑出横向滚动条。
+         */
+        grid-template-columns: minmax(0, 1fr);
+        min-width: 0;
+        transform-style: preserve-3d;
+        transition: transform 480ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    .vrcc-club-card__flipper[data-flipped] {
+        transform: rotateY(180deg);
+    }
+
+    .vrcc-club-card__face {
+        grid-area: 1 / 1;
+        min-width: 0;
+        backface-visibility: hidden;
+    }
+
+    .vrcc-club-card__face--back {
+        transform: rotateY(180deg);
+    }
+
+    /*
+     * 高光。圆心与强度由 `useTiltGrid` 写成 `--tilt-gx/gy/glare`。
+     *
+     * 用前景色而不是纯白（`mix-blend` 也不用）：项目主题底色不固定，深色主题下
+     * 纯白会过曝，混色则会把卡片底衬染脏。峰值取 16%，比模型榜那张的 34% 低——
+     * 那张的底是整幅封面，这里底下直接压着正文。
+     */
+    .vrcc-club-card__glare {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+        border-radius: inherit;
+        opacity: var(--tilt-glare, 0);
+        background: radial-gradient(
+            farthest-corner circle at var(--tilt-gx, 50%) var(--tilt-gy, 50%),
+            color-mix(in oklch, var(--foreground) 16%, transparent) 0%,
+            color-mix(in oklch, var(--foreground) 11%, transparent) 24%,
+            color-mix(in oklch, var(--foreground) 5%, transparent) 40%,
+            transparent 62%
+        );
+    }
+
+    /*
+     * 钩子只在挂载时读一次「减少动态效果」，之后开关再变它不会重来一遍——
+     * 那之后的角度只能靠这里兜住。透视也要一起关，否则卡片会留在 3D 上下文里。
+     */
+    .reduce-effects .vrcc-club-card {
+        perspective: none;
+    }
+
+    .reduce-effects .vrcc-club-card__rotor {
+        transform: none;
+    }
+
+    .reduce-effects .vrcc-club-card__glare {
+        display: none;
+    }
+
+    /*
+     * 开卡扫光：几道宽窄不一的硬边白带，斜着横掠这张卡一次。
+     *
+     * - **只播一次**：靠「卡片一挂载就播」实现——详情页打开、社团数据到手的那一
+     *   刻才渲染这张卡，动画跟着走一遍，不循环、也不由 hover 触发。
+     * - **硬边不是柔光**：每道带子的两端取同一个位置（`42% 42%`），停下就是一道
+     *   刀口；柔光那种渐变在白卡上会糊成一团灰。
+     * - 单独一层加 `overflow: hidden`：卡片自己不加上 `overflow`，那会把
+     *   `preserve-3d` 压平（见文件头）。
+     */
+    .vrcc-club-card__sheen {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        overflow: hidden;
+        pointer-events: none;
+        border-radius: inherit;
+    }
+
+    .vrcc-club-card__sheen-band {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+            105deg,
+            transparent 0 38%,
+            color-mix(in oklch, var(--foreground) 26%, transparent) 38% 40.4%,
+            transparent 40.4% 41.8%,
+            color-mix(in oklch, var(--foreground) 92%, transparent) 41.8% 44.6%,
+            transparent 44.6% 46.2%,
+            color-mix(in oklch, var(--foreground) 48%, transparent) 46.2% 47.5%,
+            transparent 47.5%
+        );
+        /*
+         * **不要在这里加 `opacity` 淡出**：只在 `to` 里写 `opacity: 0` 会让透明度
+         * 从 1 线性淡到 0 贯穿整段——光带扫过卡片时早就是半透明的了，看起来就是
+         * 「扫了但没感觉」。末端那条带子本身已经整个跑出卡片，不需要再补透明度。
+         */
+        animation: vrcc-club-sheen 2000ms cubic-bezier(0.45, 0, 0.25, 1) 160ms
+            both;
+    }
+
+    @keyframes vrcc-club-sheen {
+        from {
+            transform: translate3d(-120%, 0, 0);
+        }
+
+        to {
+            transform: translate3d(120%, 0, 0);
+        }
+    }
+
+    /* 减少动态效果下不扫：一道横向掠过的强光正是最该关掉的那类动效。 */
+    .reduce-effects .vrcc-club-card__sheen {
+        display: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .vrcc-club-card__sheen {
+            display: none;
+        }
+    }
+}

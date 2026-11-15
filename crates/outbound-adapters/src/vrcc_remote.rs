@@ -14,11 +14,12 @@
 
 use vrcx_0_application::vrcc::{VrccConnection, VrccFuture, VrccLocalUsage, VrccRemote};
 use vrcx_0_contracts::vrcc::{
-    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccCrossingCards, VrccCrossings, VrccDeviceCode,
-    VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals, VrccMyBoard, VrccMyBoardSort,
-    VrccMyMap, VrccMyMapPage, VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingText,
-    VrccRecentNotifications, VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread,
-    VrccVote, VrccVoteKind, VrccVoteResult,
+    VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccCrossingCards,
+    VrccCrossings, VrccDeviceCode, VrccMapPage, VrccModelBoard, VrccModelDetail, VrccMutuals,
+    VrccMyBoard, VrccMyBoardSort, VrccMyClubResponse, VrccMyClubs, VrccMyMap, VrccMyMapPage,
+    VrccNotes, VrccNotifications, VrccRatedMaps, VrccRatingText, VrccRecentNotifications,
+    VrccStatus, VrccStickers, VrccToday, VrccTokenResponse, VrccUnread, VrccVote, VrccVoteKind,
+    VrccVoteResult,
 };
 use vrcx_0_vrcc_client::{now_millis, VrccSession, WINDOW_LIMIT};
 
@@ -86,6 +87,10 @@ impl VrccRemote for VrccRemoteAdapter {
 
     fn map_page<'a>(&'a self, world: &'a str) -> VrccFuture<'a, VrccMapPage> {
         Box::pin(async move { self.client().map_page(world).await })
+    }
+
+    fn club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccClubResponse> {
+        Box::pin(async move { self.client().club(code).await })
     }
 
     fn my_map_page<'a>(
@@ -164,6 +169,14 @@ impl VrccRemote for VrccRemoteAdapter {
 
     fn mutuals<'a>(&'a self) -> VrccFuture<'a, VrccMutuals> {
         Box::pin(async move { self.client().mutuals().await })
+    }
+
+    fn my_clubs<'a>(&'a self) -> VrccFuture<'a, VrccMyClubs> {
+        Box::pin(async move { self.client().my_clubs().await })
+    }
+
+    fn my_club<'a>(&'a self, code: &'a str) -> VrccFuture<'a, VrccMyClubResponse> {
+        Box::pin(async move { self.client().my_club(code).await })
     }
 
     /// 星轨相交列表。`mark` 原样透传：要不要标已读是应用层的决定

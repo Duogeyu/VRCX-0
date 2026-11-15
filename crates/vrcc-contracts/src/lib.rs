@@ -288,6 +288,25 @@ impl VrccError {
             .is_some_and(|http| http.status == 404 && http.error == "not_found")
     }
 
+    /// 社团不存在的三种 404：`not_found` / `club_off` / `club_gone`。
+    ///
+    /// 官方把它们分成三个码，但对客户端是**同一件事：这一块没有内容**。
+    ///
+    /// - `not_found`：公开页（没入驻、审核中、下架、只给成员看、不展示）
+    ///   ——五种原因回同一个码，看不出是哪一种；
+    /// - `club_off`：16–17 岁星池，或社团功能关着；
+    /// - `club_gone`：玩家看不到这个社团（不在 TA 的星池、只给成员看但 TA
+    ///   没挂、不展示、下架）。
+    ///
+    /// 三个都必须读成「没有」，不能当故障——否则一个没入驻社团的群组详情
+    /// 会整块变红。**不含 `gone`**：那个是令牌失效，要另外处理。
+    pub fn is_absent(&self) -> bool {
+        self.http().is_some_and(|http| {
+            http.status == 404
+                && matches!(http.error.as_str(), "not_found" | "club_off" | "club_gone")
+        })
+    }
+
     /// 「等一下再试」这一类：不是故障，也不是玩家做错了什么。
     ///
     /// `409 busy`（这一轮的星卡还在生成）。界面应显示「稍后再试」，
@@ -407,15 +426,20 @@ pub const VRCC_DEFAULT_CLIENT: &str = VRCC_DEV_CLIENT;
 ///
 /// 这里只列界面真正用到的：提醒、所在地图、「连上」页（`mutuals`）、
 /// 「星轨相交」页（`crossings`）、给地图打分（`maps.rate`）、给短评投票
-/// （`maps.write`）。后三个都是敏感权限，只有正式标识能要，
-/// `dev-` 用 [`VRCC_DEV_DEVICE_AUTH_SCOPE`]。实际要哪一串用
-/// [`device_auth_scope`] 选。
+/// （`maps.write`）、社团页（`clubs`）。除 `profile` / `notifications` /
+/// `maps` 之外的都算敏感权限，只有正式标识能要，`dev-` 用
+/// [`VRCC_DEV_DEVICE_AUTH_SCOPE`]。实际要哪一串用 [`device_auth_scope`] 选。
 ///
 /// **`crossings` 必须在这里**：令牌的权限是签发时定下的，事后要再拿到它
 /// 只能重新授权。不列进来，界面上的「星轨相交」页签对每一个玩家都永远
 /// 是「缺权限」——功能等于没做。
+///
+/// **`clubs` 同理，但代价不一样**：往这串里加权限会让**已经连上的玩家**
+/// 变成 `ScopeMismatch`（见 `VrccService::restore`），界面提示「重新连一次
+/// 可以多要一项权限」，他们得重新点一次授权。所以加之前先想清楚这一项
+/// 是不是真的要做——令牌一旦签发就改不了权限，事后补只能靠重新授权。
 pub const VRCC_DEVICE_AUTH_SCOPE: &str =
-    "profile notifications maps mutuals crossings maps.rate maps.write";
+    "profile notifications maps mutuals crossings maps.rate maps.write clubs";
 
 /// `dev-` 标识申请的权限：只能要普通权限，要了敏感的 `device/code`
 /// 会直接回答 `403 scope_unreviewed`，连码都拿不到。
@@ -2173,6 +2197,270 @@ pub struct VrccVoteResult {
     /// 我现在的票；来自官方的 `mine` 字段（整数）。
     #[serde(default, rename = "mine")]
     pub my_vote: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// 社团（1.18.0 起）
+// ---------------------------------------------------------------------------
+
+/// 一个社团（`GET /clubs/{code}` 的 `club`）。
+///
+/// 社团是**入驻星遇同频的 VRChat 群组**。名字、图标、横幅、人数、成立年份
+/// 都来自 VRChat 群组资料，由他们的 bot 定期同步；`lede`（一句话）和 `tags`
+/// 由社团管理者自己填。
+///
+/// # 短码就是 VRChat 群组的 `shortCode.discriminator`
+///
+/// 实测 `KIPFEL.2104` 对应的群组是 `grp_fdd4cdf6-…`，而 VRChat 群组自己的
+/// `shortCode` + `discriminator` 拼起来正好是这一串。所以**不需要额外接口
+/// 反查**：群组详情里现成就有这两个字段，拼出来直接能问。
+///
+/// # 只有「所有人可见」的社团才有回答
+///
+/// 没入驻、审核中、下架、只给成员看、不展示的，一律同样的 `404 not_found`
+/// ——和公开页一样，**看不出是哪一种**。所以界面上只能说「没有星遇同频
+/// 社团」，不能猜原因。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccClub {
+    /// 群组短码，形如 `KIPFEL.2104`。大小写都收。
+    #[serde(default)]
+    pub code: Option<String>,
+    /// 群组名字（来自 VRChat）。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 社团自己写的一句话；没写是 `null`。
+    #[serde(default)]
+    pub lede: Option<String>,
+    /// 标签名（「聊天」「新人友好」这些）。**这是社团的标签，不是地图的玩法分类**
+    /// ——地图那边的玩法分类在接口里根本不存在。
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// VRChat 群组人数；不知道时是 `null`。
+    ///
+    /// 实测可以到 6871 这种量级，界面要按需要做千分位。
+    #[serde(default)]
+    pub members: Option<i64>,
+    /// **挂着这个社团的星有几颗**（本站用户），不是群组人数。
+    ///
+    /// 和 [`Self::members`] 是两回事，界面上不能混在一起。
+    #[serde(default)]
+    pub here: i64,
+    /// 群组成立的年份；不知道时是 `null`。
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// 评级：`1` 三等星、`2` 二等星、`3` 一等星、`4` 北极星；没有时是 `null`。
+    ///
+    /// 实测 15 个社团里有 3 个是 `null`，所以**不能假设一定有评级**。
+    #[serde(default)]
+    pub grade: Option<i64>,
+    /// 评级的名字（「北极星」这种）；跟着 [`Self::grade`] 一起缺席。
+    #[serde(default)]
+    pub grade_name: Option<String>,
+    /// 群组图标地址；只给成员看的社团没有。
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// 群组横幅地址；只给成员看的社团没有。
+    #[serde(default)]
+    pub banner: Option<String>,
+    /// 社团公开页 `https://vrcc.cc/c/<短码>`；只给成员看的社团是 `null`。
+    #[serde(default)]
+    pub page: Option<String>,
+    /// VRChat 上的群组页（「在 VRChat 加入」）。
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+/// 玩家视角的社团（`GET /me/clubs` 的 `clubs[]`、`GET /me/clubs/{code}` 的 `club`）。
+///
+/// 比 [`VrccClub`] 多「我的视角」：语言、点赞数、现在有没有房、有没有活动、
+/// 关注了没、挂着没。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccMyClub {
+    // 公开页上的那一份。
+    //
+    // 这里**故意用普通注释而不是 `///`**：`flatten` 字段的文档会被 specta 生成到
+    // 交集类型的等号后面（`export type VrccMyClub = /** … */ ({ … }) & { … }`），
+    // 而 oxfmt 单趟格式化处理不掉那个位置——生成物与再格式化一遍的产物不一致，
+    // CI 的「Tauri Bindings Up-to-date」会因为一个纯格式问题红掉。
+    #[serde(flatten)]
+    pub club: VrccClub,
+    /// 社团说的语言（「中文」「英语」「日语」这种）。
+    #[serde(default)]
+    pub langs: Vec<String>,
+    /// 点赞数（验证过 VRChat 的星点的）。
+    #[serde(default)]
+    pub likes: i64,
+    /// **现在有公开房间在线**。和 `rooms` 不是一回事：这里只说有没有。
+    #[serde(default)]
+    pub room: bool,
+    /// **有还没结束的公开活动**。
+    ///
+    /// ⚠️ 和 [`VrccMyClubDetail::events`] **不是一回事**：实测有社团
+    /// `event: true` 但 `events: []`。所以「有活动」只能用来点亮角标，
+    /// 不能据此期望拿得到活动详情。
+    #[serde(default)]
+    pub event: bool,
+    /// 我关注了这个社团。
+    #[serde(default)]
+    pub followed: bool,
+    /// **我挂着这个社团**（和 [`VrccMyClubs::mine`] 是同一件事的两种表达）。
+    #[serde(default)]
+    pub member: bool,
+}
+
+/// `GET /me/clubs`：玩家所在星池里能看到的社团。
+///
+/// 需要 `clubs` 敏感权限。只读：**不算社团曝光、不消红点**。16–17 岁星池、
+/// 或社团功能关着时回 `404 club_off`。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccMyClubs {
+    /// 点赞多的在前，再按群组人数。网页上每天换一次顺序，接口不换。
+    #[serde(default)]
+    pub clubs: Vec<VrccMyClub>,
+    /// 我挂着的社团短码，按挂上的先后。
+    #[serde(default)]
+    pub mine: Vec<String>,
+}
+
+/// 社团页（`GET /me/clubs/{code}` 的 `club`）：列表那一行 + 详情。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccMyClubDetail {
+    #[serde(flatten)]
+    pub club: VrccMyClub,
+    /// 群组简介，**分段**：`[[文字, 0|1], …]`。
+    ///
+    /// `1` 表示这一段是联系方式，官方要求「请打码」——网页上是默认遮住、
+    /// 点了才显示。实测那些段里是**纯文字**（`"QQ群：917883584"`），没有
+    /// URL，所以打码只能靠点击展开，做不了可点链接。
+    ///
+    /// 段里还会有 `["\n", 0]` 这种只换行的段，渲染时别当空段落丢掉。
+    ///
+    /// **类型只有一层 `Vec`**：每一段就是一个 `["文字", 0|1]` 两元素数组，
+    /// [`VrccClubTextSeg`] 自己负责解它。写成 `Vec<Vec<…>>` 会把 `"文字"`
+    /// 和 `0` 当成两个段去解，结果全是空段。
+    #[serde(default)]
+    pub intro: Option<Vec<VrccClubTextSeg>>,
+    /// 社团公告；没有时是 `null`。
+    #[serde(default)]
+    pub notice: Option<VrccClubNotice>,
+    /// 正在开的公开房间。
+    #[serde(default)]
+    pub rooms: Vec<VrccClubRoom>,
+    /// 下次活动，最多 3 个。
+    #[serde(default)]
+    pub events: Vec<VrccClubEvent>,
+}
+
+/// 社团简介 / 公告里的一段：`[文字, 标记]`。
+///
+/// 官方用的是**两元素数组**而不是对象，所以这里要手写 `Deserialize`。
+/// 标记 `1` = 联系方式（要打码），`0` = 普通文字。
+///
+/// **序列化回对象**（`{text, hidden}`）：这个结构只会往前端走，前端拿对象
+/// 比拿 `["文字", 0]` 好读得多。`specta` 也按对象生成 TS 类型。
+#[derive(Clone, Debug, Default, Serialize, specta::Type)]
+pub struct VrccClubTextSeg {
+    /// 这一段的内容。
+    pub text: Option<String>,
+    /// 这一段是联系方式，官方要求打码显示。
+    pub hidden: bool,
+}
+
+impl<'de> Deserialize<'de> for VrccClubTextSeg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // 先把整段读成无类型值：形状不对（不是数组、元素不是两段）时
+        // **退化成空段而不是报错**——少一段简介不该让整个社团页解析失败。
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut parts = match value {
+            serde_json::Value::Array(parts) => parts.into_iter(),
+            _ => return Ok(Self::default()),
+        };
+        let text = parts.next().and_then(|part| match part {
+            serde_json::Value::String(text) => Some(text),
+            _ => None,
+        });
+        // 标记位官方只给 0 / 1；给别的数（或没有）一律当「普通文字」。
+        let hidden = parts
+            .next()
+            .and_then(|flag| flag.as_i64())
+            .is_some_and(|flag| flag == 1);
+        Ok(Self { text, hidden })
+    }
+}
+
+/// 社团公告：`{segs, until}`。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccClubNotice {
+    /// 公告正文，分段规则同 [`VrccMyClubDetail::intro`]。
+    ///
+    /// **一层 `Vec`**：每一段就是一个 `["文字", 0|1]` 两元素数组。
+    #[serde(default)]
+    pub segs: Option<Vec<VrccClubTextSeg>>,
+    /// 到什么时候为止（毫秒）。
+    #[serde(default)]
+    pub until: Option<i64>,
+}
+
+/// 社团正在开的公开房间。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccClubRoom {
+    /// 地图名；**只有地图榜审核过的才有**，否则是 `null`。
+    #[serde(default)]
+    pub map: Option<String>,
+    /// 现在几人。
+    #[serde(default)]
+    pub users: Option<i64>,
+    /// 房间上限。
+    #[serde(default)]
+    pub cap: Option<i64>,
+    /// **可以直接打开的 VRChat 启动链接**。
+    ///
+    /// 形如 `https://vrchat.com/home/launch?worldId=wrld_…&instanceId=…`，
+    /// 带 `group(...)` 这一段，所以点进去就是社团的这个房间。
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
+/// 社团的下次活动。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccClubEvent {
+    #[serde(default)]
+    pub title: Option<String>,
+    /// 开始时间（毫秒）。
+    #[serde(default)]
+    pub at: Option<i64>,
+    /// 结束时间（毫秒）。
+    #[serde(default)]
+    pub ends: Option<i64>,
+    /// 在 VRChat 打开活动页的链接。
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
+/// `GET /clubs/{code}` 的外层。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccClubResponse {
+    #[serde(default)]
+    pub club: Option<VrccClub>,
+}
+
+/// `GET /me/clubs/{code}` 的外层。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccMyClubResponse {
+    #[serde(default)]
+    pub club: Option<VrccMyClubDetail>,
 }
 
 // ---------------------------------------------------------------------------
