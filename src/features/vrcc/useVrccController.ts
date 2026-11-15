@@ -332,6 +332,16 @@ export function useVrccController() {
     >({});
     /** 正在看的模型榜排序。 */
     const modelSortRef = useRef<VrccBoardSort>('top');
+    /**
+     * 地图榜 / 模型榜各自的请求序号：只有最后发出的那一次能写回界面。
+     *
+     * 榜单请求可能在后端排队等限流（最多 10 秒），先发的不一定先回。没有序号时
+     * 谁最后回来就显示谁：搜索后马上按 Esc，缓存里的总榜先落地，迟到的搜索
+     * 结果再把它盖掉，搜索框是空的、列表却还是过滤过的；快速连点两个排序也会
+     * 停在先点的那个上。
+     */
+    const boardRequestSeq = useRef(0);
+    const modelRequestSeq = useRef(0);
     /** 已生效的搜索词；和 `state.boardQuery` 同步，供回调里同步读取。 */
     const boardQueryRef = useRef('');
     /**
@@ -481,6 +491,8 @@ export function useVrccController() {
      */
     const refreshBoards = useCallback(
         async (sort: VrccBoardViewSort = 'top', reuse = false) => {
+            const seq = ++boardRequestSeq.current;
+            const superseded = () => seq !== boardRequestSeq.current;
             const connection = connectionRef.current;
             const wantsMine =
                 connection?.connected === true &&
@@ -502,6 +514,10 @@ export function useVrccController() {
                 actualSort: VrccBoardViewSort,
                 sortSupported: boolean
             ) => {
+                // 已经有更新的请求（或断开了连接）：这份结果作废，缓存也不留。
+                if (superseded()) {
+                    return;
+                }
                 boardCache.current.set(key, {
                     view,
                     sort: actualSort,
@@ -561,6 +577,9 @@ export function useVrccController() {
                 reusePublic &&
                 Date.now() - reusePublic.at < BOARD_REUSE_MS
             ) {
+                if (superseded()) {
+                    return;
+                }
                 applyBoard(
                     reusePublic.view,
                     reusePublic.sort,
@@ -593,6 +612,7 @@ export function useVrccController() {
      */
     const refreshModels = useCallback(
         async (sort: VrccBoardSort = 'top', reuse = false) => {
+            const seq = ++modelRequestSeq.current;
             const cached = modelCache.current[sort];
             if (reuse && cached && Date.now() - cached.at < BOARD_REUSE_MS) {
                 modelSortRef.current = sort;
@@ -602,6 +622,10 @@ export function useVrccController() {
             try {
                 // 和地图榜一样取满 100 条，面板在本地分页。
                 const models = await vrccApi.models(100, sort);
+                // 迟到的旧排序：不写回界面（同 `boardRequestSeq`）。
+                if (seq !== modelRequestSeq.current) {
+                    return;
+                }
                 // `null`：旧服务器上没有这个接口。那是「这台服务器还没有
                 // 模型榜」，不是故障——显示成空的，不弹错误。
                 if (models == null) {
@@ -628,6 +652,9 @@ export function useVrccController() {
                     modelsAvailable: true
                 });
             } catch (error) {
+                if (seq !== modelRequestSeq.current) {
+                    return;
+                }
                 // 网络、限流之类的失败：保留旧数据，只把原因留给日志。
                 // 清空会把「这次没拿到」说成「一个都没有」。
                 patch({ modelsAvailable: true });
@@ -1424,8 +1451,9 @@ export function useVrccController() {
     const disconnect = useCallback(async () => {
         patch({ error: null });
         // 先推进代次：断开前发出的个人数据请求从这里开始就作废了，
-        // 它们的响应不会再写回状态。
+        // 它们的响应不会再写回状态。玩家视角的地图榜也是个人数据。
         personalEpoch.current += 1;
+        boardRequestSeq.current += 1;
         try {
             await vrccApi.disconnect();
             patch({
@@ -1456,9 +1484,16 @@ export function useVrccController() {
             // 原来这句在 `try` 里 `await` 之后：一旦 `disconnect` 抛错就跳过，
             // 于是后端已经断开、页面却还挂着「已连接」；反过来后端刻意保留了
             // 令牌、页面又可能显示成已断开。放 `finally` 保证界面跟后端一致。
-            await refreshConnection();
+            const connection = await refreshConnection();
+            // 真断开了：地图榜还是玩家视角那份，「我打的分」「去过几次」都是
+            // 上一个账号的。换回公开榜。
+            if (!connection.connected) {
+                void refreshBoards(boardSortRef.current).catch((error) => {
+                    reportError(error, 'refreshBoards');
+                });
+            }
         }
-    }, [patch, refreshConnection, reportError]);
+    }, [patch, refreshBoards, refreshConnection, reportError]);
 
     /**
      * 打开 VRCX-0 自己的世界详情窗。
