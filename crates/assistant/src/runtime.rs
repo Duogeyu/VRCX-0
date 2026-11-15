@@ -10,6 +10,7 @@ use vrcx_0_contracts::llm::{LlmEndpointDetectModelsResult, LlmRequestOptions, To
 use vrcx_0_mcp::{spawn_in_process_tools, InProcessMcpTools, McpRuntime};
 
 use crate::agent::{run_turn, TurnContext};
+use crate::choices::PendingChoices;
 use crate::config::{should_apply_playbook, PlaybookMode};
 use crate::endpoints::{
     resolve_reasoning_effort, AssistantRuntimeSelection, AssistantRuntimeStatus, EndpointStore,
@@ -35,6 +36,7 @@ pub struct AssistantController {
     tools: Arc<InProcessMcpTools>,
     tool_defs: Arc<Vec<ToolDefinition>>,
     sessions: Arc<SessionStore>,
+    choices: PendingChoices,
     auth_scope: RuntimeAuthScope,
     cancels: Arc<Mutex<HashMap<String, (String, CancellationToken)>>>,
 }
@@ -69,6 +71,7 @@ impl AssistantController {
             tools,
             tool_defs,
             sessions: Arc::new(SessionStore::with_persistence(deps.session_persistence)),
+            choices: PendingChoices::default(),
             auth_scope: deps.auth_scope,
             cancels: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -178,6 +181,18 @@ impl AssistantController {
         }
     }
 
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<(), AssistantError> {
+        self.sessions
+            .rename(&self.owner_user_id(), session_id, title)
+            .map_err(AssistantError::from)
+    }
+
+    pub fn set_session_pinned(&self, session_id: &str, pinned: bool) -> Result<(), AssistantError> {
+        self.sessions
+            .set_pinned(&self.owner_user_id(), session_id, pinned)
+            .map_err(AssistantError::from)
+    }
+
     pub fn delete_session(&self, session_id: &str) {
         let owner_user_id = self.owner_user_id();
         if self.sessions.is_visible_to(session_id, &owner_user_id) {
@@ -192,6 +207,15 @@ impl AssistantController {
             .is_visible_to(session_id, &self.owner_user_id())
         {
             self.cancel_visible(session_id);
+        }
+    }
+
+    pub fn answer_choice(&self, session_id: &str, choice_id: &str, user_id: Option<String>) {
+        if self
+            .sessions
+            .is_visible_to(session_id, &self.owner_user_id())
+        {
+            self.choices.answer(session_id, choice_id, user_id);
         }
     }
 
@@ -240,6 +264,7 @@ impl AssistantController {
                 model,
                 &stored_effort,
             ),
+            forbid_tool_calls: false,
         };
 
         let tool_defs = visible_tool_defs(&self.tool_defs, session.allow_writes);
@@ -281,6 +306,7 @@ impl AssistantController {
         let context = TurnContext {
             tools: Arc::clone(&self.tools),
             sessions: Arc::clone(&self.sessions),
+            choices: self.choices.clone(),
             emitter: AssistantEmitter::new(
                 self.bus.clone(),
                 owner_user_id,

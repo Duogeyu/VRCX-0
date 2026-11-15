@@ -1,12 +1,15 @@
 use serde::Deserialize;
 use vrcx_0_application::remote::deserialize_nonnegative_i32;
-use vrcx_0_application_core::{FavoriteEntityKind, FavoriteGroupVisibility, VrchatFavoriteType};
+use vrcx_0_application_core::{FavoriteEntityKind, FavoriteGroupVisibility};
+use vrcx_0_contracts::VrchatFavoriteType;
 
 #[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VrchatFavoriteWorldsInput {
+    #[specta(type = i32)]
     #[serde(default, deserialize_with = "deserialize_nonnegative_i32")]
     pub(crate) n: i32,
+    #[specta(type = i32)]
     #[serde(default, deserialize_with = "deserialize_nonnegative_i32")]
     pub(crate) offset: i32,
     #[serde(default)]
@@ -20,8 +23,10 @@ pub struct VrchatFavoriteWorldsInput {
 #[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VrchatFavoriteGroupsInput {
+    #[specta(type = i32)]
     #[serde(default, deserialize_with = "deserialize_nonnegative_i32")]
     pub(crate) n: i32,
+    #[specta(type = i32)]
     #[serde(default, deserialize_with = "deserialize_nonnegative_i32")]
     pub(crate) offset: i32,
     #[serde(default)]
@@ -113,7 +118,7 @@ pub struct LocalFavoriteReorderInput {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use vrcx_0_application_core::VrchatFavoriteType;
+    use vrcx_0_contracts::VrchatFavoriteType;
 
     use super::VrchatFavoriteAddInput;
 

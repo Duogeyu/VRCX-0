@@ -1,48 +1,83 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+    useCallback,
+    useEffect,
+    useEffectEvent,
+    useRef,
+    useState
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router';
 
 import { FileDropOverlay } from '@/components/file-drop/FileDropOverlay';
 import { useFileDropTarget } from '@/components/file-drop/useFileDropTarget';
+import {
+    hasCommandModifier,
+    hasOpenDialogOutside,
+    isImeComposing,
+    isKeyboardControlTarget
+} from '@/components/keyboard/keyboardShortcutGuards';
 import { PageScaffold } from '@/components/layout/PageScaffold';
 import { ToolPageHeader } from '@/components/layout/ToolPageHeader';
+import { FullscreenImageViewer } from '@/components/media/FullscreenImageViewer';
+import { preloadImages } from '@/components/media/imageDecodeCache';
+import { getRememberedScreenshotThumbnailUrl } from '@/components/media/screenshotThumbnailUrlCache';
 import { convertFileSrc } from '@/platform/tauri/assets';
-import { commands } from '@/platform/tauri/bindings';
+import { commands, type ScreenshotFacet } from '@/platform/tauri/bindings';
 import mediaFileRepository from '@/repositories/mediaFileRepository';
 import vrchatMediaRepository from '@/repositories/vrchatMediaRepository';
 import { openFolderAndSelectItem } from '@/services/shellIntegrationService';
 import { toast } from '@/services/toastService';
 import { withUploadTimeout } from '@/shared/utils/imageUpload';
+import { useAssistantChatStore } from '@/state/assistantChatStore';
 import { useModalStore } from '@/state/modalStore';
 import { useRuntimeStore } from '@/state/runtimeStore';
 import { Badge } from '@/ui/shadcn/badge';
 
-import { ScreenshotGalleryView } from './components/ScreenshotGalleryView';
+import { ScreenshotDetailViewer } from './components/ScreenshotDetailViewer';
 import {
-    ScreenshotDetailActions,
-    ScreenshotMetadataDetailsCard,
-    ScreenshotMetadataPreviewCard,
-    ScreenshotSearchToolbar
-} from './components/ScreenshotMetadataSections';
+    ScreenshotGalleryView,
+    type ScreenshotAlbumKind
+} from './components/ScreenshotGalleryView';
+import { ScreenshotSearchToolbar } from './components/ScreenshotMetadataSections';
 import { ScreenshotSearchResultsView } from './components/ScreenshotSearchResultsView';
+import { ScreenshotPrintDialog } from './screenshot-share/ScreenshotPrintDialog';
+import { copyScreenshotPrint } from './screenshot-share/screenshotPrintService';
 import {
-    buildScreenshotSearchRow,
+    EMPTY_SCREENSHOT_SEARCH,
+    hasScreenshotSearch,
+    isScreenshotVirtualFolder,
+    libraryImageSearchRow,
     normalizeScreenshotMetadata,
-    normalizeScreenshotSearchResult,
+    parseScreenshotFilterParam,
     resolvePathAfterScreenshotDelete,
-    searchResultToLibraryImage,
     SCREENSHOT_FAVORITES_FOLDER,
-    SCREENSHOT_METADATA_SEARCH_TYPES,
-    sortScreenshotRowsByNewest,
-    type ScreenshotMetadataSearchType
+    screenshotFilterFromScope,
+    screenshotScopeFromFilter,
+    type ScreenshotSearchScope
 } from './screenshotMetadataValues';
+import { useScreenshotBrowseImages } from './useScreenshotBrowseImages';
 import { useScreenshotBrowseSelection } from './useScreenshotBrowseSelection';
 import { useScreenshotBulkDelete } from './useScreenshotBulkDelete';
 import { useScreenshotFavorites } from './useScreenshotFavorites';
 import { useScreenshotGalleryController } from './useScreenshotGalleryController';
 import { useScreenshotMetadataNavigation } from './useScreenshotMetadataNavigation';
 import { useScreenshotMetadataSearch } from './useScreenshotMetadataSearch';
+import { useScreenshotSearchFacets } from './useScreenshotSearchFacets';
 import { useScreenshotZipExport } from './useScreenshotZipExport';
+
+const DETAILS_VISIBLE_STORAGE_KEY = 'VRCX_0_ScreenshotDetailsVisible';
+
+function readDetailsVisible() {
+    return localStorage.getItem(DETAILS_VISIBLE_STORAGE_KEY) !== 'false';
+}
+
+function writeDetailsVisible(visible: boolean) {
+    localStorage.setItem(DETAILS_VISIBLE_STORAGE_KEY, String(visible));
+}
+
+function hasTextSelection() {
+    return Boolean(window.getSelection()?.toString());
+}
 
 function recordFromUnknown(value: unknown): Record<string, unknown> {
     return value && typeof value === 'object' && !Array.isArray(value)
@@ -54,7 +89,6 @@ export function ScreenshotMetadataPage() {
     const [searchParams, setSearchParams] = useSearchParams();
     const { i18n, t } = useTranslation();
     const confirm = useModalStore((state) => state.confirm);
-    const openImagePreview = useModalStore((state) => state.openImagePreview);
     const screenshotCacheStatus = useRuntimeStore(
         (state) => state.hostCapabilities.screenshotCache
     );
@@ -66,47 +100,52 @@ export function ScreenshotMetadataPage() {
         currentUserSnapshot?.tags?.includes?.('system_supporter') ||
         globalThis.$debug?.debugVrcPlus
     );
-    const imageVersionRef = useRef(0);
+    const imageVersionsRef = useRef(new Map<string, number>());
     const metadataRequestRef = useRef(0);
     const searchRequestRef = useRef(0);
     const routePath = searchParams.get('path') || '';
     const routeFolder = searchParams.get('folder') || '';
     const isGalleryMode = !routePath;
+    const routeFilter = searchParams.get('filter') || '';
     const {
-        currentSearchType,
         removeSearchPaths,
         resetSearchResults,
+        searchDraft,
         searchLayout,
         searchNavigationPaths,
-        searchQuery,
         searchRows,
+        searchScope,
         searchSort,
-        searchType,
         searchViewMode,
         selectedPath,
-        selectedPathIndex,
+        setSearchDraft,
         setSearchLayout,
-        setSearchQuery,
         setSearchResults,
-        setSearchType,
+        setSearchScope,
         setSearchViewMode,
         setSelectedPath,
         sortedSearchImages,
         sortedSearchRows,
-        toggleSearchSort
+        toggleSearchSort,
+        withoutPeopleCount
     } = useScreenshotMetadataSearch();
+    const searchKey = JSON.stringify(searchScope);
     const showSearchResults = searchViewMode === 'results';
     const [metadata, setMetadata] = useState<ReturnType<
         typeof normalizeScreenshotMetadata
     > | null>(null);
     const [metadataError, setMetadataError] = useState('');
     const [imageUrl, setImageUrl] = useState('');
+    const [printPaths, setPrintPaths] = useState<string[] | null>(null);
     const [isMetadataLoading, setIsMetadataLoading] = useState(false);
     const [isSearchLoading, setIsSearchLoading] = useState(false);
     const [isDeletingMetadata, setIsDeletingMetadata] = useState(false);
     const [isDeletingFile, setIsDeletingFile] = useState(false);
     const [isUploadingScreenshot, setIsUploadingScreenshot] = useState(false);
-    const [isDetailsVisible, setIsDetailsVisible] = useState(true);
+    const [isDetailsVisible, setIsDetailsVisible] =
+        useState(readDetailsVisible);
+    const [galleryRevealPath, setGalleryRevealPath] = useState('');
+    const [isFullscreenOpen, setIsFullscreenOpen] = useState(false);
     const dateLocale = i18n.resolvedLanguage || i18n.language;
     const {
         folderTree,
@@ -142,6 +181,10 @@ export function ScreenshotMetadataPage() {
         setFavorite
     } = useScreenshotFavorites(Boolean(screenshotCacheStatus?.available));
     const lastScanAt = scanStatus?.lastScanAt;
+    const { peopleFacets, worldFacets } = useScreenshotSearchFacets(
+        Boolean(screenshotCacheStatus?.available),
+        lastScanAt
+    );
     useEffect(() => {
         if (lastScanAt) {
             void reloadFavorites();
@@ -149,18 +192,19 @@ export function ScreenshotMetadataPage() {
     }, [lastScanAt, reloadFavorites]);
     const isFavoritesFolder =
         selectedGalleryFolder === SCREENSHOT_FAVORITES_FOLDER;
-    const browseImages = isFavoritesFolder
-        ? favoriteImages
-        : visibleGalleryImages;
-    const visibleGalleryImagePaths = useMemo(
-        () => browseImages.map((image) => image.path),
-        [browseImages]
+    const {
+        images: browseImages,
+        paths: visibleGalleryImagePaths,
+        setSort: setGallerySort,
+        sort: gallerySort
+    } = useScreenshotBrowseImages(
+        isFavoritesFolder ? favoriteImages : visibleGalleryImages
     );
     const browseSelection = useScreenshotBrowseSelection(
         visibleGalleryImagePaths
     );
     const { bulkDeleteRunning, deleteScreenshots } = useScreenshotBulkDelete({
-        scopeKey: showSearchResults ? `search:${searchQuery}` : 'browse',
+        scopeKey: showSearchResults ? `search:${searchKey}` : 'browse',
         removeDeletedImages: (paths) => {
             removeGalleryImages(paths);
             removeSearchPaths(paths);
@@ -170,6 +214,24 @@ export function ScreenshotMetadataPage() {
         refreshGalleryTree
     });
     const { exportScreenshots } = useScreenshotZipExport();
+
+    const clearGalleryRevealPath = useCallback(() => {
+        setGalleryRevealPath('');
+    }, []);
+
+    const toggleDetailsVisible = useCallback(() => {
+        const nextVisible = !isDetailsVisible;
+        setIsDetailsVisible(nextVisible);
+        writeDetailsVisible(nextVisible);
+    }, [isDetailsVisible]);
+
+    const screenshotImageUrl = useCallback(
+        (path: string) =>
+            path
+                ? `${convertFileSrc(path, 'vrcx-0-img')}?v=${imageVersionsRef.current.get(path) ?? 0}`
+                : '',
+        []
+    );
 
     const updateRoutePath = useCallback(
         (path: string, folderPath?: string) => {
@@ -231,6 +293,7 @@ export function ScreenshotMetadataPage() {
             metadataRequestRef.current = requestId;
             setIsMetadataLoading(true);
             setMetadataError('');
+            setImageUrl(screenshotImageUrl(path));
 
             try {
                 const rawMetadata = recordFromUnknown(
@@ -272,14 +335,11 @@ export function ScreenshotMetadataPage() {
                 const nextMetadataError = rawMetadata?.error
                     ? String(rawMetadata.error)
                     : '';
-                imageVersionRef.current += 1;
-
                 setMetadata(nextMetadata);
                 setMetadataError(nextMetadataError);
                 setSelectedPath(nextMetadata.filePath);
-                setImageUrl(
-                    `${convertFileSrc(nextMetadata.filePath, 'vrcx-0-img')}?v=${imageVersionRef.current}`
-                );
+                setGalleryRevealPath(nextMetadata.filePath);
+                setImageUrl(screenshotImageUrl(nextMetadata.filePath));
             } catch (error) {
                 if (metadataRequestRef.current !== requestId) {
                     return;
@@ -299,7 +359,7 @@ export function ScreenshotMetadataPage() {
                 }
             }
         },
-        [setSelectedPath, t]
+        [screenshotImageUrl, setSelectedPath, t]
     );
 
     useEffect(() => {
@@ -310,46 +370,65 @@ export function ScreenshotMetadataPage() {
         loadScreenshot(routePath, true);
     }, [loadScreenshot, routePath, setSearchViewMode]);
 
-    const { canNavigateNext, canNavigatePrev, navigateNext, navigatePrev } =
-        useScreenshotMetadataNavigation({
-            enabled: !isGalleryMode && searchViewMode === 'detail',
-            loadScreenshot,
-            metadata,
-            onPathChange: updateRoutePath,
-            searchNavigationPaths,
-            selectedPath,
-            setSelectedPath
-        });
+    const isDetailView = !isGalleryMode && searchViewMode === 'detail';
+    const {
+        canNavigateNext,
+        canNavigatePrev,
+        navigateNext,
+        navigatePrev,
+        nextFolderPath,
+        nextPath,
+        prevFolderPath,
+        prevPath
+    } = useScreenshotMetadataNavigation({
+        browseNavigationPaths: visibleGalleryImagePaths,
+        crossFolderAtEdges: !isScreenshotVirtualFolder(selectedGalleryFolder),
+        enabled: isDetailView && !isFullscreenOpen,
+        loadScreenshot,
+        metadata,
+        onPathChange: updateRoutePath,
+        reverseMetadataOrder: gallerySort === 'captured-desc',
+        searchNavigationPaths,
+        selectedPath,
+        setSelectedPath
+    });
+
+    const isSearchNavigation = searchNavigationPaths.includes(selectedPath);
+    const filmstripImages = isSearchNavigation
+        ? sortedSearchImages
+        : browseImages;
+    const navigationPaths = isSearchNavigation
+        ? searchNavigationPaths
+        : visibleGalleryImagePaths;
+    const navigationIndex = navigationPaths.indexOf(selectedPath);
 
     useEffect(() => {
-        function handleDetailsShortcut(event: KeyboardEvent) {
-            const target = event.target;
-            if (
-                isGalleryMode ||
-                searchViewMode !== 'detail' ||
-                event.altKey ||
-                event.ctrlKey ||
-                event.metaKey ||
-                event.shiftKey ||
-                event.key.toLowerCase() !== 'i' ||
-                (target instanceof HTMLElement &&
-                    (target.isContentEditable ||
-                        target.tagName === 'INPUT' ||
-                        target.tagName === 'TEXTAREA' ||
-                        target.tagName === 'SELECT'))
-            ) {
-                return;
-            }
-
-            event.preventDefault();
-            setIsDetailsVisible((visible) => !visible);
+        if (isDetailView) {
+            preloadImages(
+                [
+                    prevPath,
+                    nextPath,
+                    navigationPaths[navigationIndex + 2] ?? '',
+                    navigationIndex >= 2
+                        ? navigationPaths[navigationIndex - 2]
+                        : ''
+                ].map(screenshotImageUrl)
+            );
         }
+    }, [
+        isDetailView,
+        navigationIndex,
+        navigationPaths,
+        nextPath,
+        prevPath,
+        screenshotImageUrl
+    ]);
 
-        window.addEventListener('keydown', handleDetailsShortcut);
-        return () => {
-            window.removeEventListener('keydown', handleDetailsShortcut);
-        };
-    }, [isGalleryMode, searchViewMode]);
+    useEffect(() => {
+        if (!isDetailView || !imageUrl) {
+            setIsFullscreenOpen(false);
+        }
+    }, [imageUrl, isDetailView]);
 
     async function openFolder() {
         if (!metadata?.filePath) {
@@ -391,6 +470,12 @@ export function ScreenshotMetadataPage() {
         }
     }
 
+    async function copyPrint() {
+        if (metadata?.filePath) {
+            await copyScreenshotPrint(metadata.filePath);
+        }
+    }
+
     async function deleteMetadata() {
         const filePath = metadata?.filePath || '';
         if (!filePath) {
@@ -425,6 +510,10 @@ export function ScreenshotMetadataPage() {
                 type: 'success',
                 title: t('message.screenshot_metadata.deleted')
             });
+            imageVersionsRef.current.set(
+                filePath,
+                (imageVersionsRef.current.get(filePath) ?? 0) + 1
+            );
             await loadScreenshot(filePath, true);
         } catch (error) {
             toast.add({
@@ -458,18 +547,35 @@ export function ScreenshotMetadataPage() {
             return;
         }
 
-        const nextTarget = resolvePathAfterScreenshotDelete(metadata);
+        const neighborPath = nextPath || prevPath;
+        const neighborFolderPath = nextPath ? nextFolderPath : prevFolderPath;
+        const fallbackTarget = neighborPath
+            ? null
+            : resolvePathAfterScreenshotDelete(metadata);
         setIsDeletingFile(true);
 
         try {
             await commands.appDeleteScreenshotFile(filePath);
             forgetFavoritePaths([filePath]);
+            removeGalleryImages([filePath]);
+            removeSearchPaths([filePath]);
             toast.add({
                 type: 'success',
                 title: t('message.screenshot_metadata.file_deleted')
             });
-            if (nextTarget) {
-                updateRoutePath(nextTarget.filePath, nextTarget.folderPath);
+            if (neighborPath) {
+                if (neighborFolderPath) {
+                    updateRoutePath(neighborPath, neighborFolderPath);
+                } else {
+                    updateRoutePath(neighborPath);
+                }
+                return;
+            }
+            if (fallbackTarget) {
+                updateRoutePath(
+                    fallbackTarget.filePath,
+                    fallbackTarget.folderPath
+                );
                 return;
             }
             openGalleryRoute();
@@ -544,17 +650,87 @@ export function ScreenshotMetadataPage() {
         }
     }
 
-    async function runSearch(
-        nextSearchType: ScreenshotMetadataSearchType['value'] = searchType,
-        nextSearchQuery: string = searchQuery
-    ) {
-        const query = nextSearchQuery.trim();
-        const selectedSearchType =
-            SCREENSHOT_METADATA_SEARCH_TYPES.find(
-                (type) => type.value === nextSearchType
-            ) ?? SCREENSHOT_METADATA_SEARCH_TYPES[0];
+    function toggleCurrentFavorite() {
+        const filePath = metadata?.filePath;
+        if (filePath) {
+            void setFavorite(filePath, !favoritePaths.has(filePath));
+        }
+    }
 
-        if (!query) {
+    function selectDetailPath(path: string) {
+        setSelectedPath(path);
+        updateRoutePath(path);
+    }
+
+    function backFromDetail() {
+        if (isSearchNavigation && searchRows.length) {
+            setSearchViewMode('results');
+            return;
+        }
+        openGalleryRoute();
+    }
+
+    const handleViewerShortcut = useEffectEvent((event: KeyboardEvent) => {
+        if (
+            event.repeat ||
+            isImeComposing(event) ||
+            isKeyboardControlTarget(event.target) ||
+            hasOpenDialogOutside(
+                document.querySelector('[data-fullscreen-image-viewer]')
+            )
+        ) {
+            return;
+        }
+        const key = event.key.toLowerCase();
+        if (hasCommandModifier(event)) {
+            if (key === 'c' && !event.altKey && !hasTextSelection()) {
+                event.preventDefault();
+                if (event.shiftKey) {
+                    void copyPrint();
+                } else {
+                    void copyImage();
+                }
+            }
+            return;
+        }
+        if (event.shiftKey) {
+            return;
+        }
+        if (key === 'i') {
+            event.preventDefault();
+            toggleDetailsVisible();
+            return;
+        }
+        if (key === ' ') {
+            event.preventDefault();
+            if (imageUrl) {
+                setIsFullscreenOpen((current) => !current);
+            }
+            return;
+        }
+        if (key === 'f') {
+            event.preventDefault();
+            toggleCurrentFavorite();
+            return;
+        }
+        if (event.key === 'Delete' && !isDeletingFile) {
+            event.preventDefault();
+            void deleteScreenshotFile();
+        }
+    });
+
+    useEffect(() => {
+        if (!isDetailView) {
+            return undefined;
+        }
+        window.addEventListener('keydown', handleViewerShortcut);
+        return () => {
+            window.removeEventListener('keydown', handleViewerShortcut);
+        };
+    }, [isDetailView]);
+
+    async function runSearch(scope: ScreenshotSearchScope) {
+        if (!hasScreenshotSearch(scope)) {
             searchRequestRef.current += 1;
             resetSearchContext();
             if (metadata?.filePath) {
@@ -569,34 +745,20 @@ export function ScreenshotMetadataPage() {
         setSearchViewMode('results');
 
         try {
-            const results = await commands.appFindScreenshotsBySearch(
-                query,
-                selectedSearchType.index
+            const result = await commands.appQueryScreenshots(
+                screenshotFilterFromScope(scope)
             );
 
             if (searchRequestRef.current !== requestId) {
                 return;
             }
 
-            if (!Array.isArray(results) || results.length === 0) {
-                setSearchResults({ rows: [], images: [] });
-                setSelectedPath('');
-                setMetadataError('');
-                return;
-            }
-
-            const rows = results.map((result) =>
-                buildScreenshotSearchRow(
-                    normalizeScreenshotSearchResult(result),
-                    selectedSearchType,
-                    query,
-                    dateLocale
-                )
-            );
-
             setSearchResults({
-                rows: sortScreenshotRowsByNewest(rows),
-                images: results.map(searchResultToLibraryImage)
+                rows: result.images.map((image) =>
+                    libraryImageSearchRow(image, scope, dateLocale)
+                ),
+                images: result.images,
+                withoutPeople: result.withoutPeople
             });
             setMetadataError('');
             setSelectedPath('');
@@ -615,26 +777,86 @@ export function ScreenshotMetadataPage() {
         }
     }
 
-    function handleSearchTypeChange(value: string | null) {
-        const nextType = SCREENSHOT_METADATA_SEARCH_TYPES.find(
-            (type) => type.value === value
-        )?.value;
-        if (!nextType) {
+    function updateSearchScope(patch: Partial<ScreenshotSearchScope>) {
+        const next = { ...searchScope, ...patch };
+        setSearchScope(next);
+        void runSearch(next);
+    }
+
+    function openScreenshotAlbum(
+        kind: ScreenshotAlbumKind,
+        facet: ScreenshotFacet
+    ) {
+        const scope: ScreenshotSearchScope = {
+            ...EMPTY_SCREENSHOT_SEARCH,
+            people: kind === 'person' ? [facet.id] : [],
+            worlds: kind === 'world' ? [facet.id] : []
+        };
+        setSearchScope(scope);
+        setSearchDraft('');
+        void runSearch(scope);
+    }
+
+    function askAssistant() {
+        const [personId] = searchScope.people;
+        const [worldId] = searchScope.worlds;
+        const onlyPerson =
+            searchScope.people.length === 1 && !searchScope.worlds.length;
+        const onlyWorld =
+            searchScope.worlds.length === 1 && !searchScope.people.length;
+        const facet = onlyPerson
+            ? peopleFacets.find((item) => item.id === personId)
+            : onlyWorld
+              ? worldFacets.find((item) => item.id === worldId)
+              : undefined;
+        useAssistantChatStore.getState().startAssistantDraft({
+            topic: 'screenshots',
+            target: facet
+                ? {
+                      kind: onlyPerson ? 'user' : 'world',
+                      id: facet.id,
+                      name: facet.name || facet.id
+                  }
+                : null
+        });
+    }
+
+    const applyRouteFilter = useEffectEvent((value: string) => {
+        const filter = parseScreenshotFilterParam(value);
+        setSearchParams((current) => {
+            const next = new URLSearchParams(current);
+            next.delete('filter');
+            return next;
+        });
+        if (!filter) {
             return;
         }
-        setSearchType(nextType);
-        if (searchQuery.trim()) {
-            setSearchResults({ rows: [], images: [] });
-            setSelectedPath('');
+        const scope = screenshotScopeFromFilter(filter);
+        setSearchScope(scope);
+        setSearchDraft(scope.text);
+        void runSearch(scope);
+    });
+
+    useEffect(() => {
+        if (routeFilter) {
+            applyRouteFilter(routeFilter);
         }
-        runSearch(nextType);
-    }
+    }, [routeFilter]);
 
     const fileDropActive = useFileDropTarget({
         enabled: Boolean(screenshotCacheStatus?.available),
         onDrop: (paths) => {
+            const [path] = paths;
             resetSearchContext({ clearQuery: true });
-            openDetailPath(paths[0]);
+            if (path && isScreenshotVirtualFolder(selectedGalleryFolder)) {
+                metadataRequestRef.current += 1;
+                setMetadata(null);
+                setMetadataError('');
+                setImageUrl('');
+                updateRoutePath(path, path.replace(/[\\/][^\\/]*$/, ''));
+                return;
+            }
+            openDetailPath(path);
         }
     });
 
@@ -675,22 +897,31 @@ export function ScreenshotMetadataPage() {
             />
 
             <ScreenshotSearchToolbar
-                searchQuery={searchQuery}
-                searchType={searchType}
+                scope={searchScope}
+                draft={searchDraft}
+                peopleFacets={peopleFacets}
+                worldFacets={worldFacets}
+                isSearching={isSearchLoading}
                 searchLayout={searchLayout}
                 showResultControls={showSearchResults}
                 searchRowsCount={searchRows.length}
-                searchNavigationCount={searchNavigationPaths.length}
-                selectedPathIndex={selectedPathIndex}
-                onSearchQueryChange={setSearchQuery}
-                onSearchTypeChange={handleSearchTypeChange}
-                onSearch={() => {
-                    runSearch();
-                }}
+                withoutPeopleCount={withoutPeopleCount}
+                onDraftChange={setSearchDraft}
+                onScopeChange={(people, worlds) =>
+                    updateSearchScope({ people, worlds })
+                }
+                onCommitText={() => updateSearchScope({ text: searchDraft })}
+                onDateRangeChange={(dateFrom, dateTo) =>
+                    updateSearchScope({ dateFrom, dateTo })
+                }
+                onPeopleMatchChange={(peopleMatch) =>
+                    updateSearchScope({ peopleMatch })
+                }
                 onSearchLayoutChange={setSearchLayout}
                 onClearSearch={() => {
                     resetSearchContext({ clearQuery: true });
                 }}
+                onAskAssistant={askAssistant}
             />
 
             {showSearchResults ? (
@@ -699,9 +930,11 @@ export function ScreenshotMetadataPage() {
                     layout={searchLayout}
                     images={sortedSearchImages}
                     rows={sortedSearchRows}
-                    currentSearchType={currentSearchType}
+                    showMatch={Boolean(
+                        searchScope.people.length || searchScope.text.trim()
+                    )}
                     searchSort={searchSort}
-                    searchQuery={searchQuery}
+                    searchKey={searchKey}
                     selectedPath={selectedPath}
                     isDeleteRunning={bulkDeleteRunning}
                     onToggleSearchSort={toggleSearchSort}
@@ -717,6 +950,8 @@ export function ScreenshotMetadataPage() {
                 <ScreenshotGalleryView
                     folderTree={folderTree}
                     images={browseImages}
+                    sort={gallerySort}
+                    onSortChange={setGallerySort}
                     isImagesLoading={
                         isFavoritesFolder
                             ? isFavoritesLoading && favoriteImages.length === 0
@@ -747,6 +982,8 @@ export function ScreenshotMetadataPage() {
                     onScrollPositionChange={updateGalleryScrollPosition}
                     isDeleteRunning={bulkDeleteRunning}
                     restoreScrollTop={selectedGalleryScrollTop}
+                    revealPath={galleryRevealPath}
+                    onRevealPathConsumed={clearGalleryRevealPath}
                     selection={browseSelection}
                     favorites={{
                         paths: favoritePaths,
@@ -759,91 +996,113 @@ export function ScreenshotMetadataPage() {
                             void confirmForgetMissingFavorites();
                         }
                     }}
+                    albums={{
+                        worlds: worldFacets,
+                        people: peopleFacets,
+                        onOpen: openScreenshotAlbum
+                    }}
                 />
             ) : (
-                <>
-                    <ScreenshotDetailActions
-                        metadata={metadata}
-                        isVrcPlusSupporter={isVrcPlusSupporter}
-                        isUploadingScreenshot={isUploadingScreenshot}
-                        isDeletingMetadata={isDeletingMetadata}
-                        isDeletingFile={isDeletingFile}
-                        onBackToGallery={openGalleryRoute}
-                        onOpenFolder={() => {
-                            openFolder();
-                        }}
-                        onCopyImage={() => {
-                            copyImage();
-                        }}
-                        onUpload={() => {
-                            uploadScreenshotToGallery();
-                        }}
-                        onDelete={() => {
-                            deleteMetadata();
-                        }}
-                        onDeleteFile={() => {
-                            deleteScreenshotFile();
-                        }}
-                        isFavorite={favoritePaths.has(metadata?.filePath || '')}
-                        onToggleFavorite={() => {
-                            const filePath = metadata?.filePath;
-                            if (filePath) {
-                                void setFavorite(
-                                    filePath,
-                                    !favoritePaths.has(filePath)
-                                );
-                            }
-                        }}
-                    />
-
-                    <div
-                        className={
-                            isDetailsVisible
-                                ? 'grid min-h-0 flex-1 gap-6 xl:grid-cols-[minmax(0,1.15fr)_380px]'
-                                : 'grid min-h-0 flex-1'
+                <ScreenshotDetailViewer
+                    metadata={metadata}
+                    metadataError={metadataError}
+                    imageUrl={imageUrl}
+                    placeholderUrl={
+                        imageUrl
+                            ? getRememberedScreenshotThumbnailUrl(routePath)
+                            : ''
+                    }
+                    isMetadataLoading={isMetadataLoading}
+                    filmstripImages={filmstripImages}
+                    positionLabel={
+                        navigationIndex >= 0 && navigationPaths.length > 1
+                            ? `${navigationIndex + 1}/${navigationPaths.length}`
+                            : ''
+                    }
+                    canNavigatePrev={canNavigatePrev}
+                    canNavigateNext={canNavigateNext}
+                    isDetailsVisible={isDetailsVisible}
+                    isFavorite={favoritePaths.has(metadata?.filePath || '')}
+                    isVrcPlusSupporter={isVrcPlusSupporter}
+                    isUploadingScreenshot={isUploadingScreenshot}
+                    isDeletingMetadata={isDeletingMetadata}
+                    isDeletingFile={isDeletingFile}
+                    backLabel={
+                        isSearchNavigation && searchRows.length
+                            ? t('dialog.screenshot_metadata.back_to_results', {
+                                  count: searchRows.length
+                              })
+                            : t('dialog.screenshot_metadata.gallery')
+                    }
+                    onBack={backFromDetail}
+                    onNavigatePrev={() => {
+                        void navigatePrev();
+                    }}
+                    onNavigateNext={() => {
+                        void navigateNext();
+                    }}
+                    onSelectPath={selectDetailPath}
+                    onToggleDetails={toggleDetailsVisible}
+                    onToggleFavorite={toggleCurrentFavorite}
+                    onCopyImage={() => {
+                        void copyImage();
+                    }}
+                    onOpenPrint={() => {
+                        if (metadata?.filePath) {
+                            setPrintPaths([metadata.filePath]);
                         }
-                    >
-                        <ScreenshotMetadataPreviewCard
-                            metadata={metadata}
-                            imageUrl={imageUrl}
-                            isMetadataLoading={isMetadataLoading}
-                            canNavigatePrev={canNavigatePrev}
-                            canNavigateNext={canNavigateNext}
-                            isDetailsVisible={isDetailsVisible}
-                            onNavigatePrev={() => {
-                                navigatePrev();
-                            }}
-                            onNavigateNext={() => {
-                                navigateNext();
-                            }}
-                            onToggleDetails={() => {
-                                setIsDetailsVisible((visible) => !visible);
-                            }}
-                            onImagePreview={() =>
-                                openImagePreview({
-                                    url: imageUrl,
-                                    title:
-                                        metadata?.fileName ||
-                                        'Screenshot preview',
-                                    fileName: metadata?.fileName || '',
-                                    sourcePath: metadata?.filePath || ''
-                                })
-                            }
-                        />
-
-                        {isDetailsVisible ? (
-                            <ScreenshotMetadataDetailsCard
-                                metadata={metadata}
-                                metadataError={metadataError}
-                                searchRowsCount={searchRows.length}
-                                onBackToResults={() =>
-                                    setSearchViewMode('results')
-                                }
-                            />
-                        ) : null}
-                    </div>
-                </>
+                    }}
+                    onOpenFolder={() => {
+                        void openFolder();
+                    }}
+                    onOpenFullscreen={() => setIsFullscreenOpen(true)}
+                    onUpload={() => {
+                        void uploadScreenshotToGallery();
+                    }}
+                    onDeleteMetadata={() => {
+                        void deleteMetadata();
+                    }}
+                    onDeleteFile={() => {
+                        void deleteScreenshotFile();
+                    }}
+                />
             )}
+
+            {printPaths ? (
+                <ScreenshotPrintDialog
+                    open
+                    paths={printPaths}
+                    onOpenChange={(open) => {
+                        if (!open) {
+                            setPrintPaths(null);
+                        }
+                    }}
+                />
+            ) : null}
+
+            <FullscreenImageViewer
+                open={isFullscreenOpen}
+                url={imageUrl}
+                placeholderUrl={
+                    imageUrl
+                        ? getRememberedScreenshotThumbnailUrl(routePath)
+                        : ''
+                }
+                title={metadata?.fileName || 'Screenshot preview'}
+                fileName={metadata?.fileName || ''}
+                sourcePath={metadata?.filePath || ''}
+                navigation={{
+                    canNavigatePrev,
+                    canNavigateNext,
+                    onNavigatePrev: () => {
+                        void navigatePrev();
+                    },
+                    onNavigateNext: () => {
+                        void navigateNext();
+                    }
+                }}
+                onClose={() => setIsFullscreenOpen(false)}
+            />
 
             <FileDropOverlay
                 active={fileDropActive}

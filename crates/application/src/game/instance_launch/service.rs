@@ -8,8 +8,8 @@ use vrcx_0_core::{
     vrchat_endpoints::VRCHAT_API_DEFAULT_ENDPOINT,
 };
 
-use vrcx_0_application_core::vrchat_api::VrchatApiResponse;
 use vrcx_0_application_core::{Error, Result};
+use vrcx_0_contracts::vrchat_api::VrchatResponse;
 
 use super::types::{
     InstanceActionGates, InstanceActionGatesBatchInput, InstanceActionGatesBatchOutput,
@@ -199,7 +199,7 @@ fn should_use_provided_launch_token(parsed: &ParsedLocation, short_name: &str) -
         )
 }
 
-fn require_api_success(response: VrchatApiResponse, fallback_message: &str) -> Result<Value> {
+fn require_api_success(response: VrchatResponse, fallback_message: &str) -> Result<Value> {
     let json = parse_launch_api_json(&response.data);
     if response.status >= 400 || json.get("error").is_some() {
         return Err(Error::Custom(unwrap_api_error_message(
@@ -300,8 +300,7 @@ fn is_closed_location(
     parsed: &ParsedLocation,
     closed_locations: &HashSet<String>,
 ) -> bool {
-    closed_locations.contains(location.trim())
-        || closed_locations.contains(&location_cache_key(parsed))
+    closed_locations.contains(location.trim()) || closed_locations.contains(&parsed.instance_key())
 }
 
 fn closed_location_set(locations: Vec<String>) -> HashSet<String> {
@@ -310,18 +309,10 @@ fn closed_location_set(locations: Vec<String>) -> HashSet<String> {
         .flat_map(|location| {
             let trimmed = location.trim().to_string();
             let parsed = parse_location(&trimmed);
-            [trimmed, location_cache_key(&parsed)]
+            [trimmed, parsed.instance_key()]
         })
         .filter(|value| !value.is_empty())
         .collect()
-}
-
-fn location_cache_key(parsed: &ParsedLocation) -> String {
-    if parsed.world_id.is_empty() || parsed.instance_id.is_empty() {
-        String::new()
-    } else {
-        format!("{}:{}", parsed.world_id, parsed.instance_id)
-    }
 }
 
 fn same_non_empty(left: &str, right: &str) -> bool {

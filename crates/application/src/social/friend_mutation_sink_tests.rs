@@ -9,16 +9,15 @@ use vrcx_0_application_realtime::test_support::{
     runtime_with_active_session, TestRealtimeHostRuntime,
 };
 use vrcx_0_application_realtime::{
-    RealtimeSessionContext, RealtimeStore, RealtimeWsMessagePayload, SyntheticFriendEventOutcome,
+    RealtimeBatchWriter, RealtimeSessionContext, RealtimeWsMessagePayload,
+    SyntheticFriendEventOutcome,
 };
 use vrcx_0_contracts::friend_log::FriendLogHistoryQueryInput;
 use vrcx_0_contracts::realtime::{FriendLogUpsert, RealtimePersistenceBatch};
 use vrcx_0_core::friends::{FriendBaselineEntry, FriendBaselinePresence, FriendRecord};
 
 use crate::social::social_mutation::{apply_friend_request_accept_locally, apply_unfriend_locally};
-use crate::social::{
-    SocialFriendMutationStatus, SocialMutationDeps, TestSocialMutationRemoteRequests,
-};
+use crate::social::{SocialFriendMutationStatus, SocialMutationDeps};
 use vrcx_0_core::OwnerId;
 
 #[derive(Clone, Copy)]
@@ -44,11 +43,9 @@ impl RuntimeTaskHandle for FinishedTaskHandle {
 
 fn deps(runtime: &TestRealtimeHostRuntime) -> SocialMutationDeps<'_> {
     static REMOTE_MUTATIONS: OnceLock<RemoteMutationGate> = OnceLock::new();
-    static REMOTE_REQUESTS: TestSocialMutationRemoteRequests = TestSocialMutationRemoteRequests;
     static REMOTE: crate::remote::TestVrchatRequestPort = crate::remote::TestVrchatRequestPort;
     SocialMutationDeps {
         store: runtime.store(),
-        remote_requests: &REMOTE_REQUESTS,
         remote: &REMOTE,
         auth_scope: runtime.auth_scope(),
         remote_mutations: REMOTE_MUTATIONS.get_or_init(RemoteMutationGate::default),
@@ -263,9 +260,8 @@ fn unfriend_locally_applies_via_synthetic_event_when_baseline_present() -> Resul
             ..FriendBaselinePresence::default()
         },
     };
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [("usr_friend".to_string(), friend)].into_iter().collect(),
     )?;
     seed_friend_log_current(&runtime, &active_session.user_id, "usr_friend");
@@ -311,9 +307,8 @@ fn unfriend_locally_with_stale_owner_falls_back_without_touching_active_roster()
             ..FriendBaselinePresence::default()
         },
     };
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [("usr_friend".to_string(), friend)].into_iter().collect(),
     )?;
     seed_friend_log_current(&runtime, &active_session.user_id, "usr_friend");
@@ -369,9 +364,8 @@ fn synthetic_event_with_stale_endpoint_reports_missing_baseline() -> Result<()> 
             ..FriendBaselinePresence::default()
         },
     };
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [("usr_friend".to_string(), friend)].into_iter().collect(),
     )?;
 
@@ -396,9 +390,7 @@ fn synthetic_event_with_stale_endpoint_reports_missing_baseline() -> Result<()> 
 fn accept_locally_applies_via_synthetic_event_when_baseline_present() -> Result<()> {
     let (_dir, runtime, active_session) =
         runtime_with_active_session("mutation-sink-accept-baseline")?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), HashMap::new())?;
+    runtime.sync_friend_baseline(&active_session, HashMap::new())?;
 
     let outcome = apply_friend_request_accept_locally(
         &deps(&runtime),
@@ -456,9 +448,8 @@ fn unfriend_then_later_ws_friend_delete_records_exactly_one_unfriend_history() -
             ..FriendBaselinePresence::default()
         },
     };
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [("usr_friend".to_string(), friend)].into_iter().collect(),
     )?;
     seed_friend_log_current(&runtime, &active_session.user_id, "usr_friend");
@@ -496,9 +487,8 @@ fn ws_friend_delete_then_later_unfriend_records_exactly_one_unfriend_history() -
             ..FriendBaselinePresence::default()
         },
     };
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [("usr_friend".to_string(), friend)].into_iter().collect(),
     )?;
     seed_friend_log_current(&runtime, &active_session.user_id, "usr_friend");
@@ -525,9 +515,7 @@ fn ws_friend_delete_then_later_unfriend_records_exactly_one_unfriend_history() -
 fn accept_then_later_ws_friend_add_records_exactly_one_friend_history() -> Result<()> {
     let (_dir, runtime, active_session) =
         runtime_with_active_session("mutation-sink-accept-race-local-first")?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), HashMap::new())?;
+    runtime.sync_friend_baseline(&active_session, HashMap::new())?;
 
     let outcome = apply_friend_request_accept_locally(
         &deps(&runtime),
@@ -552,9 +540,7 @@ fn accept_then_later_ws_friend_add_records_exactly_one_friend_history() -> Resul
 fn ws_friend_add_then_later_accept_records_exactly_one_friend_history() -> Result<()> {
     let (_dir, runtime, active_session) =
         runtime_with_active_session("mutation-sink-accept-race-ws-first")?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), HashMap::new())?;
+    runtime.sync_friend_baseline(&active_session, HashMap::new())?;
 
     runtime.handle_active_friend_ws_message_for_test(&friend_add_payload("usr_target", "Target"));
 

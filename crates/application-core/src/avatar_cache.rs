@@ -4,11 +4,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use vrcx_0_contracts::{AvatarCacheOutput, CacheEntityInput};
 
-use crate::{Result, WebClient};
+use crate::Result;
 
 #[async_trait]
 pub trait AvatarCachePort: Send + Sync {
-    fn clear_working(&self);
     fn invalidate(&self, user_id: &str, endpoint: &str, avatar_id: &str);
     fn get_summary(
         &self,
@@ -37,7 +36,6 @@ pub trait AvatarCachePort: Send + Sync {
     ) -> Result<u32>;
     async fn resolve(
         &self,
-        web: &WebClient,
         user_id: &str,
         endpoint: &str,
         avatar_id: &str,
@@ -55,10 +53,6 @@ impl AvatarCache {
         Self {
             inner: Arc::new(inner),
         }
-    }
-
-    pub fn clear_working(&self) {
-        self.inner.clear_working();
     }
 
     pub fn invalidate(&self, user_id: &str, endpoint: &str, avatar_id: &str) {
@@ -107,7 +101,6 @@ impl AvatarCache {
 
     pub async fn resolve(
         &self,
-        web: &WebClient,
         user_id: &str,
         endpoint: &str,
         avatar_id: &str,
@@ -115,7 +108,7 @@ impl AvatarCache {
         fresh: bool,
     ) -> Result<Option<Arc<Value>>> {
         self.inner
-            .resolve(web, user_id, endpoint, avatar_id, full, fresh)
+            .resolve(user_id, endpoint, avatar_id, full, fresh)
             .await
     }
 }

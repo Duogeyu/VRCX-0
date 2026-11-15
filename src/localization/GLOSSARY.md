@@ -320,6 +320,7 @@ Source strings live in [`en.json`](en.json). Keep recurring terms consistent wit
 | Feed Widget                        | 动态小组件                 | 動態小工具            | フィード                             |
 | Folders                            | 文件夹                     | 捷徑                  | フォルダ                             |
 | Friend History                     | 好友历史                   | 好友紀錄              | フレンドログ                         |
+| Game Isolation                     | 隔离模式                   | 隔離模式              | ゲーム分離モード                     |
 | Game Log                           | 游戏日志                   | 遊戲紀錄              | ゲームログ                           |
 | Game Log Widget                    | 游戏日志小组件             | 遊戲紀錄小工具        | ゲームログ                           |
 | GitHub                             | 在 GitHub 上查看           | 在 GitHub 上查看      | GitHub                               |
@@ -363,13 +364,13 @@ Source strings live in [`en.json`](en.json). Keep recurring terms consistent wit
 | Profile Details                    | 个人资料详情               | 個人資料詳細資訊      | プロフィール詳細                     |
 | Profile Icon                       | 头像                       | 頭像                  | アイコン画像                         |
 | Proxy Settings                     | 代理服务器设置             | 代理設定              | プロキシ設定                         |
-| QQ Group                           | QQ群                       | QQ 群組               | QQグループ                           |
 | Refresh                            | 刷新                       | 重新整理              | 更新                                 |
 | Request Invite Response            | 拒绝加入申请               | 請求邀請回復          | 招待リクエストへの返信               |
 | Reset Zoom                         | 重置缩放                   | 重設縮放比例          | ズームをリセット                     |
 | Same Instance                      | 同一房间                   | 在同個房間            | 同じインスタンス                     |
 | Saved Custom Directory             | 已保存的自定义目录         | 已儲存的自訂目錄      | 保存済みのカスタムディレクトリ       |
 | Scope                              | 范围                       | 範圍                  | 範囲                                 |
+| Screenshot Frame                   | 相框                       | 相框                  | フレーム                             |
 | Self Invite                        | 自我邀请                   | 自我邀請              | 自分への招待                         |
 | Settings...                        | 设置...                    | 設定...               | 設定...                              |
 | Share Link                         | 分享链接                   | 分享連結              | 共有リンク                           |

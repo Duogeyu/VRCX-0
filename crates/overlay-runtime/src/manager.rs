@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use vrcx_0_host_desktop::vr_overlay::{OverlaySurfaceConfig, VrDeviceSnapshot};
 use vrcx_0_vr_overlay::{OverlaySurfaceId, RgbaFrame};
+use vrcx_0_vr_overlay_backend::{OverlaySurfaceConfig, VrDeviceSnapshot};
 
 use super::{
     eligibility::VrOverlayEligibility,
@@ -99,20 +99,12 @@ where
         self.service.is_running()
     }
 
-    pub fn update_frame(&mut self, frame: RgbaFrame) -> Result<(), String> {
-        self.service.update_frame(frame)
-    }
-
     pub fn update_surface_frame(
         &mut self,
         surface_id: &OverlaySurfaceId,
         frame: RgbaFrame,
     ) -> Result<(), String> {
         self.service.update_surface_frame(surface_id, frame)
-    }
-
-    pub fn show(&mut self) -> Result<(), String> {
-        self.service.show()
     }
 
     pub fn show_surface(&mut self, surface_id: &OverlaySurfaceId) -> Result<(), String> {
@@ -195,8 +187,8 @@ fn log_overlay_start_error(error: &OverlayServiceStartError) {
 
 #[cfg(test)]
 mod tests {
-    use vrcx_0_host_desktop::vr_overlay::{OverlaySurfaceConfig, VrDeviceSnapshot};
     use vrcx_0_vr_overlay::{OverlaySurfaceId, RgbaFrame};
+    use vrcx_0_vr_overlay_backend::{OverlaySurfaceConfig, VrDeviceSnapshot};
 
     use super::{
         next_start_retry_delay, VrOverlayManager, OVERLAY_RUNTIME_UNAVAILABLE_RETRY_INTERVAL,
@@ -255,14 +247,6 @@ mod tests {
         fn start(&mut self) -> Result<(), OverlayServiceStartError> {
             self.starts += 1;
             self.running = true;
-            Ok(())
-        }
-
-        fn update_frame(&mut self, _frame: RgbaFrame) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn show(&mut self) -> Result<(), String> {
             Ok(())
         }
 

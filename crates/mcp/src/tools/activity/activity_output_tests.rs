@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::DateTime;
 use rmcp::handler::server::wrapper::Parameters;
 use vrcx_0_application::favorites::{FavoriteMutationCoordinator, FavoriteMutationRuntimeDeps};
 use vrcx_0_application::social::MutualGraphFetchRuntime;
@@ -16,8 +17,7 @@ use vrcx_0_persistence::game_log::{
     write_batch, GameLogJoinLeaveEntry, GameLogLocationEntry, GameLogWriteBatch,
 };
 use vrcx_0_persistence::{
-    config::ConfigRepository, game_log::ensure_game_log_tables, storage::StorageService,
-    DatabaseService,
+    game_log::ensure_game_log_tables, storage::StorageService, DatabaseService,
 };
 
 #[test]
@@ -93,7 +93,7 @@ fn test_server_with_game_context(
     let dir = TestDir::new(name);
     let db = Arc::new(DatabaseService::new(&dir.path.join("VRCX-0.sqlite3"))?);
     ensure_game_log_tables(db.as_ref())?;
-    let storage = StorageService::new(&dir.path.join("storage.json"))?;
+    let storage = Arc::new(StorageService::new(&dir.path.join("storage.json"))?);
     let web = Arc::new(WebClient::new(
         vrcx_0_outbound_adapters::LocalWebClientAdapter::new(
             &storage,
@@ -114,6 +114,7 @@ fn test_server_with_game_context(
     let world_cache = Arc::new(WorldCache::new(
         vrcx_0_outbound_adapters::LocalWorldCacheAdapter::new(
             Arc::clone(&db),
+            Arc::clone(&web),
             512,
             Duration::from_secs(30 * 60),
         ),
@@ -144,45 +145,52 @@ fn test_server_with_game_context(
         ),
         event_bus.clone(),
     );
-    let realtime_store: Arc<dyn vrcx_0_application_realtime::RealtimeStore> = Arc::new(
+    let realtime_stores = vrcx_0_application_realtime::RealtimeStores::shared(Arc::new(
         vrcx_0_outbound_adapters::PersistenceRealtimeStore::new(Arc::clone(&db)),
-    );
+    ));
     let realtime_transport: Arc<dyn vrcx_0_application_realtime::RealtimeTransport> =
         Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeTransport::new(
-            Arc::clone(&realtime_store),
+            db.db_path().to_path_buf(),
             Arc::clone(&web),
             backend_status.clone(),
         ));
-    let realtime_runtime = Arc::new(RealtimeHostRuntime::new(RealtimeHostRuntimeDeps::new(
-        realtime_store,
-        realtime_transport,
-        Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeRemoteRequests),
+    let realtime_runtime = Arc::new(RealtimeHostRuntime::new(
+        RealtimeHostRuntimeDeps {
+            stores: realtime_stores,
+            config: Arc::new(vrcx_0_outbound_adapters::LocalConfigStore::new(
+                Arc::clone(&db),
+                Arc::clone(&storage),
+            )),
+            transport: realtime_transport,
+            remote_requests: Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeRemoteRequests),
+            event_bus: event_bus.clone(),
+            backend_status,
+            friend_projection_sink: vrcx_0_application_realtime::FriendProjectionSink::new(
+                event_bus.clone(),
+                None,
+            ),
+            sync,
+            tasks: tasks.clone(),
+            session,
+            auth_scope: auth_scope.clone(),
+            remote_mutations,
+            local_game_context,
+            activity: None,
+            notification_projection_observer: None,
+            world_cache,
+            file_cache: vrcx_0_application_core::FileCache::new(
+                vrcx_0_application_core::MemoryFileCachePort::default(),
+            ),
+            instance_dwell: Arc::new(vrcx_0_application_realtime::InstanceDwellRegistry::new()),
+            print_cleanup: Arc::new(NoopPrintCleanupInputSink),
+            current_user_snapshot_sink: None,
+        },
         Arc::clone(&web),
-        event_bus.clone(),
-        backend_status,
-        vrcx_0_application_realtime::FriendProjectionSink::new(event_bus.clone(), None),
-        sync,
-        tasks.clone(),
-        session,
-        auth_scope.clone(),
-        remote_mutations,
-        local_game_context,
-        None,
-        None,
-        world_cache,
-        vrcx_0_application_core::FileCache::new(
-            vrcx_0_application_core::MemoryFileCachePort::default(),
-        ),
-        Arc::new(vrcx_0_application_core::InstanceDwellRegistry::new()),
-        Arc::new(NoopPrintCleanupInputSink),
-        None,
-    )));
+    ));
     let runtime = crate::runtime::McpRuntime {
         realtime_runtime,
         auth_scope: auth_scope.clone(),
-        config: Arc::new(crate::test_support::TestMcpConfigAdapter::new(
-            ConfigRepository::new(Arc::clone(&db)),
-        )),
+        config: Arc::new(vrcx_0_application_core::MemoryConfigStore::default()),
         activity_queries: Arc::new(crate::test_support::TestMcpActivityQueryAdapter::new(
             Arc::clone(&db),
         )),
@@ -198,6 +206,9 @@ fn test_server_with_game_context(
         feed_queries: Arc::new(crate::test_support::TestMcpFeedQueryAdapter::new(
             Arc::clone(&db),
         )),
+        world_lookup: Arc::new(crate::test_support::TestMcpWorldLookup(None)),
+        screenshots: Arc::new(crate::test_support::TestMcpScreenshots::new(&dir.path)),
+        chatbox: Arc::new(crate::test_support::TestMcpChatbox::default()),
         mutual_graph: Arc::new(crate::test_support::TestMcpMutualGraphAdapter::new(
             MutualGraphFetchRuntime::new(),
             Arc::clone(&db),
@@ -271,6 +282,7 @@ async fn copresence_summary_requires_auth_scope_owner() {
             min_minutes: None,
             limit: Some(5),
             friends_only: None,
+            utc_offset_minutes: None,
         }))
         .await
         .expect_err("empty auth_scope owner must reject the tool call");
@@ -365,12 +377,41 @@ fn my_activity_buckets_weekdays_in_the_callers_timezone() {
         )
         .unwrap();
 
-    assert_eq!(output.by_weekday.get("Mon"), Some(&60));
-    assert_eq!(output.by_weekday.get("Sun"), None);
+    assert_eq!(output.by_weekday.get("Monday"), Some(&60));
+    assert_eq!(output.by_weekday.get("Sunday"), None);
     assert!(output
         .caveats
         .iter()
         .any(|caveat| caveat.contains("UTC+09:00")));
+}
+
+#[test]
+fn my_activity_reads_a_calendar_day_window_in_the_callers_timezone() {
+    let (_dir, runtime, db) =
+        crate::test_support::test_runtime_with_database("my-activity-local-day", "usr_owner")
+            .unwrap();
+    write_batch(
+        db.as_ref(),
+        &OwnerId::new("usr_owner"),
+        &GameLogWriteBatch {
+            join_leave: vec![closed_stay("2026-06-07T21:00:00.000Z", 60)],
+            ..GameLogWriteBatch::default()
+        },
+    )
+    .unwrap();
+    let server = VrcxMcpServer::new(runtime);
+
+    let output = server
+        .get_my_activity_output(
+            OwnerId::new("usr_owner"),
+            MyActivityParams {
+                time_window: Some(serde_json::from_value(serde_json::json!("2026-06-08")).unwrap()),
+                utc_offset_minutes: Some(540),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.total_minutes, 60);
 }
 
 #[test]
@@ -414,6 +455,100 @@ fn social_period_states_the_best_time_bucket_timezone() {
         .caveats
         .iter()
         .any(|caveat| caveat.contains("Best-time buckets are in UTC+09:00")));
+}
+
+#[tokio::test]
+async fn friend_activity_pattern_without_a_user_returns_the_most_active_friends() {
+    let (_dir, runtime, db) =
+        crate::test_support::test_runtime_with_database("activity-pattern-ranked", "usr_owner")
+            .unwrap();
+    for (user_id, online_events) in [("usr_quiet", 1), ("usr_busy", 3), ("usr_mid", 2)] {
+        for index in 0..online_events {
+            let created_at = format!("2026-06-0{}T10:00:00Z", index + 1);
+            vrcx_0_persistence::feed::test_support::seed_feed_online_row(
+                &db,
+                "usr_owner",
+                (&created_at, user_id, user_id),
+            )
+            .unwrap();
+        }
+    }
+    let server = VrcxMcpServer::new(runtime);
+
+    let result = server
+        .get_friend_activity_pattern(Parameters(
+            serde_json::from_value(serde_json::json!({ "limit": 2 })).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let structured = result.structured_content.unwrap();
+    let users: Vec<&str> = structured["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["userId"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, ["usr_busy", "usr_mid"]);
+    assert!(structured["caveats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|caveat| caveat.as_str().unwrap().contains("2 most active of 3")));
+}
+
+#[tokio::test]
+async fn empty_copresence_window_says_it_is_the_complete_answer() {
+    let (_dir, runtime, _db) =
+        crate::test_support::test_runtime_with_database("copresence-empty-window", "usr_owner")
+            .unwrap();
+    let server = VrcxMcpServer::new(runtime);
+
+    let result = server
+        .get_copresence_summary(Parameters(
+            serde_json::from_value(serde_json::json!({ "timeWindow": "7d" })).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let summary = result.structured_content.unwrap()["summary"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        summary.contains("complete answer for this window"),
+        "{summary}"
+    );
+}
+
+#[test]
+fn social_period_fading_splits_an_open_ended_window_at_its_midpoint() {
+    let (_dir, runtime, _db) = crate::test_support::test_runtime_with_database(
+        "social-period-open-window-fading",
+        "usr_owner",
+    )
+    .unwrap();
+    let server = VrcxMcpServer::new(runtime);
+    let from = Utc::now() - chrono::Duration::days(14);
+
+    let input = server
+        .summary_fading_input(
+            &OwnerId::new("usr_owner"),
+            &social_aggregates::TimeWindow {
+                from: Some(rfc3339_z(from)),
+                to: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(input.prior_from, rfc3339_z(from));
+    let pivot = DateTime::parse_from_rfc3339(&input.pivot).unwrap();
+    assert!(
+        (pivot.with_timezone(&Utc) - (from + chrono::Duration::days(7)))
+            .num_minutes()
+            .abs()
+            <= 1
+    );
 }
 
 fn closed_stay(left_at: &str, minutes: i64) -> GameLogJoinLeaveEntry {
@@ -460,7 +595,38 @@ fn my_activity_counts_only_closed_instance_stays() {
 
     assert_eq!(output.total_minutes, 60);
     assert_eq!(output.session_count, 1);
-    assert_eq!(output.by_weekday.get("Mon"), Some(&60));
+    assert_eq!(output.by_weekday.get("Monday"), Some(&60));
+}
+
+#[test]
+fn my_activity_splits_a_stay_across_local_midnight() {
+    let (_dir, runtime, db) =
+        crate::test_support::test_runtime_with_database("my-activity-midnight", "usr_owner")
+            .unwrap();
+    write_batch(
+        db.as_ref(),
+        &OwnerId::new("usr_owner"),
+        &GameLogWriteBatch {
+            join_leave: vec![closed_stay("2026-06-07T15:30:00.000Z", 60)],
+            ..GameLogWriteBatch::default()
+        },
+    )
+    .unwrap();
+    let server = VrcxMcpServer::new(runtime);
+
+    let output = server
+        .get_my_activity_output(
+            OwnerId::new("usr_owner"),
+            MyActivityParams {
+                time_window: None,
+                utc_offset_minutes: Some(540),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.total_minutes, 60);
+    assert_eq!(output.by_weekday.get("Sunday"), Some(&30));
+    assert_eq!(output.by_weekday.get("Monday"), Some(&30));
 }
 
 struct FixedLocalGameContext(LocalGameContextSnapshot);

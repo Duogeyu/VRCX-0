@@ -1,13 +1,15 @@
 use crate::remote::VrchatRequestPort;
 use serde::{Deserialize, Serialize};
 use vrcx_0_application_core::RemoteMutationGate;
-use vrcx_0_application_core::{vrchat_api::VrchatApiRequest, Result, RuntimeAuthScope};
+use vrcx_0_application_core::{Result, RuntimeAuthScope};
+pub use vrcx_0_contracts::local_moderation::{
+    LocalModerationInput, LocalModerationOutput, RemoteModerationInput,
+};
 use vrcx_0_core::text::normalize_text;
 use vrcx_0_core::OwnerId;
 
 pub struct ModerationSyncDeps<'a> {
     pub(crate) store: &'a dyn ModerationSyncStore,
-    pub(crate) remote_requests: &'a dyn ModerationSyncRemoteRequests,
     pub(crate) remote: &'a dyn VrchatRequestPort,
     pub auth_scope: &'a RuntimeAuthScope,
     pub remote_mutations: &'a RemoteMutationGate,
@@ -16,47 +18,17 @@ pub struct ModerationSyncDeps<'a> {
 impl<'a> ModerationSyncDeps<'a> {
     pub fn new(
         store: &'a dyn ModerationSyncStore,
-        remote_requests: &'a dyn ModerationSyncRemoteRequests,
         remote: &'a dyn VrchatRequestPort,
         auth_scope: &'a RuntimeAuthScope,
         remote_mutations: &'a RemoteMutationGate,
     ) -> Self {
         Self {
             store,
-            remote_requests,
             remote,
             auth_scope,
             remote_mutations,
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct RemoteModerationInput {
-    pub r#type: String,
-    pub target_user_id: String,
-    pub target_display_name: String,
-    pub created: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct LocalModerationInput {
-    pub user_id: String,
-    pub updated_at: String,
-    pub display_name: String,
-    pub block: bool,
-    pub mute: bool,
-}
-
-#[derive(Clone, Debug, Serialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-#[specta(rename = "ModerationSyncLocalOutput")]
-pub struct LocalModerationOutput {
-    pub user_id: String,
-    pub updated_at: String,
-    pub display_name: String,
-    pub block: bool,
-    pub mute: bool,
 }
 
 pub trait ModerationSyncStore: Send + Sync {
@@ -68,17 +40,6 @@ pub trait ModerationSyncStore: Send + Sync {
     fn get(&self, owner: OwnerId, user_id: String) -> Result<Option<LocalModerationOutput>>;
     fn set(&self, owner: OwnerId, entry: LocalModerationInput) -> Result<()>;
     fn delete(&self, owner: OwnerId, user_id: String) -> Result<()>;
-}
-
-pub trait ModerationSyncRemoteRequests: Send + Sync {
-    fn list(&self, endpoint: String) -> Result<VrchatApiRequest>;
-    fn update(
-        &self,
-        endpoint: String,
-        enabled: bool,
-        target_user_id: String,
-        moderation_type: String,
-    ) -> Result<VrchatApiRequest>;
 }
 
 #[derive(Debug, Deserialize, specta::Type)]

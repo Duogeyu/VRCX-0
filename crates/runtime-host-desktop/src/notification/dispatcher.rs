@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use vrcx_0_application_activity::notification::{
-    extract_file_version, fallback_file_version, render_delivery, NotificationResolver,
-    OverlayLocale, RenderedNotification,
+    extract_file_version, fallback_file_version, render_delivery, unresolved_group_id,
+    NotificationResolver, OverlayLocale, RenderedNotification,
 };
 use vrcx_0_application_activity::{ActivityDelivery, ActivitySink, ActivitySnapshot};
 use vrcx_0_application_core::{ImageCache, RuntimeAuthScope, TaskSupervisor};
@@ -26,7 +27,7 @@ use vrcx_0_core::location::is_meaningful_world_name;
 use vrcx_0_core::OwnerId;
 
 const NOTIFICATION_IMAGE_FIRST_SEND_BUDGET: Duration = Duration::from_secs(1);
-const NOTIFICATION_WORLD_NAME_FIRST_SEND_BUDGET: Duration = Duration::from_secs(2);
+const NOTIFICATION_LOCATION_NAME_FIRST_SEND_BUDGET: Duration = Duration::from_secs(2);
 
 pub struct NotificationDispatcher {
     auth_scope: RuntimeAuthScope,
@@ -380,9 +381,14 @@ async fn prepare_notification(
         } else {
             None
         };
-    if let Some((world_name, display_location)) =
-        resolve_world_name_with_budget(&tasks, Arc::clone(&resolver), &job).await
-    {
+    let (group_name, world_name) = tokio::join!(
+        resolve_group_name_with_budget(&tasks, Arc::clone(&resolver), &job),
+        resolve_world_name_with_budget(&tasks, Arc::clone(&resolver), &job),
+    );
+    if let Some(group_name) = group_name {
+        job.delivery.entry.content.group_name = group_name;
+    }
+    if let Some((world_name, display_location)) = world_name {
         job.delivery.entry.content.world_name = world_name;
         if !display_location.trim().is_empty() {
             job.delivery.entry.content.display_location = display_location;
@@ -562,15 +568,39 @@ async fn resolve_world_name_with_budget(
     }
     let endpoint = job.endpoint.clone();
     let delivery = job.delivery.clone();
+    spawn_with_budget(
+        tasks,
+        NOTIFICATION_LOCATION_NAME_FIRST_SEND_BUDGET,
+        async move { resolver.world_name(&endpoint, &delivery).await },
+    )
+    .await
+}
+
+async fn resolve_group_name_with_budget(
+    tasks: &TaskSupervisor,
+    resolver: Arc<NotificationResolver>,
+    job: &NotificationJob,
+) -> Option<String> {
+    let group_id = unresolved_group_id(&job.delivery.entry.content)?;
+    let endpoint = job.endpoint.clone();
+    spawn_with_budget(
+        tasks,
+        NOTIFICATION_LOCATION_NAME_FIRST_SEND_BUDGET,
+        async move { resolver.group_name(&endpoint, &group_id).await },
+    )
+    .await
+}
+
+async fn spawn_with_budget<T: Send + 'static>(
+    tasks: &TaskSupervisor,
+    budget: Duration,
+    task: impl Future<Output = Option<T>> + Send + 'static,
+) -> Option<T> {
     let (result_tx, result_rx) = oneshot::channel();
     tasks.spawn(async move {
-        let result = resolver.world_name(&endpoint, &delivery).await;
-        let _ = result_tx.send(result);
+        let _ = result_tx.send(task.await);
     });
-    tokio::time::timeout(NOTIFICATION_WORLD_NAME_FIRST_SEND_BUDGET, result_rx)
-        .await
-        .ok()?
-        .ok()?
+    tokio::time::timeout(budget, result_rx).await.ok()?.ok()?
 }
 
 fn notification_session_identity(auth_scope: &RuntimeAuthScope) -> (String, String) {
@@ -614,16 +644,12 @@ async fn resolve_local_image_with_budget(
     // VRChat 资产（`file_` + 版本）走既有 `ImageCache`：那套能拿到原图的
     // 规范地址、按版本失效，是更准的一条路。
     if let Some(request) = local_image_request(image_url) {
-        let (result_tx, result_rx) = oneshot::channel();
-        tasks.spawn(async move {
-            let result = fetch_local_image(image_cache, request).await;
-            let _ = result_tx.send(result);
-        });
-        let resolved = tokio::time::timeout(NOTIFICATION_IMAGE_FIRST_SEND_BUDGET, result_rx)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten();
+        let resolved = spawn_with_budget(
+            tasks,
+            NOTIFICATION_IMAGE_FIRST_SEND_BUDGET,
+            fetch_local_image(image_cache, request),
+        )
+        .await;
         if resolved.is_some() {
             return resolved;
         }

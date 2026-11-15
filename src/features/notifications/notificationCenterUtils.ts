@@ -27,6 +27,8 @@ import {
     isVrccNotificationLink
 } from '@/shared/utils/vrccNotification';
 
+import { getNotificationBodyText } from './notificationViewModel';
+
 type CachedInstanceLike = Record<string, unknown> & {
     closedAt?: string | null;
 };
@@ -41,11 +43,12 @@ function normalizeWorldTarget(value: string) {
 }
 
 export function getNotificationMessage(
-    notification: NotificationRow | null | undefined
+    notification: NotificationRow | null | undefined,
+    t: TFunction
 ) {
     return [
         notification?.title,
-        notification?.message,
+        getNotificationBodyText(notification, t),
         notification?.details?.inviteMessage,
         notification?.details?.requestMessage,
         notification?.details?.responseMessage,
@@ -68,8 +71,7 @@ export function getSenderName(
         notification?.data?.groupName ||
         notification?.groupName ||
         notification?.details?.groupName ||
-        notification?.type ||
-        'Notification'
+        ''
     );
 }
 

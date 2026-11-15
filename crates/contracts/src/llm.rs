@@ -20,6 +20,7 @@ pub struct LlmEndpointDetectModelsResult {
 #[derive(Debug, Clone, Default)]
 pub struct LlmRequestOptions {
     pub reasoning_effort: Option<String>,
+    pub forbid_tool_calls: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +35,8 @@ pub struct ToolCall {
     #[serde(rename = "type")]
     pub kind: String,
     pub function: FunctionCall,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

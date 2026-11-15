@@ -10,7 +10,7 @@ use vrcx_0_contracts::profile_bio::{ProfileBioObservation, RecordedProfileBio};
 use vrcx_0_core::friends::FriendRosterBaseline;
 use vrcx_0_core::realtime::{RealtimeMessageParseOutcome, RealtimeMessageParser};
 use vrcx_0_core::time::iso_millis;
-use vrcx_0_logger_protocol::wire::{FrameKind, WireFrame};
+use vrcx_0_logger_protocol::wire::{FrameKind, SnapshotPayload, WireFrame};
 
 use crate::realtime::avatar_change::resolve_avatar_feed_entry;
 use crate::realtime::event_kind::RealtimeWsEventKind;
@@ -18,7 +18,7 @@ use crate::realtime::friends::RealtimeFriendsRuntime;
 use crate::realtime::{FriendIconChange, FriendWake, RealtimeFriendApplyResult};
 use crate::social_baseline::service::friend_baseline_from_raw;
 use crate::world_enrich::enrich_feed_entry;
-use vrcx_0_application_core::{FileCache, WebClient, WorldCache};
+use vrcx_0_application_core::{FileCache, WorldCache};
 
 const REMOTE_FETCH_CONCURRENCY: usize = 4;
 const WORLD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -35,22 +35,15 @@ pub struct ReplayOutcome {
 pub struct ReplayResolvers<'a> {
     world_cache: &'a WorldCache,
     file_cache: &'a FileCache,
-    web: &'a WebClient,
     endpoint: &'a str,
     retried_worlds: BTreeSet<String>,
 }
 
 impl<'a> ReplayResolvers<'a> {
-    pub fn new(
-        world_cache: &'a WorldCache,
-        file_cache: &'a FileCache,
-        web: &'a WebClient,
-        endpoint: &'a str,
-    ) -> Self {
+    pub fn new(world_cache: &'a WorldCache, file_cache: &'a FileCache, endpoint: &'a str) -> Self {
         Self {
             world_cache,
             file_cache,
-            web,
             endpoint,
             retried_worlds: BTreeSet::new(),
         }
@@ -71,10 +64,9 @@ pub async fn replay_logger_frames(
     resolvers: &mut ReplayResolvers<'_>,
 ) -> ReplayOutcome {
     let mut outcome = replay_frames(frames, account_id, clock_offset_ms);
-    let (world_cache, file_cache, web, endpoint) = (
+    let (world_cache, file_cache, endpoint) = (
         resolvers.world_cache,
         resolvers.file_cache,
-        resolvers.web,
         resolvers.endpoint,
     );
     let unresolved = unresolved_worlds(world_cache, &mut outcome.entries);
@@ -82,7 +74,7 @@ pub async fn replay_logger_frames(
     if !endpoint.is_empty() {
         stream::iter(&unresolved)
             .for_each_concurrent(REMOTE_FETCH_CONCURRENCY, |world_id| async move {
-                world_cache.resolve_name(web, endpoint, world_id).await;
+                world_cache.resolve_name(endpoint, world_id).await;
             })
             .await;
         let retry: BTreeSet<String> = unresolved_worlds(world_cache, &mut outcome.entries)
@@ -93,7 +85,7 @@ pub async fn replay_logger_frames(
             tokio::time::sleep(WORLD_RETRY_DELAY).await;
             stream::iter(&retry)
                 .for_each_concurrent(REMOTE_FETCH_CONCURRENCY, |world_id| async move {
-                    let _ = world_cache.get(web, endpoint, world_id, true, false).await;
+                    let _ = world_cache.get(endpoint, world_id, true, false).await;
                 })
                 .await;
             unresolved_worlds(world_cache, &mut outcome.entries);
@@ -102,7 +94,7 @@ pub async fn replay_logger_frames(
             let resolved = join_all(
                 changes
                     .iter()
-                    .map(|change| resolve_avatar_feed_entry(file_cache, web, endpoint, change)),
+                    .map(|change| resolve_avatar_feed_entry(file_cache, endpoint, change)),
             )
             .await;
             outcome.entries.extend(resolved.into_iter().flatten());
@@ -176,9 +168,9 @@ fn replay_frames(frames: &[WireFrame], account_id: &str, clock_offset_ms: i64) -
 }
 
 fn snapshot_after_seq(frame: &WireFrame) -> i64 {
-    serde_json::from_str::<Value>(&frame.payload)
+    serde_json::from_str::<SnapshotPayload>(&frame.payload)
         .ok()
-        .and_then(|snapshot| snapshot.get("afterSeq").and_then(Value::as_i64))
+        .and_then(|snapshot| snapshot.after_seq)
         .unwrap_or(frame.seq)
 }
 
@@ -206,19 +198,14 @@ impl Replay<'_> {
     }
 
     fn apply_snapshot(&mut self, frame: &WireFrame, at_ms: i64) {
-        let Ok(mut snapshot) = serde_json::from_str::<Value>(&frame.payload) else {
+        let Ok(snapshot) = serde_json::from_str::<SnapshotPayload>(&frame.payload) else {
             return;
         };
-        let mut friends = |key: &str| match snapshot.get_mut(key).map(Value::take) {
-            Some(Value::Array(friends)) => friends,
-            _ => Vec::new(),
-        };
-        let online_friends = friends("onlineFriends");
-        let offline_friends = friends("offlineFriends");
-        let current_user = snapshot.get("currentUser").unwrap_or(&Value::Null);
-        let Ok(Some(friends_by_id)) =
-            friend_baseline_from_raw(current_user, online_friends, offline_friends)
-        else {
+        let Ok(Some(friends_by_id)) = friend_baseline_from_raw(
+            &snapshot.current_user,
+            snapshot.online_friends,
+            snapshot.offline_friends,
+        ) else {
             return;
         };
         self.runtime = RealtimeFriendsRuntime::default();

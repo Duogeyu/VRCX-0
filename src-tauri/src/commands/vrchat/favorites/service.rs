@@ -1,11 +1,12 @@
 #![allow(non_snake_case)]
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use vrcx_0_application_core::vrchat_api::require_text;
 
+use crate::commands::blocking::run_blocking;
 use crate::error::AppError;
 use crate::state::AppState;
-use vrcx_0_application_core::vrchat_api::VrchatApiResponse;
+use vrcx_0_contracts::vrchat_api::VrchatResponse;
 
 use super::types::{
     LocalFavoriteGroupInput, LocalFavoriteGroupRenameInput, LocalFavoriteGroupReorderInput,
@@ -19,7 +20,7 @@ use super::types::{
 pub async fn app__vrchat_favorite_worlds_get(
     state: State<'_, AppState>,
     input: VrchatFavoriteWorldsInput,
-) -> Result<VrchatApiResponse, AppError> {
+) -> Result<VrchatResponse, AppError> {
     state
         .runtime_host()
         .vrchat_remote()
@@ -39,7 +40,7 @@ pub async fn app__vrchat_favorite_worlds_get(
 pub async fn app__vrchat_favorite_groups_get(
     state: State<'_, AppState>,
     input: VrchatFavoriteGroupsInput,
-) -> Result<VrchatApiResponse, AppError> {
+) -> Result<VrchatResponse, AppError> {
     state
         .runtime_host()
         .vrchat_remote()
@@ -53,7 +54,7 @@ pub async fn app__vrchat_favorite_groups_get(
 pub async fn app__vrchat_favorite_add(
     state: State<'_, AppState>,
     input: VrchatFavoriteAddInput,
-) -> Result<VrchatApiResponse, AppError> {
+) -> Result<VrchatResponse, AppError> {
     Ok(state
         .runtime_host()
         .favorite_add_remote(vrcx_0_application::favorites::FavoriteRemoteAddInput {
@@ -69,7 +70,7 @@ pub async fn app__vrchat_favorite_add(
 pub async fn app__vrchat_favorite_delete(
     state: State<'_, AppState>,
     input: VrchatFavoriteDeleteInput,
-) -> Result<VrchatApiResponse, AppError> {
+) -> Result<VrchatResponse, AppError> {
     Ok(state
         .runtime_host()
         .favorite_delete_remote(vrcx_0_application::favorites::FavoriteRemoteDeleteInput {
@@ -83,7 +84,7 @@ pub async fn app__vrchat_favorite_delete(
 pub async fn app__vrchat_favorite_group_save(
     state: State<'_, AppState>,
     input: VrchatFavoriteGroupSaveInput,
-) -> Result<VrchatApiResponse, AppError> {
+) -> Result<VrchatResponse, AppError> {
     Ok(state
         .runtime_host()
         .favorite_group_save_remote(
@@ -102,7 +103,7 @@ pub async fn app__vrchat_favorite_group_save(
 pub async fn app__vrchat_favorite_group_clear(
     state: State<'_, AppState>,
     input: VrchatFavoriteGroupClearInput,
-) -> Result<VrchatApiResponse, AppError> {
+) -> Result<VrchatResponse, AppError> {
     Ok(state
         .runtime_host()
         .favorite_group_clear_remote(
@@ -193,27 +194,33 @@ pub fn app__local_favorite_group_delete(
         .map_err(AppError::from)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 #[specta::specta]
-pub fn app__local_favorite_group_reorder(
-    state: State<'_, AppState>,
+pub async fn app__local_favorite_group_reorder(
+    app: AppHandle,
     input: LocalFavoriteGroupReorderInput,
 ) -> Result<Vec<String>, AppError> {
-    state
-        .runtime_host()
-        .favorite_local_group_reorder(input.kind, input.group_names)
-        .map_err(AppError::from)
+    run_blocking("local favorite group reorder", move || {
+        let state = app.state::<AppState>();
+        state
+            .runtime_host()
+            .favorite_local_group_reorder(input.kind, input.group_names)
+    })
+    .await
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 #[specta::specta]
-pub fn app__local_favorite_reorder(
-    state: State<'_, AppState>,
+pub async fn app__local_favorite_reorder(
+    app: AppHandle,
     input: LocalFavoriteReorderInput,
 ) -> Result<i64, AppError> {
     let group_name = require_text(input.group_name, "LocalFavoriteReorder requires groupName.")?;
-    state
-        .runtime_host()
-        .favorite_local_reorder(input.kind, group_name, input.entity_ids)
-        .map_err(AppError::from)
+    run_blocking("local favorite reorder", move || {
+        let state = app.state::<AppState>();
+        state
+            .runtime_host()
+            .favorite_local_reorder(input.kind, group_name, input.entity_ids)
+    })
+    .await
 }

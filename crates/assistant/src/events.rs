@@ -1,8 +1,12 @@
 use serde::Serialize;
 use specta::Type;
-use vrcx_0_application_core::{RuntimeEventBus, RuntimeEventPayload};
+use vrcx_0_application_core::RuntimeEventBus;
+use vrcx_0_contracts::RuntimeEventPayload;
 
+use crate::charts::AssistantChart;
+use crate::choices::AssistantChoiceCandidate;
 use crate::entities::Entity;
+use crate::screenshots::AssistantScreenshots;
 use vrcx_0_core::OwnerId;
 
 #[derive(Serialize, Type)]
@@ -36,6 +40,20 @@ pub struct AssistantToolResultEvent {
     pub ok: bool,
     pub summary: String,
     pub entities: Vec<Entity>,
+    pub charts: Vec<AssistantChart>,
+    pub screenshots: Option<AssistantScreenshots>,
+}
+
+#[derive(Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantChoiceRequestEvent {
+    pub owner_user_id: OwnerId,
+    pub session_id: String,
+    pub turn_id: String,
+    pub tool_call_id: String,
+    pub choice_id: String,
+    pub query: String,
+    pub candidates: Vec<AssistantChoiceCandidate>,
 }
 
 #[derive(Serialize, Type)]
@@ -75,6 +93,10 @@ impl RuntimeEventPayload for AssistantToolCallEvent {
 
 impl RuntimeEventPayload for AssistantToolResultEvent {
     const EVENT_NAME: &'static str = "assistantToolResult";
+}
+
+impl RuntimeEventPayload for AssistantChoiceRequestEvent {
+    const EVENT_NAME: &'static str = "assistantChoiceRequest";
 }
 
 impl RuntimeEventPayload for AssistantTurnEntitiesEvent {
@@ -143,7 +165,15 @@ impl AssistantEmitter {
         });
     }
 
-    pub fn tool_result(&self, tool_call_id: &str, ok: bool, summary: &str, entities: &[Entity]) {
+    pub fn tool_result(
+        &self,
+        tool_call_id: &str,
+        ok: bool,
+        summary: &str,
+        entities: &[Entity],
+        charts: &[AssistantChart],
+        screenshots: Option<&AssistantScreenshots>,
+    ) {
         self.bus.emit(AssistantToolResultEvent {
             owner_user_id: self.owner_user_id.clone(),
             session_id: self.session_id.clone(),
@@ -152,6 +182,26 @@ impl AssistantEmitter {
             ok,
             summary: summary.to_string(),
             entities: entities.to_vec(),
+            charts: charts.to_vec(),
+            screenshots: screenshots.cloned(),
+        });
+    }
+
+    pub fn choice_request(
+        &self,
+        tool_call_id: &str,
+        choice_id: &str,
+        query: &str,
+        candidates: Vec<AssistantChoiceCandidate>,
+    ) {
+        self.bus.emit(AssistantChoiceRequestEvent {
+            owner_user_id: self.owner_user_id.clone(),
+            session_id: self.session_id.clone(),
+            turn_id: self.turn_id.clone(),
+            tool_call_id: tool_call_id.to_string(),
+            choice_id: choice_id.to_string(),
+            query: query.trim().to_string(),
+            candidates,
         });
     }
 

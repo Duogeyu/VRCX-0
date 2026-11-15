@@ -24,7 +24,7 @@ pub struct ProcessStatusDetector {
 impl ProcessStatusDetector {
     pub fn new() -> Self {
         Self {
-            sys: System::new(),
+            sys: System::new().expect("sysinfo supports this platform"),
             #[cfg(windows)]
             process_handles: ProcessHandleCache::default(),
         }
@@ -180,7 +180,7 @@ pub fn detect_steamvr_running() -> bool {
 }
 
 pub fn vrchat_process_ids() -> Vec<u32> {
-    let mut sys = System::new();
+    let mut sys = System::new().expect("sysinfo supports this platform");
     sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.processes()
         .values()
@@ -217,7 +217,7 @@ fn select_linux_vrchat_process_id(
 }
 
 pub fn detect_legacy_vrcx_running() -> bool {
-    let mut sys = System::new();
+    let mut sys = System::new().expect("sysinfo supports this platform");
     sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.processes()
         .values()
@@ -225,7 +225,7 @@ pub fn detect_legacy_vrcx_running() -> bool {
 }
 
 pub fn is_process_running(pid: u32) -> bool {
-    let mut sys = System::new();
+    let mut sys = System::new().expect("sysinfo supports this platform");
     sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.process(Pid::from_u32(pid)).is_some()
 }
@@ -448,6 +448,21 @@ mod tests {
         assert!(handle.is_running());
         assert!(child.wait().unwrap().success());
         assert!(!handle.is_running());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_detector_does_not_keep_proc_stat_files_open() {
+        let mut detector = super::ProcessStatusDetector::new();
+        detector.detect();
+        let stat_fds = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| {
+                target.starts_with("/proc") && target.file_name().is_some_and(|name| name == "stat")
+            })
+            .count();
+        assert_eq!(stat_fds, 0);
     }
 
     #[test]

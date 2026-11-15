@@ -73,4 +73,10 @@ describe('i18nService', () => {
 
         expect(bad).toEqual([]);
     });
+
+    it('renders intentionally empty translations as empty text instead of the key', () => {
+        expect(i18n.t('view.player_list.mutual_friends.circles_suffix')).toBe(
+            ''
+        );
+    });
 });

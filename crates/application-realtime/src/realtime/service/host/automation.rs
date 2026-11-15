@@ -5,17 +5,18 @@ use vrcx_0_application_core::RuntimeOperationStatus;
 
 use serde_json::{json, Value};
 use vrcx_0_application_core::{
-    AuthenticatedMutationContext, Error, LocalGameContextSnapshot, Result,
+    AuthenticatedMutationContext, ConfigStore, Error, LocalGameContextSnapshot, Result,
 };
-use vrcx_0_contracts::vrchat_api::VrchatScope as ApiScope;
+use vrcx_0_contracts::vrchat_api::VrchatScope;
 use vrcx_0_core::json::JsonExt;
 use vrcx_0_core::json::RawJson;
 use vrcx_0_core::OwnerId;
 
 use crate::realtime::invite_automation::decision::{
     context_gates, cooldown_gate, evaluate_invite_automation, normalize_invite_automation_mode,
-    CooldownView, InviteAutomationConfig, InviteAutomationInput, InviteAutomationSkipReason,
-    InviteDecision, InviteLocationFacts, InviteNotificationFacts, SenderAllowlist,
+    normalize_invite_message_slot, CooldownView, InviteAutomationConfig, InviteAutomationInput,
+    InviteAutomationSkipReason, InviteDecision, InviteLocationFacts, InviteNotificationFacts,
+    SenderAllowlist,
 };
 use crate::realtime::invite_automation::runtime::{sender_scope_key, InviteOutcome};
 use crate::realtime::{RealtimeNotificationProjection, RealtimeSessionContext};
@@ -60,7 +61,7 @@ impl RealtimeHostRuntime {
     ) -> Vec<FriendRequestAutoDecline> {
         let enabled = match self
             .deps
-            .store
+            .config
             .get_bool(AUTO_DECLINE_FRIEND_REQUESTS_CONFIG_KEY, false)
         {
             Ok(enabled) => enabled,
@@ -106,7 +107,7 @@ impl RealtimeHostRuntime {
             return Ok(None);
         }
         let sender_display_name = json_string_field(notification.get("senderUsername"));
-        let join_count = self.deps.store.game_log_join_count(
+        let join_count = self.deps.stores.game_log.game_log_join_count(
             &OwnerId::new(session.user_id.clone()),
             &facts.sender_user_id,
             &sender_display_name,
@@ -227,7 +228,7 @@ impl RealtimeHostRuntime {
         cooldown: CooldownView,
         now_ms: i64,
     ) -> Result<bool> {
-        let config = load_invite_automation_config(self.deps.store.as_ref())?;
+        let config = load_invite_automation_config(self.deps.config.as_ref())?;
         let location = self.current_invite_location_facts(&session);
         if let Err(reason) = context_gates(&config, &location) {
             self.record_invite_automation_skip(reason);
@@ -236,6 +237,7 @@ impl RealtimeHostRuntime {
         let allowlist = self
             .build_sender_allowlist(&session, &notification_facts.sender_user_id)
             .await?;
+        let message_slot = config.message_slot;
         let input = InviteAutomationInput {
             notification: notification_facts.clone(),
             config,
@@ -273,19 +275,14 @@ impl RealtimeHostRuntime {
 
         let world_name = self
             .world_cache
-            .resolve_name(&self.deps.web, &session.endpoint, &world_id)
+            .resolve_name(&session.endpoint, &world_id)
             .await
             .filter(|name| is_meaningful_world_name(name))
             .unwrap_or_else(|| world_id.clone());
         let (_, request) = self.deps.remote_requests.invite_send(
             session.endpoint.clone(),
             receiver_user_id.clone(),
-            json!({
-                "instanceId": instance_id,
-                "worldId": world_id,
-                "worldName": world_name,
-                "rsvp": true,
-            }),
+            invite_automation_send_body(&instance_id, &world_id, &world_name, message_slot),
         )?;
         let mutation = AuthenticatedMutationContext::capture(
             &self.deps.auth_scope,
@@ -303,7 +300,7 @@ impl RealtimeHostRuntime {
         mutation.apply_scope_to_request(&mut request);
         let response = mutation
             .run_after_wait(INVITE_AUTOMATION_REMOTE_MUTATION_INTERVAL, || async {
-                self.deps.web.execute_api(request, ApiScope::Vrchat).await
+                self.web.execute_api(request, VrchatScope::Vrchat).await
             })
             .await?;
         if !(200..=299).contains(&response.status) {
@@ -393,9 +390,11 @@ impl RealtimeHostRuntime {
             .unwrap_or_default();
         let output = build_favorites_baseline_from_friend_records(
             SocialBaselineDeps {
-                store: Arc::clone(&self.deps.store),
+                friend_log: Arc::clone(&self.deps.stores.friend_log),
+                favorites: Arc::clone(&self.deps.stores.favorites),
+                config: Arc::clone(&self.deps.config),
                 remote_requests: Arc::clone(&self.deps.remote_requests),
-                web: Arc::clone(&self.deps.web),
+                web: Arc::clone(&self.web),
                 auth_scope: self.deps.auth_scope.clone(),
             },
             SocialFavoritesBaselineRequest {
@@ -442,7 +441,7 @@ impl RealtimeHostRuntime {
         mutation.apply_scope_to_request(&mut request);
         mutation
             .run_after_wait(INVITE_AUTOMATION_REMOTE_MUTATION_INTERVAL, || async {
-                self.deps.web.execute_api(request, ApiScope::Vrchat).await
+                self.web.execute_api(request, VrchatScope::Vrchat).await
             })
             .await?;
         let projection = RealtimeNotificationProjection {
@@ -462,9 +461,7 @@ impl RealtimeHostRuntime {
                 tracing::warn!("{label} local notification expiration failed: {error}");
             }
         }
-        self.deps
-            .event_bus
-            .emit_realtime_notification_projection(projection);
+        self.deps.event_bus.emit(projection);
         tracing::debug!(
             notification_id = facts.id,
             notification_type = facts.notification_type,
@@ -496,20 +493,39 @@ pub(super) fn notification_facts(notification: &Value) -> InviteNotificationFact
     }
 }
 
-fn load_invite_automation_config(
-    store: &dyn crate::RealtimeStore,
-) -> Result<InviteAutomationConfig> {
+fn load_invite_automation_config(config: &dyn ConfigStore) -> Result<InviteAutomationConfig> {
     let mode =
-        normalize_invite_automation_mode(&store.get_string("autoAcceptInviteRequests", "Off")?);
+        normalize_invite_automation_mode(&config.get_string("autoAcceptInviteRequests", "Off")?);
     Ok(InviteAutomationConfig {
         mode,
-        selected_groups: config_string_list(store, "autoAcceptInviteGroups")?,
-        allowed_statuses: config_string_list(store, "autoAcceptInviteStatuses")?,
+        selected_groups: config_string_list(config, "autoAcceptInviteGroups")?,
+        allowed_statuses: config_string_list(config, "autoAcceptInviteStatuses")?,
+        message_slot: normalize_invite_message_slot(
+            &config.get_string("autoAcceptInviteMessageSlot", "")?,
+        ),
     })
 }
 
-fn config_string_list(store: &dyn crate::RealtimeStore, key: &str) -> Result<Vec<String>> {
-    Ok(store
+fn invite_automation_send_body(
+    instance_id: &str,
+    world_id: &str,
+    world_name: &str,
+    message_slot: Option<i32>,
+) -> Value {
+    let mut body = json!({
+        "instanceId": instance_id,
+        "worldId": world_id,
+        "worldName": world_name,
+        "rsvp": true,
+    });
+    if let Some(message_slot) = message_slot {
+        body["messageSlot"] = Value::from(message_slot);
+    }
+    body
+}
+
+fn config_string_list(config: &dyn ConfigStore, key: &str) -> Result<Vec<String>> {
+    Ok(config
         .get_json(key, json!([]))?
         .as_array()
         .into_iter()

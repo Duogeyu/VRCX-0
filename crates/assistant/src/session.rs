@@ -2,8 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use specta::Type;
 
+use crate::charts::AssistantChart;
 use crate::config::PlaybookMode;
 use crate::endpoints::AssistantRuntimeSelection;
 use crate::entities::Entity;
@@ -11,9 +13,11 @@ use crate::ports::{
     AssistantMessageInsert, AssistantPortResult, AssistantSessionPersistence,
     AssistantSessionRuntimeUpdate, AssistantSessionUpsert,
 };
+use crate::screenshots::AssistantScreenshots;
 use vrcx_0_core::OwnerId;
 
 const SESSION_CONTENT_CACHE_CAPACITY: usize = 8;
+const RENAMED_TITLE_LIMIT: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +34,8 @@ pub struct ToolCallRecord {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -40,6 +46,10 @@ pub struct ToolResultRecord {
     pub ok: bool,
     pub summary: String,
     pub entities: Vec<Entity>,
+    #[serde(default)]
+    pub charts: Vec<AssistantChart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshots: Option<AssistantScreenshots>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -116,7 +126,7 @@ impl Message {
 enum MessageBody {
     Text(String),
     ToolCall(ToolCallRecord),
-    ToolResult(ToolResultRecord, String),
+    ToolResult(Box<ToolResultRecord>, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -157,6 +167,7 @@ pub struct Session {
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
+    pub pinned: bool,
     pub busy: bool,
     pub updated_at: String,
 }
@@ -165,6 +176,7 @@ pub struct SessionSummary {
 struct StoredSession {
     owner_user_id: OwnerId,
     title: String,
+    pinned: bool,
     active_turn: Option<ActiveTurn>,
     endpoint_id: Option<String>,
     model: Option<String>,
@@ -306,6 +318,7 @@ impl SessionStore {
                         StoredSession {
                             owner_user_id: entry.owner_user_id,
                             title: entry.title,
+                            pinned: entry.pinned,
                             active_turn: None,
                             endpoint_id: optional_string(entry.endpoint_id),
                             model: optional_string(entry.model),
@@ -485,6 +498,7 @@ impl SessionStore {
         let stored = StoredSession {
             owner_user_id: OwnerId::new(owner_user_id.as_str().trim()),
             title: String::new(),
+            pinned: false,
             active_turn: None,
             endpoint_id: normalize_optional(runtime.endpoint_id),
             model: normalize_optional(runtime.model),
@@ -593,6 +607,7 @@ impl SessionStore {
             .map(|(id, session)| SessionSummary {
                 id: id.clone(),
                 title: session.title.clone(),
+                pinned: session.pinned,
                 busy: session
                     .active_turn
                     .as_ref()
@@ -602,6 +617,54 @@ impl SessionStore {
             .collect();
         summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         summaries
+    }
+
+    pub fn rename(
+        &self,
+        owner_user_id: &OwnerId,
+        session_id: &str,
+        title: &str,
+    ) -> AssistantPortResult<()> {
+        let title: String = title.trim().chars().take(RENAMED_TITLE_LIMIT).collect();
+        if title.is_empty() || !self.is_visible_to(session_id, owner_user_id) {
+            return Ok(());
+        }
+        let stored = {
+            let mut state = self.state.lock().unwrap();
+            let Some(session) = state.sessions.get_mut(session_id) else {
+                return Ok(());
+            };
+            session.title = title;
+            session.clone()
+        };
+        if let Some(persistence) = self.persistence.as_ref() {
+            persistence.upsert_session(AssistantSessionUpsert {
+                owner_user_id: &stored.owner_user_id,
+                id: session_id,
+                title: &stored.title,
+                created_at: &stored.created_at,
+                updated_at: &stored.updated_at,
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn set_pinned(
+        &self,
+        owner_user_id: &OwnerId,
+        session_id: &str,
+        pinned: bool,
+    ) -> AssistantPortResult<()> {
+        if !self.is_visible_to(session_id, owner_user_id) {
+            return Ok(());
+        }
+        if let Some(session) = self.state.lock().unwrap().sessions.get_mut(session_id) {
+            session.pinned = pinned;
+        }
+        if let Some(persistence) = self.persistence.as_ref() {
+            persistence.set_pinned(session_id, pinned)?;
+        }
+        Ok(())
     }
 
     pub fn delete(&self, owner_user_id: &OwnerId, session_id: &str) {
@@ -672,7 +735,7 @@ impl SessionStore {
         self.push(
             session_id,
             Role::ToolResult,
-            MessageBody::ToolResult(record, content),
+            MessageBody::ToolResult(Box::new(record), content),
         )
     }
 
@@ -701,7 +764,7 @@ impl SessionStore {
                 }
                 MessageBody::ToolCall(record) => message.tool_call = Some(record),
                 MessageBody::ToolResult(record, content) => {
-                    message.tool_result = Some(record);
+                    message.tool_result = Some(*record);
                     message.tool_content = Some(content);
                 }
             }
@@ -902,13 +965,40 @@ fn parse_role(role: &str) -> Role {
 }
 
 fn derive_title(content: &str) -> String {
-    let trimmed = content.trim();
+    let plain = plain_mentions(content);
+    let trimmed = plain.trim();
     let title: String = trimmed.chars().take(40).collect();
     if trimmed.chars().count() > 40 {
         format!("{title}…")
     } else {
         title
     }
+}
+
+fn plain_mentions(text: &str) -> String {
+    const MARKERS: [&str; 2] = ["](vrcx-0://user/open?id=", "](vrcx-0://world/open?id="];
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((marker, marker_len)) = MARKERS
+        .iter()
+        .filter_map(|marker| rest.find(marker).map(|index| (index, marker.len())))
+        .min()
+    {
+        let after = &rest[marker + marker_len..];
+        match (rest[..marker].rfind("[@"), after.find(')')) {
+            (Some(open), Some(close)) => {
+                plain.push_str(&rest[..open]);
+                plain.push_str(&rest[open + 1..marker]);
+                rest = &after[close + 1..];
+            }
+            _ => {
+                plain.push_str(&rest[..marker + marker_len]);
+                rest = after;
+            }
+        }
+    }
+    plain.push_str(rest);
+    plain
 }
 
 pub fn random_hex() -> String {

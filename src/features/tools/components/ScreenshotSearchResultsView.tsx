@@ -5,8 +5,9 @@ import { DEFAULT_SCREENSHOT_GRID_DENSITY } from '@/components/media/screenshotGr
 import { useTileSelectionState } from '@/lib/useTileSelectionState';
 import type { ScreenshotLibraryImage } from '@/platform/tauri/bindings';
 
+import { ScreenshotPrintButton } from '../screenshot-share/ScreenshotPrintButton';
+import { ScreenshotShareMenu } from '../screenshot-share/ScreenshotShareMenu';
 import type {
-    ScreenshotMetadataSearchType,
     ScreenshotSearchRow,
     ScreenshotSearchSort
 } from '../screenshotMetadataValues';
@@ -22,9 +23,9 @@ export function ScreenshotSearchResultsView({
     layout,
     images,
     rows,
-    currentSearchType,
+    showMatch,
     searchSort,
-    searchQuery,
+    searchKey,
     selectedPath,
     isDeleteRunning,
     onToggleSearchSort,
@@ -36,9 +37,9 @@ export function ScreenshotSearchResultsView({
     layout: ScreenshotSearchLayout;
     images: ScreenshotLibraryImage[];
     rows: ScreenshotSearchRow[];
-    currentSearchType: ScreenshotMetadataSearchType;
+    showMatch: boolean;
     searchSort: ScreenshotSearchSort;
-    searchQuery: string;
+    searchKey: string;
     selectedPath: string;
     isDeleteRunning: boolean;
     onToggleSearchSort: (key: string) => void;
@@ -53,7 +54,7 @@ export function ScreenshotSearchResultsView({
     );
     const selection = useTileSelectionState({
         keys: imagePaths,
-        resetToken: searchQuery
+        resetToken: searchKey
     });
     const selectedPaths = useMemo(
         () => imagePaths.filter((path) => selection.selectedKeysSet.has(path)),
@@ -87,7 +88,7 @@ export function ScreenshotSearchResultsView({
     if (layout === 'list') {
         return (
             <ScreenshotMetadataResultsTable
-                currentSearchType={currentSearchType}
+                showMatch={showMatch}
                 searchSort={searchSort}
                 sortedSearchRows={rows}
                 selectedPath={selectedPath}
@@ -103,7 +104,7 @@ export function ScreenshotSearchResultsView({
                 density={DEFAULT_SCREENSHOT_GRID_DENSITY}
                 images={images}
                 initialScrollTop={0}
-                resetKey={searchQuery}
+                resetKey={searchKey}
                 hasSelection={selection.hasSelection}
                 selectedKeysSet={selection.selectedKeysSet}
                 onOpen={onOpenResultPath}
@@ -123,7 +124,16 @@ export function ScreenshotSearchResultsView({
                     onExport: (groupByFolder) =>
                         onExportSelection(selectedPaths, groupByFolder)
                 }}
-            />
+            >
+                <ScreenshotPrintButton
+                    paths={selectedPaths}
+                    disabled={isDeleteRunning}
+                />
+                <ScreenshotShareMenu
+                    paths={selectedPaths}
+                    disabled={isDeleteRunning}
+                />
+            </GallerySelectionBar>
         </div>
     );
 }

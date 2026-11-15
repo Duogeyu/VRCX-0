@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useTileSelectionState } from '@/lib/useTileSelectionState';
 import mediaRepository from '@/repositories/vrchatMediaRepository';
+import { convertFileUrlToImageUrl } from '@/services/entityMediaService';
 import { toast } from '@/services/toastService';
 import {
     printCleanupWarningMessageKey,
@@ -28,10 +29,12 @@ import {
 } from '@/ui/shadcn/toggle-group';
 
 import type { GalleryBulkCommands } from '../galleryTypes';
+import { useVirtualTileGrid } from '../useVirtualTileGrid';
 import { GallerySelectionBar } from './GallerySelectionBar';
 import { EmptyState, LoadingState } from './GalleryViewParts';
 import { MediaAssetTile } from './MediaAssetTile';
 import { MediaLibraryToolbar } from './MediaLibraryToolbar';
+import { VirtualTileGridRows } from './VirtualTileGridRows';
 
 type GalleryPrint = {
     files?: {
@@ -42,8 +45,15 @@ type GalleryPrint = {
 };
 
 type GridDensityConfig = {
-    printsGridClass: string;
+    printsTileMinWidth: number;
+    tileGridGap: number;
 };
+
+const PRINT_TILE_ASPECT_RATIO = 2048 / 1440;
+
+function getPrintKey(print: GalleryPrint) {
+    return print.id;
+}
 
 type PrintFavoriteFilter = 'all' | 'favorites' | 'others';
 
@@ -55,6 +65,7 @@ const PRINT_FAVORITE_FILTERS: PrintFavoriteFilter[] = [
 
 export type GalleryPrintsTabState = {
     activeTab: string;
+    clipboardPasting?: boolean;
     gridDensityConfig: GridDensityConfig;
     isVrcPlusSupporter: boolean;
     loading: boolean;
@@ -78,6 +89,7 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
         bulkRunning,
         prints,
         loading,
+        clipboardPasting,
         uploadingTab,
         mutatingKey,
         isVrcPlusSupporter,
@@ -91,6 +103,8 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
         onDeletePrint
     } = printsTab;
     const { t } = useTranslation();
+    const uploadDisabled =
+        !isVrcPlusSupporter || Boolean(uploadingTab) || clipboardPasting;
     const [favoriteMutatingId, setFavoriteMutatingId] = useState('');
     const [favoriteFilter, setFavoriteFilter] =
         useState<PrintFavoriteFilter>('all');
@@ -130,6 +144,13 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
         () => selectedPrintIds.filter((id) => !favoritePrintIds.has(id)),
         [favoritePrintIds, selectedPrintIds]
     );
+    const tileGrid = useVirtualTileGrid({
+        items: visiblePrints,
+        minTileWidth: gridDensityConfig.printsTileMinWidth,
+        gap: gridDensityConfig.tileGridGap,
+        aspectRatio: PRINT_TILE_ASPECT_RATIO,
+        resetKey: favoriteFilter
+    });
     const warningKey = printFavoriteWarningMessageKey(favoriteWarning);
     const cleanupWarningKey = printCleanupWarningMessageKey(
         lastCleanup?.warning
@@ -268,9 +289,7 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
                             <Button
                                 variant="outline"
                                 size="sm"
-                                disabled={
-                                    !isVrcPlusSupporter || Boolean(uploadingTab)
-                                }
+                                disabled={uploadDisabled}
                                 onClick={() => onBeginUpload('prints')}
                             >
                                 <UploadIcon data-icon="inline-start" />
@@ -279,9 +298,7 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
                             <Button
                                 variant="outline"
                                 size="sm"
-                                disabled={
-                                    !isVrcPlusSupporter || Boolean(uploadingTab)
-                                }
+                                disabled={uploadDisabled}
                                 onClick={() => onPasteUpload('prints')}
                             >
                                 <ClipboardPasteIcon data-icon="inline-start" />
@@ -301,16 +318,25 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
                         <AlertDescription>{noticeMessage}</AlertDescription>
                     </Alert>
                 ) : null}
-                <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                <div
+                    ref={tileGrid.viewportRef}
+                    className="min-h-0 flex-1 overflow-y-auto pr-1"
+                >
                     {loading ? (
                         <LoadingState />
                     ) : visiblePrints.length > 0 ? (
-                        <div
-                            className={`${gridDensityConfig.printsGridClass} p-1`}
-                        >
-                            {visiblePrints.map((print) => {
+                        <VirtualTileGridRows
+                            columnCount={tileGrid.columnCount}
+                            gap={gridDensityConfig.tileGridGap}
+                            getKey={getPrintKey}
+                            totalHeight={tileGrid.totalHeight}
+                            visibleRows={tileGrid.visibleRows}
+                            renderItem={(print) => {
                                 const printId = print.id;
-                                const imageUrl = print?.files?.image || '';
+                                const imageUrl = convertFileUrlToImageUrl(
+                                    print?.files?.image || '',
+                                    512
+                                );
                                 const isMutating =
                                     mutatingKey === `prints:${printId}` ||
                                     favoriteMutatingId === printId ||
@@ -320,8 +346,8 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
 
                                 return (
                                     <MediaAssetTile
-                                        key={printId}
                                         imageUrl={imageUrl}
+                                        fadeIn={false}
                                         alt={print.note || printId}
                                         aspectClass="aspect-[2048/1440]"
                                         imageFit="contain"
@@ -365,7 +391,7 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
                                                     )
                                             })
                                         }
-                                        menuLabel={t('aria.more')}
+                                        menuLabel={t('accessibility.more')}
                                         menuActions={[
                                             {
                                                 key: isFavorite
@@ -406,8 +432,8 @@ export function GalleryPrintsTab({ printsTab }: GalleryPrintsTabProps) {
                                         ]}
                                     />
                                 );
-                            })}
-                        </div>
+                            }}
+                        />
                     ) : (
                         <EmptyState
                             icon={ImageIcon}

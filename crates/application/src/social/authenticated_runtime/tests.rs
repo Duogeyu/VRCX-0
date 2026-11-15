@@ -1,8 +1,19 @@
 use std::collections::BTreeMap;
 
+use super::baselines::{
+    append_typed_favorite_group_membership, commit_favorites_baseline, commit_friend_baseline,
+    favorite_group_memberships_from_baseline,
+};
+use super::state::{all_steps_ready, apply_realtime_connected, ready_step};
+use super::transport::vrchat_auth_failure_status;
 use super::*;
+use crate::auth::{AuthenticatedRuntimeRealtimeHealth, AuthenticatedRuntimeStepStatus};
 use serde_json::json;
-use vrcx_0_application_realtime::FriendRosterSnapshot;
+use vrcx_0_application_realtime::{
+    FriendRosterSnapshot, RealtimeFriendRosterSnapshot, RealtimeTransportStartResult,
+    SocialFriendRosterBaselineOutput,
+};
+use vrcx_0_core::friends::FriendRecord;
 
 #[test]
 fn typed_favorite_membership_normalizes_ids_and_prefixes_local_groups() {
@@ -35,15 +46,6 @@ fn compact_friend_ids_preserve_record_ids_and_fall_back_to_roster_keys() {
 
     assert_eq!(friend_ids["roster_one"], "usr_one");
     assert_eq!(friend_ids["usr_two"], "usr_two");
-}
-
-#[test]
-fn retry_schedule_caps_at_sixty_seconds() {
-    assert_eq!(retry_delay_seconds(1), 5);
-    assert_eq!(retry_delay_seconds(2), 15);
-    assert_eq!(retry_delay_seconds(3), 30);
-    assert_eq!(retry_delay_seconds(4), 60);
-    assert_eq!(retry_delay_seconds(20), 60);
 }
 
 #[test]
@@ -118,6 +120,30 @@ fn realtime_lifecycle_requires_matching_transport_identity() {
         snapshot.realtime.status,
         AuthenticatedRuntimeStepStatus::Ready
     );
+}
+
+#[test]
+fn realtime_counts_as_interrupted_only_while_running_after_a_disconnect() {
+    let mut snapshot = AuthenticatedRuntimePhaseSnapshot {
+        phase: AuthenticatedRuntimePhase::Ready,
+        realtime_health: AuthenticatedRuntimeRealtimeHealth {
+            interrupted: true,
+            disconnected_at: Some("2026-10-31T00:00:00.000Z".into()),
+            retry_at: None,
+        },
+        ..Default::default()
+    };
+    assert!(snapshot.realtime_interrupted());
+
+    snapshot.phase = AuthenticatedRuntimePhase::Starting;
+    assert!(snapshot.realtime_interrupted());
+
+    snapshot.phase = AuthenticatedRuntimePhase::Stopped;
+    assert!(!snapshot.realtime_interrupted());
+
+    snapshot.phase = AuthenticatedRuntimePhase::Ready;
+    snapshot.realtime_health.disconnected_at = None;
+    assert!(!snapshot.realtime_interrupted());
 }
 
 #[test]

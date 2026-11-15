@@ -2,10 +2,11 @@ use serde_json::json;
 use vrcx_0_core::OwnerId;
 
 use super::super::test_support::runtime_with_active_session;
+use super::invite_automation_send_body;
 use crate::realtime::{
     RealtimeNotificationOutput, RealtimeNotificationProjection, RealtimeNotificationUpsert,
 };
-use crate::RealtimeStore;
+use vrcx_0_application_core::ConfigStore;
 
 fn friend_request_projection() -> RealtimeNotificationProjection {
     RealtimeNotificationProjection {
@@ -45,6 +46,7 @@ fn auto_decline_only_picks_never_met_senders_when_enabled() {
 
     runtime
         .store()
+        .config
         .set_bool("autoDeclineFriendRequests", true)
         .unwrap();
     runtime.store().set_game_log_join_count("usr_stranger", 1);
@@ -78,8 +80,19 @@ fn an_auto_declined_friend_request_never_reaches_the_activity_router() {
 
     runtime
         .store()
+        .config
         .set_bool("autoDeclineFriendRequests", true)
         .unwrap();
     runtime.store().set_game_log_join_count("usr_stranger", 0);
     assert!(deliver().is_empty());
+}
+
+#[test]
+fn auto_invite_body_attaches_message_slot_only_when_chosen() {
+    let without = invite_automation_send_body("wrld_a:1", "wrld_a", "World", None);
+    assert!(without.get("messageSlot").is_none());
+
+    let with = invite_automation_send_body("wrld_a:1", "wrld_a", "World", Some(3));
+    assert_eq!(with["messageSlot"], 3);
+    assert_eq!(with["rsvp"], true);
 }

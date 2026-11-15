@@ -4,6 +4,7 @@ import {
     useMemo,
     useRef,
     useState,
+    type MouseEvent as ReactMouseEvent,
     type PointerEvent as ReactPointerEvent,
     type WheelEvent as ReactWheelEvent
 } from 'react';
@@ -12,6 +13,7 @@ const MIN_SCALE = 0.1;
 const MAX_SCALE = 10;
 const ZOOM_STEP = 1.2;
 const WHEEL_ZOOM_STEP = 1.1;
+const DOUBLE_CLICK_ZOOM = 2;
 
 type FullscreenImageTransform = {
     scale: number;
@@ -47,6 +49,21 @@ function clamp(value: number, min: number, max: number): number {
 
 function degToRad(value: number): number {
     return (value * Math.PI) / 180;
+}
+
+export function resolveActualSizeScale(element: Element) {
+    if (
+        !(element instanceof HTMLImageElement) ||
+        !element.naturalWidth ||
+        !element.naturalHeight
+    ) {
+        return 0;
+    }
+    const renderedWidth = Math.min(
+        element.offsetWidth,
+        (element.offsetHeight * element.naturalWidth) / element.naturalHeight
+    );
+    return renderedWidth > 0 ? element.naturalWidth / renderedWidth : 0;
 }
 
 export function useFullscreenImageTransform({
@@ -161,6 +178,30 @@ export function useFullscreenImageTransform({
         [zoomAtPointer]
     );
 
+    const handleDoubleClick = useCallback(
+        (event: ReactMouseEvent<HTMLElement>) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (transformRef.current.scale !== 1) {
+                setTransform((current) => ({
+                    ...current,
+                    scale: 1,
+                    tx: 0,
+                    ty: 0
+                }));
+                return;
+            }
+            const actualSizeScale = resolveActualSizeScale(event.currentTarget);
+            zoomAtPointer(
+                event,
+                actualSizeScale > 1
+                    ? Math.min(actualSizeScale, MAX_SCALE)
+                    : DOUBLE_CLICK_ZOOM
+            );
+        },
+        [zoomAtPointer]
+    );
+
     const handlePointerDown = useCallback(
         (event: ReactPointerEvent<HTMLImageElement>) => {
             if (event.button !== 0) {
@@ -231,7 +272,9 @@ export function useFullscreenImageTransform({
 
     return {
         viewerRef,
+        scale: transform.scale,
         transformStyle,
+        handleDoubleClick,
         handlePointerDown,
         handlePointerMove,
         handlePointerUp,

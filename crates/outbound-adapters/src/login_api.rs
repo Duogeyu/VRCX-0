@@ -3,11 +3,11 @@ use std::sync::Arc;
 use vrcx_0_application::auth::{
     AuthSessionCookies, LoginApi, LoginApiFuture, LoginRemoteOperation,
 };
-use vrcx_0_application_core::vrchat_api::VrchatScope;
 use vrcx_0_application_core::{Result, WebClient};
-use vrcx_0_vrchat_client::auth::{
-    config_get_input, current_user_get_input, email_otp_verify_input, login_basic_input,
-    otp_verify_input, totp_verify_input,
+use vrcx_0_contracts::vrchat_api::VrchatScope;
+use vrcx_0_vrchat_protocol::auth::{
+    config_get_input, current_user_get_input, device_code_input, device_status_input,
+    email_otp_verify_input, login_basic_input, otp_verify_input, totp_verify_input,
 };
 
 pub struct VrchatLoginApi {
@@ -49,6 +49,11 @@ impl LoginApi for VrchatLoginApi {
                 LoginRemoteOperation::VerifyOtp { endpoint, code } => {
                     otp_verify_input(endpoint, code)
                 }
+                LoginRemoteOperation::DeviceCode { endpoint } => device_code_input(endpoint),
+                LoginRemoteOperation::DeviceStatus {
+                    endpoint,
+                    device_code,
+                } => device_status_input(endpoint, device_code),
             };
             self.web.execute_api(request, VrchatScope::Vrchat).await
         })

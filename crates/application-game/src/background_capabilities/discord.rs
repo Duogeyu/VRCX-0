@@ -5,7 +5,8 @@ use vrcx_0_core::json::RawJson;
 use vrcx_0_core::location::{parse_location, ParsedLocation};
 use vrcx_0_core::vrchat_endpoints::VRCHAT_SITE_ORIGIN;
 
-use crate::{BackgroundRemoteApi, GameStateStore, Result};
+use crate::{BackgroundRemoteApi, Result};
+use vrcx_0_application_core::ConfigStore;
 
 use super::presence_facts::BackgroundPresenceFacts;
 use super::shared::{parse_response_json, string_field};
@@ -20,6 +21,7 @@ use activity_builders::{build_discord_activity, build_running_fallback_activity}
 const GAME_STOP_DISCORD_CLOSE_ATTEMPTS: u8 = 5;
 const DISCORD_ENRICHMENT_RETRY_BASE: Duration = Duration::from_secs(5);
 const DISCORD_ENRICHMENT_RETRY_MAX: Duration = Duration::from_secs(60);
+const DISCORD_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default)]
 pub struct BackgroundDiscordPresenceState {
@@ -30,6 +32,7 @@ pub struct BackgroundDiscordPresenceState {
     close_attempts_remaining: u8,
     last_location_details: DiscordLocationDetails,
     last_payload: Option<BackgroundDiscordActivityPayload>,
+    last_published_at: Option<Instant>,
 }
 
 impl BackgroundDiscordPresenceState {
@@ -37,6 +40,7 @@ impl BackgroundDiscordPresenceState {
         self.is_active = false;
         self.last_location_details = DiscordLocationDetails::default();
         self.last_payload = None;
+        self.last_published_at = None;
     }
 
     pub fn apply_clear_failure(&mut self) {
@@ -50,6 +54,7 @@ impl BackgroundDiscordPresenceState {
     ) {
         self.is_active = active;
         self.last_payload = active.then(|| payload.clone());
+        self.last_published_at = active.then(Instant::now);
     }
 }
 
@@ -180,7 +185,7 @@ impl DiscordLocationDetails {
 }
 
 pub async fn build_background_discord_presence_command(
-    config: &dyn GameStateStore,
+    config: &dyn ConfigStore,
     remote: &dyn BackgroundRemoteApi,
     facts: &BackgroundPresenceFacts,
     labels: &DiscordPresenceLabels,
@@ -241,7 +246,7 @@ pub async fn build_background_discord_presence_command(
     let parsed_discord_location = parse_location(discord_location);
     if !parsed_discord_location.is_real_instance {
         let payload = build_running_fallback_activity(&discord_config, facts, labels);
-        return Ok(set_assets_or_noop(state, payload, force));
+        return Ok(set_assets_or_noop(state, payload, force, Instant::now()));
     }
 
     let location_details =
@@ -254,15 +259,19 @@ pub async fn build_background_discord_presence_command(
 
     let payload =
         build_discord_activity(&discord_config, facts, labels, &location_details, &parsed);
-    Ok(set_assets_or_noop(state, payload, force))
+    Ok(set_assets_or_noop(state, payload, force, Instant::now()))
 }
 
 fn set_assets_or_noop(
     state: &BackgroundDiscordPresenceState,
     payload: BackgroundDiscordActivityPayload,
     force: bool,
+    now: Instant,
 ) -> BackgroundDiscordPresenceCommand {
-    if !force && state.is_active && state.last_payload.as_ref() == Some(&payload) {
+    let refresh_due = state.last_published_at.is_none_or(|published_at| {
+        now.saturating_duration_since(published_at) >= DISCORD_ACTIVITY_REFRESH_INTERVAL
+    });
+    if !force && !refresh_due && state.is_active && state.last_payload.as_ref() == Some(&payload) {
         return BackgroundDiscordPresenceCommand::Noop {
             detail: "Discord activity is unchanged.".into(),
         };
@@ -270,7 +279,7 @@ fn set_assets_or_noop(
     BackgroundDiscordPresenceCommand::SetAssets { payload }
 }
 
-fn load_discord_config(config: &dyn GameStateStore) -> Result<DiscordConfig> {
+fn load_discord_config(config: &dyn ConfigStore) -> Result<DiscordConfig> {
     Ok(DiscordConfig {
         discord_active: config.get_bool("discordActive", false)?,
         discord_instance: config.get_bool("discordInstance", true)?,
@@ -312,8 +321,9 @@ async fn load_discord_location_details(
                 if let Some(world) = parse_response_json(&response.data) {
                     details.world_name =
                         string_field(&world, "name").unwrap_or_else(|| parsed.world_id.clone());
-                    details.thumbnail_image_url = string_field(&world, "thumbnailImageUrl")
-                        .or_else(|| string_field(&world, "imageUrl"))
+                    details.thumbnail_image_url = remote
+                        .world_image_url(&facts.endpoint, &parsed.world_id)
+                        .await
                         .unwrap_or_default();
                     details.world_capacity = world.i64_field("capacity").unwrap_or(0);
                     if string_field(&world, "releaseStatus").as_deref() == Some("public") {

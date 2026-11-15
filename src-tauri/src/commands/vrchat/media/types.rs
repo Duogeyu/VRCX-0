@@ -71,6 +71,7 @@ pub struct VrchatMediaPrintUploadInput {
 pub struct VrchatMediaPrintsInput {
     #[serde(default)]
     pub(crate) user_id: String,
+    #[specta(type = i32)]
     #[serde(default, deserialize_with = "deserialize_nonnegative_i32")]
     pub(crate) n: i32,
 }
@@ -129,6 +130,12 @@ pub struct VrchatMediaInventoryItemUpdateInput {
 pub struct VrchatMediaInventoryTemplateInput {
     #[serde(default)]
     pub(crate) inventory_template_id: String,
+}
+
+#[derive(Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VrchatMediaCosmeticsIndexInput {
+    pub(crate) item_type: ProfileDecorationEquipSlot,
 }
 
 #[derive(Debug, Deserialize, specta::Type)]

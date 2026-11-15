@@ -10,13 +10,13 @@ import type {
     MutualFriendsLayoutSettings
 } from '@/lib/mutual-friends/mutualFriendsTypes';
 import { preserveAppTitleBarOnOpenChange } from '@/lib/overlayTitlebar';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Button } from '@/ui/shadcn/button';
 import { Separator } from '@/ui/shadcn/separator';
 import {
     Sheet,
     SheetClose,
     SheetContent,
-    SheetFooter,
     SheetHeader,
     SheetTitle,
     SheetTrigger
@@ -48,7 +48,7 @@ export function MutualFriendsSettingsSheet({
     layoutSettings,
     nodeCount,
     onExcludedFriendIdsChange,
-    onResetLayoutAndHidden,
+    onResetLayoutSettings,
     setLayoutSetting
 }: {
     edgeCount: number;
@@ -57,7 +57,7 @@ export function MutualFriendsSettingsSheet({
     layoutSettings: MutualFriendsLayoutSettings;
     nodeCount: number;
     onExcludedFriendIdsChange: (next: string[]) => void;
-    onResetLayoutAndHidden: () => void;
+    onResetLayoutSettings: () => void;
     setLayoutSetting: (
         key: MutualFriendsLayoutSettingKey,
         value: number
@@ -72,20 +72,15 @@ export function MutualFriendsSettingsSheet({
                 preserveAppTitleBarOnOpenChange(open, eventDetails);
             }}
         >
-            <SheetTrigger
-                render={
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={t(
-                            'view.charts.mutual_friend.settings.title'
-                        )}
-                    >
-                        <Settings2Icon />
-                    </Button>
-                }
-            />
+            <HintTooltip label={t('view.charts.mutual_friend.settings.title')}>
+                <SheetTrigger
+                    render={
+                        <Button type="button" variant="ghost" size="icon-sm">
+                            <Settings2Icon />
+                        </Button>
+                    }
+                />
+            </HintTooltip>
             <SheetContent
                 side="right"
                 variant="inset"
@@ -124,11 +119,24 @@ export function MutualFriendsSettingsSheet({
                         <Separator />
 
                         <section className="flex flex-col gap-4">
-                            <SectionLabel>
-                                {t(
-                                    'view.charts.mutual_friend.settings.layout_section'
-                                )}
-                            </SectionLabel>
+                            <div className="flex items-center justify-between gap-2">
+                                <SectionLabel>
+                                    {t(
+                                        'view.charts.mutual_friend.settings.layout_section'
+                                    )}
+                                </SectionLabel>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="xs"
+                                    onClick={onResetLayoutSettings}
+                                >
+                                    <RotateCcwIcon data-icon="inline-start" />
+                                    {t(
+                                        'view.charts.mutual_friend.settings.reset_defaults'
+                                    )}
+                                </Button>
+                            </div>
                             <MutualFriendsLayoutControls
                                 layoutSettings={layoutSettings}
                                 setLayoutSetting={setLayoutSetting}
@@ -163,17 +171,6 @@ export function MutualFriendsSettingsSheet({
                         </section>
                     </div>
                 </div>
-
-                <SheetFooter className="border-border/60 shrink-0 border-t">
-                    <Button
-                        type="button"
-                        variant="outline"
-                        onClick={onResetLayoutAndHidden}
-                    >
-                        <RotateCcwIcon data-icon="inline-start" />
-                        {t('view.charts.mutual_friend.settings.reset_defaults')}
-                    </Button>
-                </SheetFooter>
 
                 <SheetClose
                     render={

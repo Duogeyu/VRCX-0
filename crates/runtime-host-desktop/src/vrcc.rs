@@ -9,6 +9,7 @@ use serde_json::json;
 use vrcx_0_application::vrcc::{
     classify_vrcc_error, StoredCredential, VrccErrorKind, VrccFailure, VrccService, VrccTokenStore,
 };
+use vrcx_0_application_core::ConfigStore;
 use vrcx_0_contracts::vrcc::{
     scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs,
     VrccConnectionSnapshot, VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccModelBoard,
@@ -18,7 +19,6 @@ use vrcx_0_contracts::vrcc::{
     VrccWristSummary,
 };
 use vrcx_0_outbound_adapters::LocalVrccTokenStore;
-use vrcx_0_persistence::config::ConfigRepository;
 use vrcx_0_persistence::DatabaseService;
 use vrcx_0_vrcc_client::{resolve_client_id, VrccError};
 
@@ -91,7 +91,7 @@ pub struct DesktopVrccRuntime {
     /// 读当前登录账号。装配发生在登录之前，所以取闭包而不是固定 id。
     owner: Arc<dyn Fn() -> Option<vrcx_0_core::OwnerId> + Send + Sync>,
     /// 界面语言所在的配置。服务名要按它取官方译名，见 [`Self::service_name_for`]。
-    config: ConfigRepository,
+    config: Arc<dyn ConfigStore>,
 }
 
 impl DesktopVrccRuntime {
@@ -159,7 +159,7 @@ impl DesktopVrccRuntime {
         store: LocalVrccTokenStore,
         proxy_url: Option<&str>,
         owner: Arc<dyn Fn() -> Option<vrcx_0_core::OwnerId> + Send + Sync>,
-        config: ConfigRepository,
+        config: Arc<dyn ConfigStore>,
     ) -> Self {
         let db = Arc::clone(store.db());
         let port = Arc::new(TokenStoreAdapter { inner: store });
@@ -188,7 +188,7 @@ impl DesktopVrccRuntime {
     /// 变），也用作提醒缺标题时的兜底。两处都不是渲染期再本地化的通道，所以只能
     /// 在这里定死。系统通知的标题走 `ActivityText::message`，那是渲染期取，不受
     /// 这里影响。
-    fn service_name_for(config: &ConfigRepository) -> String {
+    fn service_name_for(config: &dyn ConfigStore) -> String {
         let language = config
             .get_string(Self::APP_LANGUAGE_CONFIG_KEY, "en")
             .unwrap_or_else(|_| "en".to_string());
@@ -348,9 +348,9 @@ impl DesktopVrccRuntime {
             None if viewed => i64::MAX,
             None => return,
         };
-        if let Err(error) = vrcx_0_persistence::notifications::notification_mark_seen_up_to(
+        if let Err(error) = vrcx_0_outbound_adapters::mark_vrcc_notice_rows_seen_up_to(
             &self.db,
-            owner.as_str().to_string(),
+            owner.as_str(),
             Self::NOTICE_ROW_ID_PREFIX,
             cutoff,
         ) {
@@ -687,7 +687,7 @@ impl DesktopVrccRuntime {
                     } else if snapshot.connected {
                         // 每轮现取：玩家中途改语言时，写进通知中心的发送者名
                         // 和兜底标题都会跟着变。
-                        let service_name = Self::service_name_for(&config);
+                        let service_name = Self::service_name_for(config.as_ref());
                         let ctx = PollContext {
                             service: &service,
                             dispatcher: dispatcher.as_ref(),
@@ -1036,11 +1036,7 @@ fn persist_notices(
     let mut written = 0usize;
     for item in items {
         let row = notice_row(item, &now, sender);
-        match vrcx_0_persistence::notifications::notification_add_v2(
-            db,
-            owner.as_str().to_string(),
-            row,
-        ) {
+        match vrcx_0_outbound_adapters::upsert_vrcc_notice_row(db, owner.as_str(), row) {
             Ok(()) => written += 1,
             Err(error) => {
                 // 只记编号，不记正文：提醒内容属于玩家数据。

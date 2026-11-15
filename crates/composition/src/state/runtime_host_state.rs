@@ -27,7 +27,7 @@ use vrcx_0_application::social::{
 };
 use vrcx_0_application_activity::ActivityWarmupRuntime;
 use vrcx_0_application_core::{
-    BackendRuntime, BackendRuntimeStatusPublisher, BackgroundCapabilitySession, ImageCache,
+    BackendRuntime, BackendRuntimeStatusPublisher, BackgroundCapabilitySessionIdentity, ImageCache,
     RuntimeTaskExecutor, TaskStopReport, TaskSupervisor, UnavailableLocalGameContextSource,
     WebClient,
 };
@@ -132,13 +132,20 @@ pub struct RuntimeHostState {
     pub(super) _profile_lock: ProfileLock,
 }
 
-fn prepare_secrets_at_rest(db: &Arc<DatabaseService>, profile: RuntimeHostProfile) {
+fn prepare_secrets_at_rest(
+    db: &Arc<DatabaseService>,
+    credentials: Arc<dyn vrcx_0_application::auth::AuthCredentialStore>,
+    profile: RuntimeHostProfile,
+) {
     let allow_encrypted_writes = match profile {
         RuntimeHostProfile::Desktop => true,
         RuntimeHostProfile::HeadlessData => false,
     };
-    let mut startup =
-        vrcx_0_outbound_adapters::LocalSecretStartup::new(Arc::clone(db), allow_encrypted_writes);
+    let mut startup = vrcx_0_outbound_adapters::LocalSecretStartup::new(
+        Arc::clone(db),
+        credentials,
+        allow_encrypted_writes,
+    );
     vrcx_0_application::profile::run_secret_startup(&mut startup);
 }
 
@@ -177,10 +184,11 @@ fn prepare_data_dir_migration_startup(
     match journal.phase {
         DataDirMigrationJournalPhase::Copying => {
             if !app_data_paths_match(&resolution.current_dir, Path::new(&journal.source_dir)) {
-                return Err(crate::Error::Custom(format!(
+                return Err(vrcx_0_application_core::Error::Custom(format!(
                     "Interrupted data directory migration does not match the active directory: {}",
                     resolution.current_dir.display()
-                )));
+                ))
+                .into());
             }
             cleanup_interrupted_data_dir_migration(&resolution.default_dir, &journal)?;
             Ok(None)
@@ -192,10 +200,11 @@ fn prepare_data_dir_migration_startup(
                 commit_app_data_dir_pointer(&resolution.default_dir, &target_dir)?;
                 set_active_data_dir(resolution, target_dir);
             } else if !app_data_paths_match(&resolution.current_dir, &target_dir) {
-                return Err(crate::Error::Custom(format!(
+                return Err(vrcx_0_application_core::Error::Custom(format!(
                     "Pending data directory migration does not match the active directory: {}",
                     resolution.current_dir.display()
-                )));
+                ))
+                .into());
             }
             let outcome = finalize_data_dir_migration(&resolution.default_dir, &journal)?;
             Ok(Some(PreparedDataDirMigration { journal, outcome }))
@@ -301,7 +310,11 @@ impl RuntimeHostStateBuilder {
             legacy_vrcx_source,
             legacy_vrcx_migration_status,
         } = opened;
-        prepare_secrets_at_rest(&db, profile);
+        let local_config = Arc::new(vrcx_0_outbound_adapters::LocalConfigStore::new(
+            Arc::clone(&db),
+            Arc::clone(&storage),
+        ));
+        prepare_secrets_at_rest(&db, local_config.clone(), profile);
         let web = Arc::new(WebClient::new(
             vrcx_0_outbound_adapters::LocalWebClientAdapter::new(
                 &storage,
@@ -324,20 +337,21 @@ impl RuntimeHostStateBuilder {
             Arc::clone(&web),
             Arc::clone(&image_cache),
             tasks,
+            local_config,
         ));
         let desktop_assembly =
             RuntimeHostDesktopAssemblyDeps::from_context(Arc::clone(&runtime_context));
         let profile_backup_port = Arc::new(vrcx_0_outbound_adapters::LocalProfileBackupPort::new(
-            vrcx_0_outbound_adapters::LocalProfileBackupDeps::new(
-                paths.app_data.clone(),
-                app_data_dir.default_dir.clone(),
-                Arc::clone(&db),
-                Arc::clone(&storage),
-                runtime_context.event_bus.clone(),
-                runtime_context.tasks.clone(),
-                runtime_context.background_jobs.clone(),
-                app_version.clone(),
-            ),
+            vrcx_0_outbound_adapters::LocalProfileBackupDeps {
+                app_data: paths.app_data.clone(),
+                control_dir: app_data_dir.default_dir.clone(),
+                db: Arc::clone(&db),
+                storage: Arc::clone(&storage),
+                event_bus: runtime_context.event_bus.clone(),
+                tasks: runtime_context.tasks.clone(),
+                background_jobs: runtime_context.background_jobs.clone(),
+                app_version: app_version.clone(),
+            },
         ));
         let profile_backup = ProfileBackupRuntime::new(profile_backup_port);
         let pointer_control_dir = app_data_dir.default_dir.clone();
@@ -408,16 +422,18 @@ impl RuntimeHostStateBuilder {
         match self.profile {
             RuntimeHostProfile::Desktop => {
                 if composition.profile_extension.is_none() {
-                    return Err(crate::Error::Custom(
+                    return Err(vrcx_0_application_core::Error::Custom(
                         "Desktop runtime profile requires a profile extension.".into(),
-                    ));
+                    )
+                    .into());
                 }
             }
             RuntimeHostProfile::HeadlessData => {
                 if composition.profile_extension.is_some() {
-                    return Err(crate::Error::Custom(
+                    return Err(vrcx_0_application_core::Error::Custom(
                         "HeadlessData runtime profile must not receive a profile extension.".into(),
-                    ));
+                    )
+                    .into());
                 }
             }
         }
@@ -431,29 +447,31 @@ impl RuntimeHostStateBuilder {
             Arc::new(Mutex::new(AuthenticatedSessionProjection::default()));
         let current_user_snapshot_sink: Option<RealtimeCurrentUserSnapshotSink> = {
             let session_slot = Arc::clone(&authenticated_session_projection);
+            let auth_scope = self.runtime_context.auth_scope.clone();
             Some(Arc::new(
                 move |session: &RealtimeSessionContext,
                       auth_scope_generation: u64,
                       snapshot: Value| {
-                    let expected = BackgroundCapabilitySession {
+                    let expected = BackgroundCapabilitySessionIdentity {
                         auth_scope_generation,
                         current_user_id: session.user_id.clone(),
                         endpoint: session.endpoint.clone(),
                         websocket: session.websocket.clone(),
-                        current_user_snapshot: Value::Null.into(),
                     };
                     replace_authenticated_session_user_if_session_matches(
                         &session_slot,
+                        &auth_scope,
                         &expected,
                         snapshot,
                     );
                 },
             ))
         };
-        let realtime_store: Arc<dyn vrcx_0_application_realtime::RealtimeStore> =
-            Arc::new(vrcx_0_outbound_adapters::PersistenceRealtimeStore::new(
-                Arc::clone(&self.runtime_context.db),
-            ));
+        let realtime_store = Arc::new(vrcx_0_outbound_adapters::PersistenceRealtimeStore::new(
+            Arc::clone(&self.runtime_context.db),
+        ));
+        let realtime_stores =
+            vrcx_0_application_realtime::RealtimeStores::shared(Arc::clone(&realtime_store));
         let remote_requests: Arc<dyn vrcx_0_application_realtime::RealtimeRemoteRequests> =
             Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeRemoteRequests);
         let backend_status = BackendRuntimeStatusPublisher::new(
@@ -462,48 +480,51 @@ impl RuntimeHostStateBuilder {
         );
         let realtime_transport: Arc<dyn vrcx_0_application_realtime::RealtimeTransport> =
             Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeTransport::new(
-                Arc::clone(&realtime_store),
+                self.runtime_context.db.db_path().to_path_buf(),
                 Arc::clone(&self.runtime_context.web),
                 backend_status.clone(),
             ));
-        let realtime_runtime = Arc::new(RealtimeHostRuntime::new(RealtimeHostRuntimeDeps::new(
-            realtime_store,
-            realtime_transport,
-            remote_requests,
-            Arc::clone(&self.runtime_context.web),
-            self.runtime_context.event_bus.clone(),
-            backend_status,
-            FriendProjectionSink::new(
-                self.runtime_context.event_bus.clone(),
-                friend_projection_observer,
-            ),
-            self.runtime_context.sync.clone(),
-            self.runtime_context.tasks.clone(),
-            self.runtime_context.session.clone(),
-            self.runtime_context.auth_scope.clone(),
-            Arc::clone(&self.runtime_context.remote_mutations),
-            local_game_context,
-            Some(Arc::new(self.runtime_context.activity_router())),
-            Some(Arc::new(
-                self.runtime_context
-                    .realtime_notification_projection_observer_registry(),
-            )),
-            Arc::clone(&self.runtime_context.world_cache),
-            self.runtime_context.file_cache.clone(),
-            Arc::clone(&self.runtime_context.instance_dwell),
-            Arc::new(PrintCleanupQueueSink::new(
-                self.runtime_context.print_cleanup.clone(),
-                self.runtime_context.tasks.clone(),
-                PrintCleanupDeps::new(
-                    self.runtime_context.print_adapter.clone(),
-                    self.runtime_context.print_adapter.clone(),
+        let realtime_runtime = Arc::new(RealtimeHostRuntime::new(
+            RealtimeHostRuntimeDeps {
+                stores: realtime_stores,
+                config: self.runtime_context.config_store(),
+                transport: realtime_transport,
+                remote_requests: Arc::clone(&remote_requests),
+                event_bus: self.runtime_context.event_bus.clone(),
+                backend_status,
+                friend_projection_sink: FriendProjectionSink::new(
                     self.runtime_context.event_bus.clone(),
-                    self.runtime_context.auth_scope.clone(),
-                    Arc::clone(&self.runtime_context.remote_mutations),
+                    friend_projection_observer,
                 ),
-            )),
-            current_user_snapshot_sink,
-        )));
+                sync: self.runtime_context.sync.clone(),
+                tasks: self.runtime_context.tasks.clone(),
+                session: self.runtime_context.session.clone(),
+                auth_scope: self.runtime_context.auth_scope.clone(),
+                remote_mutations: Arc::clone(&self.runtime_context.remote_mutations),
+                local_game_context,
+                activity: Some(Arc::new(self.runtime_context.activity_router())),
+                notification_projection_observer: Some(Arc::new(
+                    self.runtime_context
+                        .realtime_notification_projection_observer_registry(),
+                )),
+                world_cache: Arc::clone(&self.runtime_context.world_cache),
+                file_cache: self.runtime_context.file_cache.clone(),
+                instance_dwell: Arc::clone(&self.runtime_context.instance_dwell),
+                print_cleanup: Arc::new(PrintCleanupQueueSink::new(
+                    self.runtime_context.print_cleanup.clone(),
+                    self.runtime_context.tasks.clone(),
+                    PrintCleanupDeps::new(
+                        self.runtime_context.print_adapter.clone(),
+                        self.runtime_context.print_adapter.clone(),
+                        self.runtime_context.event_bus.clone(),
+                        self.runtime_context.auth_scope.clone(),
+                        Arc::clone(&self.runtime_context.remote_mutations),
+                    ),
+                )),
+                current_user_snapshot_sink,
+            },
+            Arc::clone(&self.runtime_context.web),
+        ));
         let favorites_sink = {
             let activity_router = self.runtime_context.activity_router();
             Some(Arc::new(
@@ -519,10 +540,10 @@ impl RuntimeHostStateBuilder {
         let authenticated_runtime =
             AuthenticatedRuntimeOrchestrator::new(AuthenticatedRuntimeDeps {
                 social_baseline: vrcx_0_application_realtime::SocialBaselineDeps::new(
-                    Arc::new(vrcx_0_outbound_adapters::PersistenceRealtimeStore::new(
-                        Arc::clone(&self.db),
-                    )),
-                    Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeRemoteRequests),
+                    realtime_store.clone(),
+                    realtime_store,
+                    self.runtime_context.config_store(),
+                    remote_requests,
                     Arc::clone(&self.web),
                     self.runtime_context.auth_scope.clone(),
                 ),
@@ -542,24 +563,23 @@ impl RuntimeHostStateBuilder {
                 realtime_runtime: Arc::clone(&realtime_runtime),
                 favorites_sink,
             });
-        let favorite_import = FavoriteImportRuntime::new(FavoriteImportRuntimeDeps::new(
-            Arc::clone(&self.runtime_context.favorite_store),
-            Arc::clone(&self.runtime_context.favorite_remote),
-            Arc::clone(&self.runtime_context.world_cache),
-            Arc::clone(&self.runtime_context.avatar_cache),
-            self.runtime_context.event_bus.clone(),
-            self.runtime_context.tasks.clone(),
-            self.runtime_context.auth_scope.clone(),
-            Arc::clone(&self.runtime_context.remote_mutations),
-            self.runtime_context.favorite_mutations.clone(),
-        ));
+        let favorite_import = FavoriteImportRuntime::new(FavoriteImportRuntimeDeps {
+            store: Arc::clone(&self.runtime_context.favorite_store),
+            remote: Arc::clone(&self.runtime_context.favorite_remote),
+            world_cache: Arc::clone(&self.runtime_context.world_cache),
+            avatar_cache: Arc::clone(&self.runtime_context.avatar_cache),
+            event_bus: self.runtime_context.event_bus.clone(),
+            tasks: self.runtime_context.tasks.clone(),
+            auth_scope: self.runtime_context.auth_scope.clone(),
+            remote_mutations: Arc::clone(&self.runtime_context.remote_mutations),
+            favorite_mutations: self.runtime_context.favorite_mutations.clone(),
+        });
         let group_ban_import = GroupBanImportRuntime::new(
             Arc::new(vrcx_0_outbound_adapters::LocalGroupBanImportActions {
                 deps: GroupApiDeps::new(
                     Arc::new(vrcx_0_outbound_adapters::VrchatRequestAdapter::new(
                         Arc::clone(&self.web),
                     )),
-                    Arc::new(vrcx_0_outbound_adapters::VrchatGroupRemoteRequests),
                     self.runtime_context.diagnostics.clone(),
                     self.runtime_context.sync.clone(),
                     self.runtime_context.auth_scope.clone(),
@@ -574,7 +594,6 @@ impl RuntimeHostStateBuilder {
             Arc::new(
                 vrcx_0_outbound_adapters::LocalSharedCollectionImportActionsFactory::new(
                     Arc::clone(&self.db),
-                    Arc::clone(&self.web),
                     Arc::clone(&self.runtime_context.world_cache),
                 ),
             ),
@@ -587,7 +606,6 @@ impl RuntimeHostStateBuilder {
             Arc::new(vrcx_0_outbound_adapters::VrchatRequestAdapter::new(
                 Arc::clone(&self.web),
             )),
-            Arc::new(vrcx_0_outbound_adapters::VrchatNoteExportRemoteRequests),
             self.runtime_context.event_bus.clone(),
             self.runtime_context.tasks.clone(),
             self.runtime_context.auth_scope.clone(),
@@ -763,9 +781,10 @@ impl RuntimeHostState {
     pub fn new(options: RuntimeHostOptions) -> Result<Self> {
         match options.profile {
             RuntimeHostProfile::Desktop => {
-                return Err(crate::Error::Custom(
+                return Err(vrcx_0_application_core::Error::Custom(
                     "Desktop runtime profile must be constructed by runtime-host-desktop.".into(),
-                ));
+                )
+                .into());
             }
             RuntimeHostProfile::HeadlessData => {}
         }

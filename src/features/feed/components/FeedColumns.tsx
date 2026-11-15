@@ -9,6 +9,7 @@ import {
     DATA_TABLE_METADATA_CELL_CLASS_NAME,
     DATA_TABLE_PRIMARY_CELL_CLASS_NAME
 } from '@/components/data-table/DataTableView';
+import { TimestampText } from '@/components/data-table/TimestampText';
 import { resolveFeedUserId } from '@/components/feed/feedRows';
 import { FeedTypeIndicator } from '@/components/feed/FeedTypeIndicator';
 import type {
@@ -18,16 +19,9 @@ import type {
 } from '@/components/feed/feedTypes';
 import { cn } from '@/lib/utils';
 import { Button } from '@/ui/shadcn/button';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
 
 import { getFeedTableSortValue } from '../feedTableRows';
-import {
-    FeedDetailCell,
-    FeedUserLink,
-    SortButton,
-    formatTimestampLong,
-    formatTimestampParts
-} from './FeedTableParts';
+import { FeedDetailCell, FeedUserLink, SortButton } from './FeedTableParts';
 
 function ExpanderCell({ row }: { row: AppRow<FeedRow> }) {
     if (!row.getCanExpand()) {
@@ -39,7 +33,10 @@ function ExpanderCell({ row }: { row: AppRow<FeedRow> }) {
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="text-muted-foreground hover:text-foreground"
+            className={cn(
+                'text-muted-foreground hover:text-foreground group-hover/feed-row:opacity-100 focus-visible:opacity-100',
+                !row.getIsExpanded() && 'opacity-0'
+            )}
             onClick={() => row.toggleExpanded()}
         >
             <ChevronRightIcon
@@ -54,21 +51,12 @@ function ExpanderCell({ row }: { row: AppRow<FeedRow> }) {
 }
 
 function DateCell({ row }: { row: AppRow<FeedRow> }) {
-    const { date, time } = formatTimestampParts(row.original.created_at);
     return (
-        <Tooltip>
-            <TooltipTrigger
-                render={
-                    <span className="text-sm">
-                        <span>{date}</span>
-                        {time ? <span className="ml-1">{time}</span> : null}
-                    </span>
-                }
-            />
-            <TooltipContent side="right">
-                {formatTimestampLong(row.original.created_at)}
-            </TooltipContent>
-        </Tooltip>
+        <TimestampText
+            value={row.original.created_at}
+            tooltipSide="right"
+            className="text-sm"
+        />
     );
 }
 
@@ -84,6 +72,7 @@ function UserCell({ row, table }: AppCellContext<FeedRow>) {
             cachedDisplayName={
                 meta.friendLogNamesById[resolveFeedUserId(row.original)]
             }
+            filterCommands={meta.filterCommands}
             row={row.original}
         />
     );
@@ -97,6 +86,7 @@ function DetailCell({ row, table }: AppCellContext<FeedRow>) {
 
     return (
         <FeedDetailCell
+            filterCommands={meta.filterCommands}
             loadingHistoryKey={meta.loadingPreviousInstancesKey}
             onNewInstance={meta.actions.openFeedNewInstance}
             onOpenPreviousInstances={meta.onOpenPreviousInstances}
@@ -105,7 +95,10 @@ function DetailCell({ row, table }: AppCellContext<FeedRow>) {
     );
 }
 
-export function useFeedColumns(meta: FeedTableMeta): FeedColumns {
+export function useFeedColumns(
+    meta: FeedTableMeta,
+    searchMode: boolean
+): FeedColumns {
     const { t } = useTranslation();
 
     return useMemo<FeedColumns>(
@@ -127,6 +120,7 @@ export function useFeedColumns(meta: FeedTableMeta): FeedColumns {
             },
             {
                 id: 'created_at',
+                size: searchMode ? 150 : 96,
                 enableHiding: false,
                 accessorFn: (row: FeedRow) =>
                     getFeedTableSortValue(row, 'created_at', meta),
@@ -141,6 +135,7 @@ export function useFeedColumns(meta: FeedTableMeta): FeedColumns {
             },
             {
                 id: 'displayName',
+                size: 180,
                 enableHiding: false,
                 accessorFn: (row: FeedRow) =>
                     getFeedTableSortValue(row, 'displayName', meta),
@@ -198,6 +193,6 @@ export function useFeedColumns(meta: FeedTableMeta): FeedColumns {
                 cell: DetailCell
             }
         ],
-        [meta, t]
+        [meta, searchMode, t]
     );
 }

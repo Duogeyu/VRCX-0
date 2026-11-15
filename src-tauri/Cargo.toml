@@ -1,6 +1,6 @@
 [package]
 name = "vrcx-0"
-version = "2.33.0"
+version = "2.34.0"
 edition = "2021"
 license.workspace = true
 description = "VRCX-0 desktop shell"
@@ -61,9 +61,9 @@ vrcx-0-integration-api = { path = "../crates/integration-api" }
 vrcx-0-assistant = { path = "../crates/assistant" }
 vrcx-0-composition = { path = "../crates/composition" }
 vrcx-0-runtime-host-desktop = { path = "../crates/runtime-host-desktop" }
-specta-typescript = "0.0.9"
+specta-typescript = "0.0.13"
 specta = { workspace = true }
-tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+tauri-specta = { version = "=2.0.0-rc.26", features = ["derive", "typescript"] }
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-global-shortcut = "2"
@@ -81,6 +81,10 @@ windows-sys = { version = "0.61", features = [
 libloading = "0.9"
 rust-ini = "=0.21.1"
 webkit2gtk-nvidia-quirk = "2"
+webkit2gtk = { version = "2", features = ["v2_34"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
 
 [features]
 default = ["steamvr-overlay", "openxr-overlay"]

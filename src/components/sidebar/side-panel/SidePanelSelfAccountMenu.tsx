@@ -1,4 +1,9 @@
-import { CheckIcon, LockIcon, MoreHorizontalIcon } from 'lucide-react';
+import {
+    CheckIcon,
+    LockIcon,
+    LogInIcon,
+    MoreHorizontalIcon
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -8,14 +13,15 @@ import authRepository, {
     type SavedCredentialUser
 } from '@/repositories/authRepository';
 import {
-    canQuickSwitchTo,
-    switchToSavedAccount
+    activateSavedAccount,
+    partitionSavedAccounts
 } from '@/services/accountSwitchService';
 import { logoutFromReactShell } from '@/services/authExecutionService';
 import { userImage } from '@/services/entityMediaService';
 import { requestPrivacyLock } from '@/services/privacyLockService';
 import { toast } from '@/services/toastService';
 import { useRuntimeStore } from '@/state/runtimeStore';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Avatar, AvatarFallback, AvatarImage } from '@/ui/shadcn/avatar';
 import { Button } from '@/ui/shadcn/button';
 import {
@@ -78,9 +84,9 @@ export function SidePanelSelfAccountMenu() {
         };
     }, [open]);
 
-    function handleSwitch(entry: SavedCredentialRecord) {
+    function handleActivate(entry: SavedCredentialRecord) {
         setOpen(false);
-        void switchToSavedAccount(entry);
+        void activateSavedAccount(entry);
     }
 
     function handleLock() {
@@ -101,6 +107,47 @@ export function SidePanelSelfAccountMenu() {
         void logoutFromReactShell();
     }
 
+    const { switchable, requiresLogin } = partitionSavedAccounts(
+        accounts,
+        currentUserId
+    );
+
+    function renderAccount(entry: SavedCredentialRecord, index: number) {
+        const userId = entry.user.id;
+        const isCurrent = Boolean(userId && userId === currentUserId);
+        const needsLogin = !isCurrent && !entry.hasLoginCredentials;
+        const avatarUrl = userImage(entry.user, 64);
+        return (
+            <DropdownMenuItem
+                key={userId || index}
+                disabled={!userId}
+                className="gap-2.5 p-1.5"
+                onClick={isCurrent ? undefined : () => handleActivate(entry)}
+            >
+                <Avatar>
+                    {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
+                    <AvatarFallback>
+                        {accountFallback(entry.user)}
+                    </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm leading-4">
+                        {accountDisplayName(entry.user)}
+                    </div>
+                    <div className="text-muted-foreground truncate text-xs leading-4">
+                        {entry.user.username || userId}
+                    </div>
+                </div>
+                {isCurrent ? (
+                    <CheckIcon className="shrink-0 opacity-70" />
+                ) : null}
+                {needsLogin ? (
+                    <LogInIcon className="text-muted-foreground shrink-0" />
+                ) : null}
+            </DropdownMenuItem>
+        );
+    }
+
     async function handleLogout() {
         setOpen(false);
         try {
@@ -118,19 +165,20 @@ export function SidePanelSelfAccountMenu() {
 
     return (
         <DropdownMenu open={open} onOpenChange={setOpen}>
-            <DropdownMenuTrigger
-                render={
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={t('side_panel.self_more_actions')}
-                        className="text-muted-foreground shrink-0"
-                    >
-                        <MoreHorizontalIcon />
-                    </Button>
-                }
-            />
+            <HintTooltip label={t('side_panel.self_more_actions')}>
+                <DropdownMenuTrigger
+                    render={
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground shrink-0"
+                        >
+                            <MoreHorizontalIcon />
+                        </Button>
+                    }
+                />
+            </HintTooltip>
             <DropdownMenuContent align="end" className="w-64">
                 <DropdownMenuGroup>
                     <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">
@@ -141,54 +189,22 @@ export function SidePanelSelfAccountMenu() {
                             <Spinner className="text-muted-foreground" />
                         </div>
                     ) : (
-                        accounts.map((entry, index) => {
-                            const userId = entry.user.id;
-                            const isCurrent = Boolean(
-                                userId && userId === currentUserId
-                            );
-                            const canSwitch = canQuickSwitchTo(
-                                entry,
-                                currentUserId
-                            );
-                            const avatarUrl = userImage(entry.user, 64);
-                            return (
-                                <DropdownMenuItem
-                                    key={userId || index}
-                                    disabled={!isCurrent && !canSwitch}
-                                    className="gap-2.5 p-1.5"
-                                    onClick={
-                                        canSwitch
-                                            ? () => handleSwitch(entry)
-                                            : undefined
-                                    }
-                                >
-                                    <Avatar>
-                                        {avatarUrl ? (
-                                            <AvatarImage
-                                                src={avatarUrl}
-                                                alt=""
-                                            />
-                                        ) : null}
-                                        <AvatarFallback>
-                                            {accountFallback(entry.user)}
-                                        </AvatarFallback>
-                                    </Avatar>
-                                    <div className="min-w-0 flex-1">
-                                        <div className="truncate text-sm leading-4">
-                                            {accountDisplayName(entry.user)}
-                                        </div>
-                                        <div className="text-muted-foreground truncate text-xs leading-4">
-                                            {entry.user.username || userId}
-                                        </div>
-                                    </div>
-                                    {isCurrent ? (
-                                        <CheckIcon className="shrink-0 opacity-70" />
-                                    ) : null}
-                                </DropdownMenuItem>
-                            );
-                        })
+                        switchable.map(renderAccount)
                     )}
                 </DropdownMenuGroup>
+                {!isLoading && requiresLogin.length > 0 ? (
+                    <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuGroup>
+                            <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">
+                                {t(
+                                    'view.login.saved_group.switch_requires_login'
+                                )}
+                            </DropdownMenuLabel>
+                            {requiresLogin.map(renderAccount)}
+                        </DropdownMenuGroup>
+                    </>
+                ) : null}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={handleLock}>
                     <LockIcon />

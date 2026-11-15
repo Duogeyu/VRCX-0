@@ -17,6 +17,7 @@ use vrcx_0_application_core::{
     TaskSupervisor, WorldCache,
 };
 
+pub use background_capabilities::chatbox;
 pub use background_capabilities::{
     build_background_discord_presence_command, build_background_presence_facts,
     presence_automation_local_group_renamed, presence_automation_rule_enabled_set,
@@ -36,10 +37,11 @@ pub use game_client::{
 pub use game_event_bus::{
     CrashRelaunchDecisionPayload, EmptyEventPayload, GameClientEvent,
     GameLogPersistenceFallbackPayload, GameLogSideEffectEvent, GameLogSideEffectObserver,
-    GameLogSideEffectSink, GameNoVrPayload, NowPlayingPayload, NowPlayingSnapshot,
+    GameLogSideEffectSink, GameNoVrPayload, NowPlayingPayload, NowPlayingSnapshot, NowPlayingStore,
     RuntimeGameEventBusExt, RuntimeGameLogEventPayload, RuntimeNotificationLevel,
     RuntimeNotificationPayload, RuntimeWorkerErrorPayload, ScreenshotProcessedPayload,
 };
+pub use game_log::lifecycle::IS_GAME_NO_VR_CONFIG_KEY;
 pub use game_log::{
     duration_ms, game_log_sessions_query, instance_history_query, parse_event_time_ms, player_key,
     player_list_runtime_snapshot, world_id_from_location, GameLogAvatarChange, GameLogHostActions,
@@ -55,13 +57,16 @@ pub use game_log_import::{
     import_game_log_file, inspect_game_log_import_file, GameLogImportConsent, GameLogImportFile,
     GameLogImportFileStatus,
 };
-pub use game_log_parser::GameLogEvent;
+pub use game_log_parser::{GameLogAuthenticatedUser, GameLogEvent};
 pub use game_log_watcher::{
     GameLogEventOrigin, GameLogEventSink, GameLogScanCursor, LogLocationSnapshot,
     LogLocationSnapshotScanner, LogWatcher, NoopLogLocationSnapshotScanner,
 };
 pub use ports::{
-    BackgroundRemoteApi, GameStateStore, InstanceMediaPort, PlayerModeration, VideoMetadataPort,
+    BackgroundRemoteApi, FavoriteFriendGroupLookup, GameLogLocationQueries, GameLogSessionQueries,
+    GameLogStores, GameLogWriter, InstanceHistoryQueries, InstanceMediaPort,
+    LocationGroupNameFiller, PlayerDirectoryLookup, PlayerModeration, PlayerModerationLookup,
+    VideoMetadataPort,
 };
 pub use process_monitor::{GameProcessMonitorActions, GameProcessStatus, ProcessMonitor};
 pub use registry_backup::{

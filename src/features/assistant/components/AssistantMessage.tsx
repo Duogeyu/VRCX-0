@@ -1,11 +1,15 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 
 import type { UIMessage } from '@/domain/assistant/types';
 import { Bubble, BubbleContent } from '@/ui/shadcn/bubble';
 import { Message, MessageContent } from '@/ui/shadcn/message';
 
+import { AssistantCharts } from './AssistantCharts';
+import { AssistantChoiceCard } from './AssistantChoiceCard';
 import { AssistantMarkdown } from './AssistantMarkdown';
+import { AssistantScreenshots } from './AssistantScreenshots';
 import { AssistantTrace } from './AssistantTrace';
+import { MentionText } from './MentionText';
 
 interface AssistantMessageProps {
     message: UIMessage;
@@ -18,8 +22,11 @@ function AssistantMessageImpl({
 }: AssistantMessageProps) {
     const isUser = message.role === 'user';
     const hasVisibleText = message.text.trim().length > 0;
-    const renderPlain = isUser || message.streaming;
     const alignment = isUser ? 'end' : 'start';
+    const entities = useMemo(
+        () => message.toolCalls.flatMap((call) => call.entities),
+        [message.toolCalls]
+    );
     const traceRunning =
         message.streaming &&
         (!hasVisibleText ||
@@ -36,18 +43,33 @@ function AssistantMessageImpl({
                     />
                 )}
 
+                {message.choices?.map((choice) => (
+                    <AssistantChoiceCard
+                        key={choice.id}
+                        choice={choice}
+                        active={message.streaming}
+                    />
+                ))}
+
                 {hasVisibleText && (
                     <Bubble
                         align={alignment}
-                        variant={isUser ? 'secondary' : 'ghost'}
+                        variant={isUser ? 'muted' : 'ghost'}
+                        className={
+                            isUser
+                                ? '*:data-[slot=bubble-content]:bg-(--state-pressed-surface)'
+                                : undefined
+                        }
                     >
                         <BubbleContent>
-                            {renderPlain ? (
-                                <span className="whitespace-pre-wrap">
-                                    {message.text}
-                                </span>
+                            {isUser ? (
+                                <MentionText text={message.text} />
                             ) : (
-                                <AssistantMarkdown text={message.text} />
+                                <AssistantMarkdown
+                                    text={message.text}
+                                    entities={entities}
+                                    streaming={message.streaming}
+                                />
                             )}
                             {message.streaming && (
                                 <span
@@ -59,6 +81,13 @@ function AssistantMessageImpl({
                             )}
                         </BubbleContent>
                     </Bubble>
+                )}
+
+                {!isUser && !message.streaming && (
+                    <>
+                        <AssistantScreenshots toolCalls={message.toolCalls} />
+                        <AssistantCharts toolCalls={message.toolCalls} />
+                    </>
                 )}
 
                 {message.error && (

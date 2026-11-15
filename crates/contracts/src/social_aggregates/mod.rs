@@ -21,7 +21,7 @@ pub use changes::{
     FriendChangeEvent, FriendChangeKind, FriendChangeRow, FriendChangesInput, FriendChangesOutput,
 };
 pub use common::{ActivityBucket, TimeWindow};
-pub use companions::{CompanionOfRow, CompanionWorldRow, CompanionsOfInput, CompanionsOfOutput};
+pub use companions::{CompanionOfRow, CompanionsOfInput, CompanionsOfOutput};
 pub use copresence::{
     CopresenceAudience, CopresenceGroupBy, CopresenceOrderBy, CopresenceSummaryInput,
     CopresenceSummaryOutput, CopresenceSummaryRow,
@@ -38,5 +38,6 @@ pub use resolve::{ResolveUserInput, ResolveUserOutput, ResolvedUserRow};
 pub use visits::{VisitRosterRow, VisitRow, VisitStint, VisitTimelineInput, VisitTimelineOutput};
 pub use worlds::{
     FavoriteAction, FavoriteLocalInput, FavoriteOutput, SearchWorldsVisitedInput,
-    SearchWorldsVisitedOutput, TopVisitedWorldRow, TopVisitedWorldsInput, VisitedWorldRow,
+    SearchWorldsVisitedOutput, TopVisitedWorldRow, TopVisitedWorldsInput, VisitedWorldMatch,
+    VisitedWorldRow, WorldVisitHistory,
 };

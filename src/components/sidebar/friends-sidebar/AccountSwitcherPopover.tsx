@@ -1,4 +1,4 @@
-import { CheckIcon, ChevronDownIcon } from 'lucide-react';
+import { CheckIcon, ChevronDownIcon, LogInIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -9,12 +9,13 @@ import authRepository, {
     type SavedCredentialUser
 } from '@/repositories/authRepository';
 import {
-    canQuickSwitchTo,
-    switchToSavedAccount
+    activateSavedAccount,
+    partitionSavedAccounts
 } from '@/services/accountSwitchService';
 import { logoutFromReactShell } from '@/services/authExecutionService';
 import { userImage } from '@/services/entityMediaService';
 import { useRuntimeStore } from '@/state/runtimeStore';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Avatar, AvatarFallback, AvatarImage } from '@/ui/shadcn/avatar';
 import { Button } from '@/ui/shadcn/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/ui/shadcn/popover';
@@ -76,9 +77,9 @@ export function AccountSwitcherPopover() {
         return null;
     }
 
-    function handleSwitch(entry: SavedCredentialRecord) {
+    function handleActivate(entry: SavedCredentialRecord) {
         setOpen(false);
-        void switchToSavedAccount(entry);
+        void activateSavedAccount(entry);
     }
 
     function handleUseOtherAccount() {
@@ -86,26 +87,71 @@ export function AccountSwitcherPopover() {
         void logoutFromReactShell();
     }
 
+    const { switchable, requiresLogin } = partitionSavedAccounts(
+        accounts,
+        currentUserId
+    );
+
+    function renderAccount(entry: SavedCredentialRecord, index: number) {
+        const userId = entry.user.id;
+        const isCurrent = Boolean(userId && userId === currentUserId);
+        const needsLogin = !isCurrent && !entry.hasLoginCredentials;
+        const avatarUrl = userImage(entry.user, 64);
+        return (
+            <Button
+                key={userId || index}
+                type="button"
+                variant="ghost"
+                disabled={!userId}
+                aria-current={isCurrent}
+                className="aria-[current=true]:bg-accent/60 h-auto w-full min-w-0 justify-start gap-2.5 p-1.5 text-left font-normal"
+                onClick={isCurrent ? undefined : () => handleActivate(entry)}
+            >
+                <Avatar size="sm">
+                    {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
+                    <AvatarFallback>
+                        {accountFallback(entry.user)}
+                    </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm">
+                        {accountDisplayName(entry.user)}
+                    </div>
+                    <div className="text-muted-foreground truncate text-xs">
+                        {entry.user.username || userId}
+                    </div>
+                </div>
+                {isCurrent ? (
+                    <CheckIcon className="text-foreground shrink-0 opacity-70" />
+                ) : null}
+                {needsLogin ? (
+                    <LogInIcon className="text-muted-foreground shrink-0" />
+                ) : null}
+            </Button>
+        );
+    }
+
     return (
         <Popover open={open} onOpenChange={setOpen}>
-            <PopoverTrigger
-                render={
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={t('view.login.savedAccounts')}
-                        className={cn(
-                            'text-muted-foreground shrink-0 transition-opacity',
-                            open
-                                ? 'opacity-100'
-                                : 'opacity-0 group-hover:opacity-100'
-                        )}
-                    >
-                        <ChevronDownIcon />
-                    </Button>
-                }
-            />
+            <HintTooltip label={t('view.login.savedAccounts')}>
+                <PopoverTrigger
+                    render={
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className={cn(
+                                'text-muted-foreground shrink-0 transition-opacity',
+                                open
+                                    ? 'opacity-100'
+                                    : 'opacity-0 group-hover:opacity-100'
+                            )}
+                        >
+                            <ChevronDownIcon />
+                        </Button>
+                    }
+                />
+            </HintTooltip>
             <PopoverContent
                 side="bottom"
                 align="end"
@@ -119,52 +165,20 @@ export function AccountSwitcherPopover() {
                         <Spinner className="text-muted-foreground" />
                     </div>
                 ) : (
-                    accounts.map((entry, index) => {
-                        const userId = entry.user.id;
-                        const isCurrent = Boolean(
-                            userId && userId === currentUserId
-                        );
-                        const canSwitch = canQuickSwitchTo(
-                            entry,
-                            currentUserId
-                        );
-                        const avatarUrl = userImage(entry.user, 64);
-                        return (
-                            <Button
-                                key={userId || index}
-                                type="button"
-                                variant="ghost"
-                                disabled={!isCurrent && !canSwitch}
-                                aria-current={isCurrent}
-                                className="aria-[current=true]:bg-accent/60 h-auto w-full min-w-0 justify-start gap-2.5 p-1.5 text-left font-normal"
-                                onClick={
-                                    canSwitch
-                                        ? () => handleSwitch(entry)
-                                        : undefined
-                                }
-                            >
-                                <Avatar size="sm">
-                                    {avatarUrl ? (
-                                        <AvatarImage src={avatarUrl} alt="" />
-                                    ) : null}
-                                    <AvatarFallback>
-                                        {accountFallback(entry.user)}
-                                    </AvatarFallback>
-                                </Avatar>
-                                <div className="min-w-0 flex-1">
-                                    <div className="truncate text-sm">
-                                        {accountDisplayName(entry.user)}
-                                    </div>
-                                    <div className="text-muted-foreground truncate text-xs">
-                                        {entry.user.username || userId}
-                                    </div>
+                    <>
+                        {switchable.map(renderAccount)}
+                        {requiresLogin.length > 0 ? (
+                            <>
+                                <div className="bg-border my-0.5 h-px" />
+                                <div className="text-muted-foreground px-2 py-1 text-xs">
+                                    {t(
+                                        'view.login.saved_group.switch_requires_login'
+                                    )}
                                 </div>
-                                {isCurrent ? (
-                                    <CheckIcon className="text-foreground shrink-0 opacity-70" />
-                                ) : null}
-                            </Button>
-                        );
-                    })
+                                {requiresLogin.map(renderAccount)}
+                            </>
+                        ) : null}
+                    </>
                 )}
                 <div className="bg-border my-0.5 h-px" />
                 <Button

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use crate::database::DatabaseService;
 use crate::game_log::{
     game_log_instance_delete, game_log_query, get_game_log_events, get_game_log_locations,
-    previous_instance_event_rows_query, GameLogQuery, GameLogQueryOutput,
+    get_visit_span_at, previous_instance_event_rows_query, GameLogQuery, GameLogQueryOutput,
+    GameLogVisitSpan,
 };
 use crate::Error;
 use serde_json::json;
@@ -11,7 +12,7 @@ use serde_json::json;
 use super::super::tables::ensure_game_log_tables;
 use super::super::types::{
     GameLogEventEntry, GameLogJoinLeaveEntry, GameLogLocationEntry, GameLogPortalSpawnEntry,
-    GameLogResourceLoadEntry, GameLogWriteBatch,
+    GameLogResourceLoadEntry, GameLogVideoPlayEntry, GameLogVideoPlayName, GameLogWriteBatch,
 };
 use super::{
     fill_location_group_name, insert_event, insert_join_leave, insert_location,
@@ -195,6 +196,102 @@ fn updates_location_duration_by_created_at() -> Result<(), Error> {
 }
 
 #[test]
+fn finds_the_visit_that_contains_a_moment() -> Result<(), Error> {
+    let test_db = test_db("store-gamelog-visit-span")?;
+    let db = &test_db.db;
+    let owner = OwnerId::new("usr_test");
+    for (created_at, world_id, time) in [
+        ("2026-05-14T01:00:00.000Z", "wrld_first", 3_600_000),
+        ("2026-05-14T03:00:00.000Z", "wrld_second", 0),
+    ] {
+        insert_location(
+            db,
+            &GameLogLocationEntry {
+                created_at: created_at.into(),
+                location: format!("{world_id}:1"),
+                world_id: world_id.into(),
+                world_name: world_id.into(),
+                time,
+                group_name: "".into(),
+            },
+        )?;
+    }
+
+    assert_eq!(
+        get_visit_span_at(db, &owner, "2026-05-14T00:30:00.000Z")?,
+        None
+    );
+    assert_eq!(
+        get_visit_span_at(db, &owner, "2026-05-14T01:30:00.000Z")?,
+        Some(GameLogVisitSpan {
+            created_at: "2026-05-14T01:00:00.000Z".into(),
+            world_id: "wrld_first".into(),
+            time_ms: 3_600_000,
+            latest: false,
+        })
+    );
+    assert_eq!(
+        get_visit_span_at(db, &owner, "2026-05-14T03:30:00.000Z")?,
+        Some(GameLogVisitSpan {
+            created_at: "2026-05-14T03:00:00.000Z".into(),
+            world_id: "wrld_second".into(),
+            time_ms: 0,
+            latest: true,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn renames_only_the_matching_video_play() -> Result<(), Error> {
+    let test_db = test_db("store-gamelog-video-name")?;
+    let db = &test_db.db;
+    let owner = OwnerId::new("usr_test");
+    let video = |created_at: &str| GameLogVideoPlayEntry {
+        created_at: created_at.into(),
+        video_url: "https://video.example/a".into(),
+        video_name: "https://video.example/a".into(),
+        video_id: String::new(),
+        location: "wrld_video:1".into(),
+        display_name: String::new(),
+        user_id: String::new(),
+    };
+    write_batch(
+        db,
+        &owner,
+        &GameLogWriteBatch {
+            video_plays: vec![
+                video("2026-05-14T03:00:00.000Z"),
+                video("2026-05-14T04:00:00.000Z"),
+            ],
+            ..Default::default()
+        },
+    )?;
+
+    let count = write_batch(
+        db,
+        &owner,
+        &GameLogWriteBatch {
+            video_play_names: vec![GameLogVideoPlayName {
+                created_at: "2026-05-14T03:00:00.000Z".into(),
+                video_url: "https://video.example/a".into(),
+                video_name: "Song".into(),
+            }],
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(count.video_names_updated, 1);
+
+    let rows = db.execute(
+        "SELECT video_name FROM gamelog_video_play ORDER BY created_at",
+        &Default::default(),
+    )?;
+    assert_eq!(rows[0][0], serde_json::json!("Song"));
+    assert_eq!(rows[1][0], serde_json::json!("https://video.example/a"));
+    Ok(())
+}
+
+#[test]
 fn fills_only_the_matching_location_group_name_once() -> Result<(), Error> {
     let test_db = test_db("store-gamelog-group-name")?;
     let db = &test_db.db;
@@ -265,7 +362,7 @@ fn writes_core_rows_in_one_batch_and_keeps_deduplication() -> Result<(), Error> 
         data: "event data".into(),
     });
 
-    let affected_count = write_batch(db, &OwnerId::new("usr_test"), &batch)?;
+    let affected_count = write_batch(db, &OwnerId::new("usr_test"), &batch)?.affected();
     assert_eq!(affected_count, 3);
 
     let rows = db.execute("SELECT COUNT(*) FROM gamelog_location", &Default::default())?;
@@ -321,7 +418,10 @@ fn account_scoped_reads_include_shared_rows_and_machine_cursor_stays_global() ->
             time: 1,
             group_name: "".into(),
         });
-        assert_eq!(write_batch(db, &OwnerId::new(owner_user_id), &batch)?, 2);
+        assert_eq!(
+            write_batch(db, &OwnerId::new(owner_user_id), &batch)?.affected(),
+            2
+        );
     }
 
     assert_eq!(
@@ -387,8 +487,14 @@ fn game_log_uniqueness_remains_machine_global() -> Result<(), Error> {
         data: "duplicate".into(),
     });
 
-    assert_eq!(write_batch(db, &OwnerId::new("usr_a"), &batch)?, 1);
-    assert_eq!(write_batch(db, &OwnerId::new("usr_b"), &batch)?, 0);
+    assert_eq!(
+        write_batch(db, &OwnerId::new("usr_a"), &batch)?.affected(),
+        1
+    );
+    assert_eq!(
+        write_batch(db, &OwnerId::new("usr_b"), &batch)?.affected(),
+        0
+    );
     assert!(get_game_log_events(db, &OwnerId::new("usr_b"))?.is_empty());
     Ok(())
 }

@@ -10,6 +10,8 @@ pub use vrcx_0_contracts::llm::{
 };
 use vrcx_0_core::proxy::with_remote_dns;
 
+mod responses;
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("LLM transport error: {}", transport_error_detail(.0))]
@@ -60,6 +62,8 @@ struct ChatRequestBody<'a> {
     messages: &'a [ChatMessage],
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<RequestTool<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningRequest>,
@@ -111,11 +115,14 @@ struct ChunkDelta {
 
 #[derive(Deserialize)]
 struct ChunkToolCall {
-    index: usize,
+    #[serde(default)]
+    index: Option<usize>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
     function: Option<ChunkFunction>,
+    #[serde(default)]
+    extra_content: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +138,7 @@ struct ToolCallAcc {
     id: String,
     name_fragments: Vec<String>,
     argument_fragments: Vec<String>,
+    extra_content: Option<Value>,
 }
 
 #[derive(Default)]
@@ -237,10 +245,14 @@ impl LlmClient {
         messages: &[ChatMessage],
         options: &LlmRequestOptions,
     ) -> Result<String, LlmError> {
+        if self.uses_responses_api() {
+            return self.complete_responses(messages, options).await;
+        }
         let body = ChatRequestBody {
             model: &self.model,
             messages,
             tools: Vec::new(),
+            tool_choice: None,
             stream: false,
             reasoning: reasoning_request(options),
         };
@@ -270,6 +282,11 @@ impl LlmClient {
     where
         F: FnMut(&str),
     {
+        if self.uses_responses_api() {
+            return self
+                .stream_responses(messages, tools, options, on_text)
+                .await;
+        }
         let request_tools = tools
             .iter()
             .map(|tool| RequestTool {
@@ -285,6 +302,7 @@ impl LlmClient {
             model: &self.model,
             messages,
             tools: request_tools,
+            tool_choice: (options.forbid_tool_calls && !tools.is_empty()).then_some("none"),
             stream: true,
             reasoning: reasoning_request(options),
         };
@@ -343,6 +361,7 @@ impl LlmClient {
                         name,
                         arguments: assemble_tool_arguments(&acc.argument_fragments),
                     },
+                    extra_content: acc.extra_content,
                 })
             })
             .collect();
@@ -375,7 +394,9 @@ impl LlmClient {
                         },
                     )
                 }
-                Err(error) if error.is_connect() => (Some(backoff_delay(attempt)), error.into()),
+                Err(error) if error.is_connect() || (error.is_request() && !error.is_timeout()) => {
+                    (Some(backoff_delay(attempt)), error.into())
+                }
                 Err(error) => return Err(error.into()),
             };
             let Some(delay) = delay.filter(|_| attempt < MAX_RETRIES) else {
@@ -553,13 +574,26 @@ where
         }
         if let Some(calls) = choice.delta.tool_calls {
             let tool_acc = &mut state.tool_acc;
-            for call in calls {
-                if tool_acc.len() <= call.index {
-                    tool_acc.resize_with(call.index + 1, ToolCallAcc::default);
+            let positional = calls.len() > 1;
+            for (array_index, call) in calls.into_iter().enumerate() {
+                let index = match (call.index, call.id.as_deref()) {
+                    (Some(index), _) => index,
+                    (None, Some(id)) => tool_acc
+                        .iter()
+                        .position(|acc| !acc.id.is_empty() && acc.id == id)
+                        .unwrap_or(tool_acc.len()),
+                    (None, None) if positional => array_index,
+                    (None, None) => tool_acc.len().saturating_sub(1),
+                };
+                if tool_acc.len() <= index {
+                    tool_acc.resize_with(index + 1, ToolCallAcc::default);
                 }
-                let acc = &mut tool_acc[call.index];
+                let acc = &mut tool_acc[index];
                 if let Some(id) = call.id {
                     acc.id = id;
+                }
+                if call.extra_content.is_some() {
+                    acc.extra_content = call.extra_content;
                 }
                 if let Some(function) = call.function {
                     if let Some(name) = function.name {
@@ -652,24 +686,23 @@ fn parse_chat_completion_content(body: &str) -> Result<String, LlmError> {
             status: 200,
             message: format!("unexpected chat completion response: {error}"),
         })?;
-    let Some(content) = payload
-        .choices
-        .into_iter()
-        .find_map(|choice| choice.message.content)
-    else {
-        return Err(LlmError::Api {
+    non_empty_content(
+        payload
+            .choices
+            .into_iter()
+            .find_map(|choice| choice.message.content),
+        "chat completion",
+    )
+}
+
+fn non_empty_content(content: Option<String>, source: &str) -> Result<String, LlmError> {
+    content
+        .map(|content| content.trim().to_string())
+        .filter(|content| !content.is_empty())
+        .ok_or_else(|| LlmError::Api {
             status: 200,
-            message: "unexpected chat completion response: missing message content".into(),
-        });
-    };
-    let content = content.trim().to_string();
-    if content.is_empty() {
-        return Err(LlmError::Api {
-            status: 200,
-            message: "unexpected chat completion response: missing message content".into(),
-        });
-    }
-    Ok(content)
+            message: format!("unexpected {source} response: missing message content"),
+        })
 }
 
 fn drain_complete_lines(buffer: &mut Vec<u8>, mut handle_line: impl FnMut(&str)) {

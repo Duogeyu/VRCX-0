@@ -570,15 +570,19 @@ pub struct VrccBoardMap {
 #[serde(rename_all = "camelCase")]
 pub struct VrccMapHot {
     /// 那句短评。
+    #[specta(type = Option<String>)]
     #[serde(default, deserialize_with = "lenient_optional_string")]
     pub text: Option<String>,
     /// 出处（形如「某位炉边倾听者」）。
+    #[specta(type = Option<String>)]
     #[serde(default, deserialize_with = "lenient_optional_string")]
     pub by: Option<String>,
     /// 点赞数。
+    #[specta(type = Option<i64>)]
     #[serde(default, deserialize_with = "lenient_optional_i64")]
     pub up: Option<i64>,
     /// 写的人去过这张图。
+    #[specta(type = Option<bool>)]
     #[serde(default, deserialize_with = "lenient_optional_bool")]
     pub went: Option<bool>,
 }
@@ -754,12 +758,15 @@ pub struct VrccBoardModel {
     /// 用 `lenient_i64` 而不是裸 `i64`：这个值只参与展示，**不决定这一行能不能
     /// 渲染**。服务器哪天把它写成字符串（网页上就是这种写法），整个模型榜不该
     /// 因此空白；读不出来就当 0，名次还能靠 `rank` 显示。
+    #[specta(type = i64)]
     #[serde(default, deserialize_with = "lenient_i64")]
     pub likes: i64,
     /// 本周几个喜欢；问往周（`w`）时是那一周的。
+    #[specta(type = Option<i64>)]
     #[serde(default, deserialize_with = "lenient_optional_i64")]
     pub week: Option<i64>,
     /// 总榜名次，1 起；没人喜欢的是 `null`。
+    #[specta(type = Option<i64>)]
     #[serde(default, deserialize_with = "lenient_optional_i64")]
     pub rank: Option<i64>,
     /// 星遇同频模型榜上的公开页。
@@ -775,6 +782,7 @@ pub struct VrccBoardModel {
     #[serde(default)]
     pub hot: Option<VrccModelHot>,
     /// 只在 `sort=week` 里有：这一周的名次（喜欢满 3 个才有）。
+    #[specta(type = Option<i64>)]
     #[serde(default, deserialize_with = "lenient_optional_i64")]
     pub place: Option<i64>,
     /// 只在 `sort=week` 里有：比上一周升了几名，降是负数。
@@ -782,9 +790,11 @@ pub struct VrccBoardModel {
     /// 官方字段名就叫 `move`，是 Rust 关键字，只能写成原始标识符。`serde`
     /// 不会自动剥 `r#`，所以必须显式 `rename`——否则键名会变成 `r#move`，
     /// 服务器给的 `move` 永远读不到，而且不报错。
+    #[specta(type = Option<i64>)]
     #[serde(rename = "move", default, deserialize_with = "lenient_optional_i64")]
     pub r#move: Option<i64>,
     /// 只在 `sort=week` 里可能有：上一周不在榜上，这周新上来。
+    #[specta(type = Option<bool>)]
     #[serde(default, deserialize_with = "lenient_optional_bool")]
     pub fresh: Option<bool>,
 }
@@ -809,12 +819,15 @@ impl VrccBoardModel {
 #[serde(rename_all = "camelCase")]
 pub struct VrccModelHot {
     /// 那句短评。
+    #[specta(type = Option<String>)]
     #[serde(default, deserialize_with = "lenient_optional_string")]
     pub text: Option<String>,
     /// 出处（形如「某位彩蛋猎人」）。
+    #[specta(type = Option<String>)]
     #[serde(default, deserialize_with = "lenient_optional_string")]
     pub by: Option<String>,
     /// 点赞数。
+    #[specta(type = Option<i64>)]
     #[serde(default, deserialize_with = "lenient_optional_i64")]
     pub up: Option<i64>,
 }

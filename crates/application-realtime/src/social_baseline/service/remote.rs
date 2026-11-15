@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::Value;
-use tokio::time::{sleep, timeout_at, Instant};
-use vrcx_0_application_core::{Error, Result};
+use tokio::time::{timeout_at, Instant};
+use vrcx_0_application_core::{Error, RateLimitBackoff, Result};
 
-use super::{object_field, ApiJsonResponse, ApiScope, HttpApiRequestInput, SocialBaselineDeps};
+use super::{object_field, SocialBaselineDeps, VrchatJsonResponse, VrchatRequest, VrchatScope};
 
 #[cfg(test)]
 use std::sync::Arc;
@@ -16,12 +16,11 @@ use std::sync::Arc;
 use super::json;
 
 const PAGED_ARRAY_CONCURRENCY: usize = 5;
-const PAGED_ARRAY_MAX_RETRIES: usize = 5;
 const FRIEND_STATUS_VERIFICATION_BUDGET: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
-const PAGED_ARRAY_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+const PAGED_ARRAY_BACKOFF: RateLimitBackoff = RateLimitBackoff::new(Duration::from_secs(1), 5);
 #[cfg(test)]
-const PAGED_ARRAY_RETRY_BASE_DELAY: Duration = Duration::from_millis(1);
+const PAGED_ARRAY_BACKOFF: RateLimitBackoff = RateLimitBackoff::new(Duration::from_millis(1), 5);
 
 #[derive(Debug)]
 struct PageFetch {
@@ -53,11 +52,11 @@ type RemoteFetchResult<T> = std::result::Result<T, RemoteFetchError>;
 
 pub(crate) async fn execute_vrchat_json_request(
     deps: &SocialBaselineDeps,
-    request: HttpApiRequestInput,
+    request: VrchatRequest,
 ) -> Result<Value> {
-    let response = deps.web.execute_api(request, ApiScope::Vrchat).await?;
+    let response = deps.web.execute_api(request, VrchatScope::Vrchat).await?;
 
-    let response = ApiJsonResponse::from(&response);
+    let response = VrchatJsonResponse::from(&response);
     if response.is_failure() {
         return Err(Error::VrchatApi {
             status_code: response.status,
@@ -76,7 +75,7 @@ pub(super) async fn fetch_paged_array<F>(
     build_request: F,
 ) -> Result<Vec<Value>>
 where
-    F: Fn(i32, i32) -> Result<HttpApiRequestInput> + Clone,
+    F: Fn(i32, i32) -> Result<VrchatRequest> + Clone,
 {
     fetch_paged_array_with_page_fetcher(page_size, max_offset, |n, offset| {
         let build_request = build_request.clone();
@@ -95,11 +94,11 @@ where
 
 async fn execute_vrchat_json_page_request(
     deps: &SocialBaselineDeps,
-    request: HttpApiRequestInput,
+    request: VrchatRequest,
 ) -> RemoteFetchResult<Value> {
-    let response = deps.web.execute_api(request, ApiScope::Vrchat).await?;
+    let response = deps.web.execute_api(request, VrchatScope::Vrchat).await?;
 
-    let response = ApiJsonResponse::from(&response);
+    let response = VrchatJsonResponse::from(&response);
     if response.is_failure() {
         let message =
             response.error_message_with_http_status("VRChat social baseline request failed");
@@ -177,17 +176,13 @@ where
     F: Fn(i32, i32) -> Fut,
     Fut: Future<Output = RemoteFetchResult<Vec<Value>>>,
 {
-    let mut attempt = 0usize;
-    loop {
-        match fetch_page(page_size, offset).await {
-            Ok(rows) => return Ok(PageFetch { offset, rows }),
-            Err(RemoteFetchError::RateLimited(_)) if attempt < PAGED_ARRAY_MAX_RETRIES => {
-                sleep(backoff_delay(attempt)).await;
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    PAGED_ARRAY_BACKOFF
+        .retry(
+            || fetch_page(page_size, offset),
+            |result| matches!(result, Err(RemoteFetchError::RateLimited(_))),
+        )
+        .await
+        .map(|rows| PageFetch { offset, rows })
 }
 
 fn offset_allowed(offset: i32, max_offset: Option<i32>) -> bool {
@@ -195,10 +190,6 @@ fn offset_allowed(offset: i32, max_offset: Option<i32>) -> bool {
         && max_offset
             .map(|max_offset| offset <= max_offset)
             .unwrap_or(true)
-}
-
-fn backoff_delay(attempt: usize) -> Duration {
-    PAGED_ARRAY_RETRY_BASE_DELAY.saturating_mul(2u32.saturating_pow(attempt as u32))
 }
 
 pub(crate) async fn refetch_users_concurrent(
@@ -256,7 +247,7 @@ async fn fetch_per_user_concurrent<F>(
     build_request: F,
 ) -> HashMap<String, Value>
 where
-    F: Fn(&str) -> Option<HttpApiRequestInput>,
+    F: Fn(&str) -> Option<VrchatRequest>,
 {
     fetch_per_user_concurrent_with_budget(deps, user_ids, build_request, None)
         .await
@@ -270,7 +261,7 @@ async fn fetch_per_user_concurrent_with_budget<F>(
     budget: Option<Duration>,
 ) -> (HashMap<String, Value>, bool)
 where
-    F: Fn(&str) -> Option<HttpApiRequestInput>,
+    F: Fn(&str) -> Option<VrchatRequest>,
 {
     collect_per_user_results(user_ids, budget, |user_id| {
         fetch_user_with_backoff(deps, &build_request, user_id)
@@ -325,33 +316,33 @@ async fn fetch_user_with_backoff<F>(
     user_id: String,
 ) -> (String, Option<Value>)
 where
-    F: Fn(&str) -> Option<HttpApiRequestInput>,
+    F: Fn(&str) -> Option<VrchatRequest>,
 {
-    let mut attempt = 0usize;
-    loop {
-        let Some(request) = build_request(&user_id) else {
-            return (user_id, None);
-        };
-        match execute_vrchat_json_page_request(deps, request).await {
-            Ok(value) => return (user_id, Some(value)),
-            Err(RemoteFetchError::RateLimited(_)) if attempt < PAGED_ARRAY_MAX_RETRIES => {
-                sleep(backoff_delay(attempt)).await;
-                attempt += 1;
-            }
-            Err(_) => return (user_id, None),
-        }
-    }
+    let user_id_ref = &user_id;
+    let value = PAGED_ARRAY_BACKOFF
+        .retry(
+            || async move {
+                let request = build_request(user_id_ref)?;
+                Some(execute_vrchat_json_page_request(deps, request).await)
+            },
+            |result| matches!(result, Some(Err(RemoteFetchError::RateLimited(_)))),
+        )
+        .await
+        .and_then(|result| result.ok());
+    (user_id, value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::sleep;
 
     #[test]
     fn social_error_message_keeps_http_status() {
-        let message = ApiJsonResponse::parse(500, r#"{"error":{"message":"Application error."}}"#)
-            .error_message_with_http_status("VRChat social baseline request failed");
+        let message =
+            VrchatJsonResponse::parse(500, r#"{"error":{"message":"Application error."}}"#)
+                .error_message_with_http_status("VRChat social baseline request failed");
 
         assert_eq!(message, "Application error. (HTTP 500)");
     }

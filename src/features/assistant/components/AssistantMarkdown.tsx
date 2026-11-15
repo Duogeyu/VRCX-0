@@ -1,10 +1,17 @@
-import { Children, isValidElement, type ReactNode } from 'react';
+import { Children, isValidElement, memo, useMemo, type ReactNode } from 'react';
 import type { Components } from 'react-markdown';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remend, { type RemendOptions } from 'remend';
 
 import { HighlightedCodeBlock } from '@/components/HighlightedCodeBlock';
+import type { Entity } from '@/domain/assistant/types';
 import { openExternalLink } from '@/services/entityMediaService';
+
+import { entityLinking, parseEntityHref } from '../entityLinks';
+import { EntityChip } from './EntityChip';
+
+const NO_ENTITIES: Entity[] = [];
 
 function AssistantCodeBlock({ children }: { children?: ReactNode }) {
     const codeElement = Children.toArray(children)[0];
@@ -54,19 +61,26 @@ const markdownComponents: Components = {
         </code>
     ),
     pre: AssistantCodeBlock,
-    a: ({ href, children }) => (
-        <button
-            type="button"
-            className="text-primary cursor-pointer underline underline-offset-2"
-            onClick={() => {
-                if (href) {
-                    openExternalLink(href);
-                }
-            }}
-        >
-            {children}
-        </button>
-    ),
+    a: ({ href, children }) => {
+        const entity = parseEntityHref(href);
+        return entity ? (
+            <EntityChip kind={entity.kind} id={entity.id}>
+                {children}
+            </EntityChip>
+        ) : (
+            <button
+                type="button"
+                className="text-primary cursor-pointer underline underline-offset-2"
+                onClick={() => {
+                    if (href) {
+                        openExternalLink(href);
+                    }
+                }}
+            >
+                {children}
+            </button>
+        );
+    },
     h1: ({ children }) => (
         <h1 className="mt-2 mb-1 text-base font-semibold">{children}</h1>
     ),
@@ -100,17 +114,95 @@ const markdownComponents: Components = {
     td: ({ children }) => <td className="px-3 py-1.5 align-top">{children}</td>
 };
 
-interface AssistantMarkdownProps {
-    text: string;
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const LIST_ITEM = /^(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
+
+function splitMarkdownBlocks(text: string): string[] {
+    const lines = text.split('\n');
+    const blocks: string[] = [];
+    let start = 0;
+    let fence: string | null = null;
+    let afterBlank = false;
+    lines.forEach((line, index) => {
+        const fenceMatch = FENCE.exec(line);
+        if (fence) {
+            if (
+                fenceMatch &&
+                fenceMatch[1][0] === fence[0] &&
+                fenceMatch[1].length >= fence.length &&
+                line.trim() === fenceMatch[1]
+            ) {
+                fence = null;
+            }
+            return;
+        }
+        if (line.trim() === '') {
+            afterBlank = true;
+            return;
+        }
+        if (afterBlank && !/^\s/.test(line) && !LIST_ITEM.test(line)) {
+            blocks.push(lines.slice(start, index).join('\n'));
+            start = index;
+        }
+        afterBlank = false;
+        if (fenceMatch) {
+            fence = fenceMatch[1];
+        }
+    });
+    blocks.push(lines.slice(start).join('\n'));
+    return blocks;
 }
 
-export function AssistantMarkdown({ text }: AssistantMarkdownProps) {
+const STREAMING_TAIL_OPTIONS: RemendOptions = {
+    comparisonOperators: false,
+    images: false,
+    linkMode: 'text-only',
+    singleTilde: false
+};
+
+const MarkdownBlock = memo(function MarkdownBlock({
+    text,
+    linking
+}: {
+    text: string;
+    linking: ReturnType<typeof entityLinking>;
+}) {
     return (
         <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
+            remarkPlugins={[remarkGfm, linking.remarkPlugin]}
+            urlTransform={(url) =>
+                linking.isEntityHref(url) ? url : defaultUrlTransform(url)
+            }
             components={markdownComponents}
         >
             {text}
         </ReactMarkdown>
     );
+});
+
+interface AssistantMarkdownProps {
+    text: string;
+    entities?: readonly Entity[];
+    streaming?: boolean;
+}
+
+export function AssistantMarkdown({
+    text,
+    entities = NO_ENTITIES,
+    streaming = false
+}: AssistantMarkdownProps) {
+    const linking = useMemo(() => entityLinking(entities), [entities]);
+    const blocks = splitMarkdownBlocks(text);
+    const last = blocks.length - 1;
+    return blocks.map((block, index) => (
+        <MarkdownBlock
+            key={index}
+            text={
+                streaming && index === last
+                    ? remend(block, STREAMING_TAIL_OPTIONS)
+                    : block
+            }
+            linking={linking}
+        />
+    ));
 }

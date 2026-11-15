@@ -43,6 +43,29 @@ describe('assistant health telemetry', () => {
         });
     });
 
+    it('keeps time phrase vocabulary in time window args and masks other words', async () => {
+        const { appTelemetryRecordEvent } = mockTelemetryCommand();
+        const mod = await import('./telemetryAssistantHealth');
+
+        mod.recordAssistantToolError({
+            source: 'get_copresence_summary',
+            args: JSON.stringify({
+                groupBy: 'friend_world',
+                timeWindow: 'Past 30 days',
+                period: 'since I met Alice',
+                query: 'this week'
+            }),
+            summary: "unrecognized timeWindow string 'Past 30 days'"
+        });
+
+        expect(appTelemetryRecordEvent).toHaveBeenCalledWith({
+            type: 'assistantToolError',
+            source: 'get_copresence_summary',
+            summary:
+                'groupBy=friend_world, period=since <word> <word> <word>, query=<text>, timeWindow=past 30 days; result=invalid_args'
+        });
+    });
+
     it('classifies assistant tool result summaries without sending result text', async () => {
         const { appTelemetryRecordEvent } = mockTelemetryCommand();
         const mod = await import('./telemetryAssistantHealth');
@@ -172,6 +195,35 @@ describe('assistant health telemetry', () => {
             type: 'assistantToolError',
             source: 'get_copresence_summary',
             summary: 'result=invalid_args'
+        });
+    });
+
+    it('separates truncated responses from malformed tool arguments', async () => {
+        const { appTelemetryRecordEvent } = mockTelemetryCommand();
+        const mod = await import('./telemetryAssistantHealth');
+
+        mod.recordAssistantToolError({
+            source: 'get_activity_timeline',
+            args: '{"bucket":"mon',
+            summary:
+                'tool error: tool `get_activity_timeline` was not run: the response hit the output token limit, so its arguments may be cut off. Re-issue the call with complete arguments.'
+        });
+        mod.recordAssistantToolError({
+            source: 'get_activity_timeline',
+            args: "{bucket: 'month', note: 'timeout'}",
+            summary:
+                "tool error: tool `get_activity_timeline` was not run: its arguments are not a valid JSON object (key must be a string at line 1 column 2). Received arguments: {bucket: 'month', note: 'timeout'}. Re-issue the call with a valid JSON object."
+        });
+
+        expect(appTelemetryRecordEvent).toHaveBeenNthCalledWith(1, {
+            type: 'assistantToolError',
+            source: 'get_activity_timeline',
+            summary: 'args=<text>; result=truncated'
+        });
+        expect(appTelemetryRecordEvent).toHaveBeenNthCalledWith(2, {
+            type: 'assistantToolError',
+            source: 'get_activity_timeline',
+            summary: 'args=<text>; result=malformed_args'
         });
     });
 

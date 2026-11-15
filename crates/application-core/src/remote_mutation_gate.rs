@@ -5,10 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    vrchat_api::VrchatApiRequest, Error, Result, RuntimeAuthScope, RuntimeAuthScopeSnapshot,
-};
+use crate::{Error, Result, RuntimeAuthScope, RuntimeAuthScopeSnapshot};
 use tokio::sync::Mutex as AsyncMutex;
+use vrcx_0_contracts::vrchat_api::VrchatRequest;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RemoteMutationKey {
@@ -85,12 +84,14 @@ impl<'a> AuthenticatedMutationContext<'a> {
         &self.expected_scope
     }
 
-    pub fn ensure_current(&self) -> Result<()> {
-        if self
-            .auth_scope
+    pub fn is_current(&self) -> bool {
+        self.auth_scope
             .snapshot()
             .generation_matches(&self.expected_scope)
-        {
+    }
+
+    pub fn ensure_current(&self) -> Result<()> {
+        if self.is_current() {
             Ok(())
         } else {
             Err(Error::Custom(format!(
@@ -100,15 +101,19 @@ impl<'a> AuthenticatedMutationContext<'a> {
         }
     }
 
-    pub async fn wait_for_remote(&self, interval: Duration) -> Result<()> {
-        self.ensure_current()?;
+    pub async fn pace(&self, interval: Duration) {
         self.remote_mutation_gate
             .wait(&self.expected_scope, interval)
             .await;
+    }
+
+    pub async fn wait_for_remote(&self, interval: Duration) -> Result<()> {
+        self.ensure_current()?;
+        self.pace(interval).await;
         self.ensure_current()
     }
 
-    pub fn apply_scope_to_request(&self, request: &mut VrchatApiRequest) {
+    pub fn apply_scope_to_request(&self, request: &mut VrchatRequest) {
         if request.url.is_none() {
             request.endpoint = Some(self.expected_scope.endpoint.clone());
         }
@@ -126,7 +131,7 @@ impl<'a> AuthenticatedMutationContext<'a> {
     }
 }
 
-pub fn is_remote_mutation_request(request: &VrchatApiRequest) -> bool {
+pub fn is_remote_mutation_request(request: &VrchatRequest) -> bool {
     !matches!(
         request.method.as_deref().unwrap_or("GET").trim(),
         method if method.eq_ignore_ascii_case("GET")
@@ -220,7 +225,7 @@ mod tests {
             Some("HEAD"),
             Some("OPTIONS"),
         ] {
-            let request = VrchatApiRequest {
+            let request = VrchatRequest {
                 method: method.map(str::to_string),
                 ..Default::default()
             };
@@ -228,7 +233,7 @@ mod tests {
         }
 
         for method in ["POST", "PUT", "PATCH", "DELETE"] {
-            let request = VrchatApiRequest {
+            let request = VrchatRequest {
                 method: Some(method.into()),
                 ..Default::default()
             };
@@ -243,7 +248,7 @@ mod tests {
         let gate = RemoteMutationGate::default();
         let context =
             AuthenticatedMutationContext::capture(&auth_scope, &gate, "VRChat mutation").unwrap();
-        let mut request = VrchatApiRequest {
+        let mut request = VrchatRequest {
             endpoint: Some("https://stale.example.test/api/1".into()),
             method: Some("POST".into()),
             ..Default::default()

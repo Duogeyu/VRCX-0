@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::Value;
 use vrcx_0_core::json::JsonExt;
 
@@ -10,6 +11,7 @@ pub const PROFILE_BIO_SCAN_MIN_AGE: Duration = Duration::from_secs(12 * 60 * 60)
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileBioRecord {
     pub bio: String,
+    pub bio_links: Vec<String>,
     pub checked_at: String,
 }
 
@@ -18,6 +20,7 @@ pub struct ProfileBioObservation {
     pub user_id: String,
     pub display_name: String,
     pub bio: String,
+    pub bio_links: Vec<String>,
 }
 
 impl ProfileBioObservation {
@@ -30,6 +33,16 @@ impl ProfileBioObservation {
             user_id,
             display_name: profile.trimmed_text("displayName"),
             bio: profile.get("bio")?.as_str()?.trim().to_string(),
+            bio_links: profile
+                .get("bioLinks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|link| !link.is_empty())
+                .map(str::to_string)
+                .collect(),
         })
     }
 }
@@ -38,4 +51,12 @@ impl ProfileBioObservation {
 pub struct RecordedProfileBio {
     pub observation: ProfileBioObservation,
     pub observed_at: String,
+}
+
+#[derive(Debug, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileBioOutput {
+    pub user_id: String,
+    pub bio: String,
+    pub bio_links: Vec<String>,
 }

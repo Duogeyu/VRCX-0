@@ -55,8 +55,6 @@ pub struct AvatarUpdateRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 pub enum UserSearchCustomField {
-    #[serde(rename = "bio")]
-    Bio,
     #[serde(rename = "displayName")]
     DisplayName,
 }
@@ -86,6 +84,7 @@ pub struct WorldSearchParams {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -94,6 +93,7 @@ pub struct WorldSearchParams {
     pub n: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<QueryOrder>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -129,12 +129,14 @@ pub struct UserSearchParams {
     pub search: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub developer_type: Option<String>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nonnegative_i32"
     )]
     pub n: Option<i32>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -156,12 +158,14 @@ pub struct UserSearchParams {
 pub struct GroupSearchParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nonnegative_i32"
     )]
     pub offset: Option<i32>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -258,12 +262,14 @@ pub enum MediaFileTag {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MediaFileListParams {
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nonnegative_i32"
     )]
     pub n: Option<i32>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -330,8 +336,10 @@ pub enum EmojiUploadParams {
     EmojiAnimated {
         animation_style: ImageAnimationStyle,
         mask_tag: ImageMaskTag,
+        #[specta(type = i32)]
         #[serde(deserialize_with = "deserialize_emoji_frame_count")]
         frames: i32,
+        #[specta(type = i32)]
         #[serde(deserialize_with = "deserialize_emoji_frames_per_second")]
         frames_over_time: i32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,12 +397,14 @@ pub enum InventoryOrder {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InventoryListParams {
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nonnegative_i32"
     )]
     pub n: Option<i32>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -491,6 +501,116 @@ pub struct GroupCalendarRecurrence {
     pub end: Option<GroupCalendarRecurrenceEnd>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+pub enum GroupMemberSort {
+    #[serde(rename = "joinedAt:asc")]
+    JoinedAtAsc,
+    #[default]
+    #[serde(rename = "joinedAt:desc")]
+    JoinedAtDesc,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+pub enum GroupPostVisibility {
+    #[serde(rename = "group")]
+    Group,
+    #[serde(rename = "public")]
+    Public,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupPostMutation {
+    pub title: String,
+    pub text: String,
+    pub send_notification: bool,
+    pub visibility: GroupPostVisibility,
+    #[serde(default)]
+    pub role_ids: Vec<String>,
+    pub image_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+pub enum GroupProfileJoinState {
+    #[serde(rename = "closed")]
+    Closed,
+    #[serde(rename = "invite")]
+    Invite,
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "request")]
+    Request,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupProfileUpdate {
+    pub name: String,
+    pub short_code: String,
+    pub description: String,
+    pub join_state: GroupProfileJoinState,
+    pub languages: Vec<String>,
+    pub rules: String,
+    pub links: Vec<String>,
+    pub icon_id: Option<String>,
+    pub banner_id: Option<String>,
+    pub allow_group_join_prompt: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+pub enum GroupMemberVisibility {
+    #[serde(rename = "friends")]
+    Friends,
+    #[serde(rename = "hidden")]
+    Hidden,
+    #[serde(rename = "visible")]
+    Visible,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupMemberPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_subscribed_to_announcements: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_subscribed_to_event_announcements: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<GroupMemberVisibility>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupGalleryMutation {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub members_only: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupRoleMutation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_self_assignable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_added_on_join: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_two_factor: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_purchase: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupCalendarEventMutation {
@@ -521,12 +641,14 @@ pub struct GroupCalendarEventMutation {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CalendarListParams {
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nonnegative_i32"
     )]
     pub n: Option<i32>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -535,6 +657,41 @@ pub struct CalendarListParams {
     pub offset: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum CalendarDiscoverScope {
+    Live,
+    Upcoming,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+pub enum CalendarDiscoverSort {
+    #[serde(rename = "follows_descending")]
+    FollowsDescending,
+    #[serde(rename = "startTime_ascending")]
+    StartTimeAscending,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CalendarDiscoverParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<CalendarDiscoverScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upcoming_sort: Option<CalendarDiscoverSort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_linked_instance: Option<bool>,
+    #[specta(type = Option<i32>)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_nonnegative_i32"
+    )]
+    pub n: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
@@ -712,12 +869,14 @@ pub struct WorldUpdateRequest {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nonnegative_i32"
     )]
     pub capacity: Option<i32>,
+    #[specta(type = Option<i32>)]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

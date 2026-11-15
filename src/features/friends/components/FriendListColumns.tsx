@@ -13,11 +13,12 @@ import {
     DATA_TABLE_NUMERIC_HEADER_CLASS_NAME,
     DATA_TABLE_PRIMARY_CELL_CLASS_NAME
 } from '@/components/data-table/DataTableView';
+import { TimestampText } from '@/components/data-table/TimestampText';
 import { LanguageCodeBadge } from '@/components/language/LanguageCodeBadge';
 import { BioLinkFavicon } from '@/components/media/BioLinkFavicon';
 import { FadeInImage } from '@/components/media/FadeInImage';
 import { UserStatusDot } from '@/components/UserStatusDot';
-import { formatDateFilter, timeToText } from '@/lib/dateTime';
+import { timeToText } from '@/lib/dateTime';
 import { cn } from '@/lib/utils';
 import {
     getNameColour,
@@ -25,6 +26,7 @@ import {
     userImage
 } from '@/services/entityMediaService';
 import type { UserNameColourStyle } from '@/shared/utils/entityMedia';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Button } from '@/ui/shadcn/button';
 import { Checkbox } from '@/ui/shadcn/checkbox';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
@@ -40,6 +42,7 @@ import {
     friendNumberForSort,
     normalizeFriendListId as normalizeId
 } from '../friendListRows';
+import { useFriendListSelectedIds } from '../friendListSelectionContext';
 import { SortButton } from './FriendListViewParts';
 
 type FriendListColumnsOptions = {
@@ -50,7 +53,6 @@ type FriendListColumnsOptions = {
     onToggleSelectedFriend(friendId: string): void;
     randomUserColours: boolean;
     randomUserColourStyle: UserNameColourStyle;
-    selectedFriendIds: Set<string>;
 };
 
 function parseListNumber(value: unknown): number {
@@ -60,6 +62,37 @@ function parseListNumber(value: unknown): number {
 
 function textValue(value: unknown): string {
     return typeof value === 'string' ? value : String(value ?? '');
+}
+
+function FriendListSelectCell({
+    friendId,
+    friendLabel,
+    disabled,
+    onToggleSelectedFriend
+}: {
+    friendId: string;
+    friendLabel: string;
+    disabled: boolean;
+    onToggleSelectedFriend(friendId: string): void;
+}) {
+    const { t } = useTranslation();
+    const selectedFriendIds = useFriendListSelectedIds();
+
+    return (
+        <div
+            role="presentation"
+            className="flex items-center justify-center"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+        >
+            <Checkbox
+                checked={selectedFriendIds.has(friendId)}
+                disabled={disabled}
+                aria-label={`${t('common.actions.select')} ${friendLabel}`}
+                onCheckedChange={() => onToggleSelectedFriend(friendId)}
+            />
+        </div>
+    );
 }
 
 function bioLinks(row: FriendListRow): string[] {
@@ -75,8 +108,7 @@ export function useFriendListColumns({
     onConfirmDeleteFriend,
     onToggleSelectedFriend,
     randomUserColours,
-    randomUserColourStyle,
-    selectedFriendIds
+    randomUserColourStyle
 }: FriendListColumnsOptions) {
     const { t } = useTranslation();
     const isDarkMode =
@@ -106,24 +138,15 @@ export function useFriendListColumns({
                     const friendLabel = row.original?.displayName || friendId;
 
                     return (
-                        <div
-                            role="presentation"
-                            className="flex items-center justify-center"
-                            onClick={(event) => event.stopPropagation()}
-                            onKeyDown={(event) => event.stopPropagation()}
-                        >
-                            <Checkbox
-                                checked={selectedFriendIds.has(friendId)}
-                                disabled={
-                                    !bulkUnfriendMode ||
-                                    deletingFriendIds.has(friendId)
-                                }
-                                aria-label={`${t('common.actions.select')} ${friendLabel}`}
-                                onCheckedChange={() =>
-                                    onToggleSelectedFriend(friendId)
-                                }
-                            />
-                        </div>
+                        <FriendListSelectCell
+                            friendId={friendId}
+                            friendLabel={friendLabel}
+                            disabled={
+                                !bulkUnfriendMode ||
+                                deletingFriendIds.has(friendId)
+                            }
+                            onToggleSelectedFriend={onToggleSelectedFriend}
+                        />
                     );
                 }
             },
@@ -435,17 +458,14 @@ export function useFriendListColumns({
                         label={t('table.friendList.lastSeen')}
                     />
                 ),
-                cell: ({ row }) => {
-                    const text = formatDateFilter(
-                        row.original?.$lastSeen,
-                        'long'
-                    );
-                    return (
-                        <span>
-                            {text === '-' ? DATA_TABLE_EMPTY_VALUE : text}
-                        </span>
-                    );
-                }
+                cell: ({ row }) => (
+                    <TimestampText
+                        value={row.original?.$lastSeen}
+                        format="long"
+                        tooltip={false}
+                        emptyText={DATA_TABLE_EMPTY_VALUE}
+                    />
+                )
             },
             {
                 id: 'mutualFriends',
@@ -501,17 +521,14 @@ export function useFriendListColumns({
                         label={t('table.friendList.lastActivity')}
                     />
                 ),
-                cell: ({ row }) => {
-                    const text = formatDateFilter(
-                        row.original?.last_activity,
-                        'long'
-                    );
-                    return (
-                        <span>
-                            {text === '-' ? DATA_TABLE_EMPTY_VALUE : text}
-                        </span>
-                    );
-                }
+                cell: ({ row }) => (
+                    <TimestampText
+                        value={row.original?.last_activity}
+                        format="long"
+                        tooltip={false}
+                        emptyText={DATA_TABLE_EMPTY_VALUE}
+                    />
+                )
             },
             {
                 id: 'lastLogin',
@@ -527,17 +544,14 @@ export function useFriendListColumns({
                         label={t('table.friendList.lastLogin')}
                     />
                 ),
-                cell: ({ row }) => {
-                    const text = formatDateFilter(
-                        row.original?.last_login,
-                        'long'
-                    );
-                    return (
-                        <span>
-                            {text === '-' ? DATA_TABLE_EMPTY_VALUE : text}
-                        </span>
-                    );
-                }
+                cell: ({ row }) => (
+                    <TimestampText
+                        value={row.original?.last_login}
+                        format="long"
+                        tooltip={false}
+                        emptyText={DATA_TABLE_EMPTY_VALUE}
+                    />
+                )
             },
             {
                 id: 'dateJoined',
@@ -576,23 +590,24 @@ export function useFriendListColumns({
                 cell: ({ row }) => {
                     const friendId = normalizeId(row.original?.id);
                     return (
-                        <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="text-destructive size-7"
-                            aria-label={t('table.friendList.unfriend')}
-                            disabled={
-                                !currentUserId ||
-                                deletingFriendIds.has(friendId)
-                            }
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onConfirmDeleteFriend(row.original);
-                            }}
-                        >
-                            <UserMinusIcon data-icon="inline-start" />
-                        </Button>
+                        <HintTooltip label={t('table.friendList.unfriend')}>
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="text-destructive size-7"
+                                disabled={
+                                    !currentUserId ||
+                                    deletingFriendIds.has(friendId)
+                                }
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onConfirmDeleteFriend(row.original);
+                                }}
+                            >
+                                <UserMinusIcon data-icon="inline-start" />
+                            </Button>
+                        </HintTooltip>
                     );
                 }
             }
@@ -606,7 +621,6 @@ export function useFriendListColumns({
             onToggleSelectedFriend,
             randomUserColours,
             randomUserColourStyle,
-            selectedFriendIds,
             t
         ]
     );

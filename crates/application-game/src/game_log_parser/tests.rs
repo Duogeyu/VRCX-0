@@ -86,6 +86,44 @@ fn incremental_log_parsing_reuses_the_reader_buffer() {
 }
 
 #[test]
+fn remembers_the_authenticated_game_account_even_before_the_cutoff() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "vrcx-0-game-log-auth-{}-{nonce}.txt",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "2020.01.01 00:00:00 Debug      -  User Authenticated: Maple (usr_1)\n\
+         2020.01.01 00:00:05 Log        -  VR Disabled\n",
+    )
+    .unwrap();
+    let mut sink = RecordingParseSink::default();
+    let mut ctx = LogContext::new();
+    let mut reader = LogReader::new();
+    let cutoff = chrono::NaiveDate::from_ymd_opt(2020, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 1)
+        .unwrap();
+
+    parse_log(&mut reader, &mut sink, &path, FILE, &mut ctx, cutoff);
+
+    assert_eq!(
+        ctx.authenticated_user,
+        Some(super::GameLogAuthenticatedUser {
+            user_id: "usr_1".into(),
+            display_name: "Maple".into(),
+        })
+    );
+    assert_eq!(sink.rows.len(), 1);
+    drop(reader);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn parse_user_info_keeps_display_name_and_filters_user_id() {
     let parsed = presence::parse_user_info("Maple (usr_1234-5678~90:abc!?)");
     assert_eq!(parsed.display_name, "Maple");
@@ -615,7 +653,7 @@ fn parses_video_play_sources_and_sync_events() {
 }
 
 #[test]
-fn deduplicates_video_errors_and_adds_youtube_bot_hint() {
+fn deduplicates_video_errors_and_keeps_the_original_message() {
     let mut sink = RecordingParseSink::default();
     let mut ctx = LogContext::new();
     let playback_line =
@@ -647,10 +685,7 @@ fn deduplicates_video_errors_and_adds_youtube_bot_hint() {
     assert_eq!(
         sink.payloads(),
         vec![
-            payload(&[
-                "event",
-                "VideoError: [VRCX] Fix error with this: https://github.com/EllyVR/VRCVideoCacher\nSign in to confirm you are not a bot",
-            ]),
+            payload(&["event", "VideoError: Sign in to confirm you are not a bot",]),
             payload(&["event", "VideoError: HTTP 403 Forbidden"]),
         ]
     );
@@ -713,4 +748,31 @@ fn incomplete_player_markers_do_not_panic_or_create_players() {
     let user = presence::parse_user_info("Name) (usr_partial");
     assert_eq!(user.display_name, "Name)");
     assert_eq!(user.user_id, "usr_partial");
+}
+
+#[test]
+fn parses_now_playing_lines_with_a_producer_suffix() {
+    let mut sink = RecordingParseSink::default();
+    let line = "2026.10.30 21:00:00 Debug      -  nowplaying {\"id\":\"ProTV-1\",\"type\":\"mediaStop\"} (ProTV)";
+    let plain = "2026.10.30 21:00:01 Debug      -  nowplaying is not json";
+
+    assert!(media::parse_now_playing_log(
+        &mut sink,
+        FILE,
+        line,
+        content(line),
+    ));
+    assert!(!media::parse_now_playing_log(
+        &mut sink,
+        FILE,
+        plain,
+        content(plain),
+    ));
+    assert_eq!(
+        sink.payloads(),
+        vec![payload(&[
+            "nowplaying",
+            "{\"id\":\"ProTV-1\",\"type\":\"mediaStop\"}"
+        ])]
+    );
 }

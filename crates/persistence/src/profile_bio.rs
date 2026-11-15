@@ -1,7 +1,10 @@
+use vrcx_0_contracts::feed_live::FeedLiveEntry;
 pub use vrcx_0_contracts::profile_bio::ProfileBioRecord;
+use vrcx_0_contracts::profile_bio::{ProfileBioOutput, RecordedProfileBio};
 
 use crate::common::{normalize_text, row_string, ParamsBuilder};
-use crate::database::DatabaseService;
+use crate::database::schema::add_column_if_missing;
+use crate::database::{DatabaseService, DatabaseWriteTransaction};
 use crate::ownership::OwnerId;
 use crate::realtime::{ensure_realtime_tables, normalize_user_table_prefix};
 use crate::Error;
@@ -18,9 +21,23 @@ pub(crate) fn ensure_profile_bio_table(
             ),
             &Default::default(),
         )?;
+        add_column_if_missing(
+            db,
+            &format!("{user_prefix}_profile_bio"),
+            "bio_links",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         Ok(())
     })?;
     Ok(user_prefix)
+}
+
+pub(crate) fn encode_bio_links(bio_links: &[String]) -> String {
+    serde_json::to_string(bio_links).unwrap_or_else(|_| "[]".into())
+}
+
+fn decode_bio_links(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 pub fn profile_bio_get(
@@ -36,14 +53,15 @@ pub fn profile_bio_get(
     Ok(db
         .execute(
             &format!(
-                "SELECT bio, checked_at FROM {user_prefix}_profile_bio WHERE user_id = @user_id LIMIT 1"
+                "SELECT bio, bio_links, checked_at FROM {user_prefix}_profile_bio WHERE user_id = @user_id LIMIT 1"
             ),
             &ParamsBuilder::new().set("user_id", user_id).build(),
         )?
         .first()
         .map(|row| ProfileBioRecord {
             bio: row_string(row, 0),
-            checked_at: row_string(row, 1),
+            bio_links: decode_bio_links(&row_string(row, 1)),
+            checked_at: row_string(row, 2),
         }))
 }
 
@@ -57,12 +75,13 @@ pub fn profile_bio_upsert(
     let user_id = require_user_id(user_id)?;
     db.execute_non_query(
         &format!(
-            "INSERT INTO {user_prefix}_profile_bio (user_id, bio, checked_at) VALUES (@user_id, @bio, @checked_at) \
-             ON CONFLICT(user_id) DO UPDATE SET bio = excluded.bio, checked_at = excluded.checked_at"
+            "INSERT INTO {user_prefix}_profile_bio (user_id, bio, bio_links, checked_at) VALUES (@user_id, @bio, @bio_links, @checked_at) \
+             ON CONFLICT(user_id) DO UPDATE SET bio = excluded.bio, bio_links = excluded.bio_links, checked_at = excluded.checked_at"
         ),
         &ParamsBuilder::new()
             .set("user_id", user_id)
             .set("bio", record.bio.clone())
+            .set("bio_links", encode_bio_links(&record.bio_links))
             .set("checked_at", record.checked_at.clone())
             .build(),
     )?;
@@ -132,12 +151,84 @@ pub fn profile_bio_checked_at_list(
         .collect())
 }
 
+pub fn profile_bio_list(
+    db: &DatabaseService,
+    owner_user_id: &OwnerId,
+) -> Result<Vec<ProfileBioOutput>, Error> {
+    if normalize_text(owner_user_id.as_str()).is_empty() {
+        return Ok(Vec::new());
+    }
+    let user_prefix = ensure_profile_bio_table(db, owner_user_id)?;
+    Ok(db
+        .execute(
+            &format!(
+                "SELECT user_id, bio, bio_links FROM {user_prefix}_profile_bio WHERE bio <> '' OR bio_links <> '[]'"
+            ),
+            &Default::default(),
+        )?
+        .iter()
+        .map(|row| ProfileBioOutput {
+            user_id: row_string(row, 0),
+            bio: row_string(row, 1),
+            bio_links: decode_bio_links(&row_string(row, 2)),
+        })
+        .collect())
+}
+
 fn require_user_id(user_id: &str) -> Result<String, Error> {
     let user_id = normalize_text(user_id);
     if user_id.is_empty() {
         return Err(Error::InvalidData("profile bio requires a user id".into()));
     }
     Ok(user_id)
+}
+
+pub(crate) fn apply_backfilled_profile_bio(
+    tx: &mut DatabaseWriteTransaction<'_>,
+    user_prefix: &str,
+    profile_bio: &RecordedProfileBio,
+) -> Result<Option<FeedLiveEntry>, Error> {
+    let observation = &profile_bio.observation;
+    let last_seen = tx
+        .execute(
+            &format!("SELECT bio, checked_at FROM {user_prefix}_profile_bio WHERE user_id = @user_id LIMIT 1"),
+            &ParamsBuilder::new()
+                .set("user_id", observation.user_id.clone())
+                .build(),
+        )?
+        .first()
+        .map(|row| (row_string(row, 0), row_string(row, 1)));
+    if last_seen
+        .as_ref()
+        .is_some_and(|(_, checked_at)| *checked_at >= profile_bio.observed_at)
+    {
+        return Ok(None);
+    }
+    tx.execute_non_query(
+        &format!(
+            "INSERT INTO {user_prefix}_profile_bio (user_id, bio, bio_links, checked_at) VALUES (@user_id, @bio, @bio_links, @checked_at) \
+             ON CONFLICT(user_id) DO UPDATE SET bio = excluded.bio, bio_links = excluded.bio_links, checked_at = excluded.checked_at"
+        ),
+        &ParamsBuilder::new()
+            .set("user_id", observation.user_id.clone())
+            .set("bio", observation.bio.clone())
+            .set(
+                "bio_links",
+                encode_bio_links(&observation.bio_links),
+            )
+            .set("checked_at", profile_bio.observed_at.clone())
+            .build(),
+    )?;
+    Ok(last_seen
+        .filter(|(previous_bio, _)| *previous_bio != observation.bio)
+        .map(|(previous_bio, _)| FeedLiveEntry::Bio {
+            created_at: profile_bio.observed_at.clone(),
+            user_id: observation.user_id.clone(),
+            display_name: observation.display_name.clone(),
+            bio: observation.bio.clone(),
+            previous_bio,
+            owner_user_id: String::new(),
+        }))
 }
 
 #[cfg(test)]
@@ -196,8 +287,42 @@ mod tests {
     fn record(bio: &str, checked_at: &str) -> ProfileBioRecord {
         ProfileBioRecord {
             bio: bio.into(),
+            bio_links: Vec::new(),
             checked_at: checked_at.into(),
         }
+    }
+
+    #[test]
+    fn list_returns_bios_and_links_for_the_owner() {
+        let dir = TestDir::new("list");
+        let db = DatabaseService::new(&dir.path.join("VRCX-0.sqlite3")).unwrap();
+        profile_bio_upsert(
+            &db,
+            &owner(),
+            "usr_friend",
+            &ProfileBioRecord {
+                bio_links: vec!["https://a.example".into()],
+                ..record("hello", "2026-09-18T00:00:00Z")
+            },
+        )
+        .unwrap();
+        profile_bio_mark_checked(&db, &owner(), "usr_empty", "2026-09-18T00:00:00Z").unwrap();
+
+        let rows = profile_bio_list(&db, &owner()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].user_id, "usr_friend");
+        assert_eq!(rows[0].bio, "hello");
+        assert_eq!(rows[0].bio_links, vec!["https://a.example".to_string()]);
+        assert_eq!(
+            profile_bio_get(&db, &owner(), "usr_friend")
+                .unwrap()
+                .unwrap()
+                .bio_links,
+            vec!["https://a.example".to_string()]
+        );
+        assert!(profile_bio_list(&db, &OwnerId::new("usr_other"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

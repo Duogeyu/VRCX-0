@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { EmptyState, LoadingState } from '@/components/layout/PageScaffold';
-import { ToolbarIconButton } from '@/components/layout/ToolbarControls';
 import { formatDateFilter } from '@/lib/dateTime';
 import { userFacingErrorMessage } from '@/lib/errorDisplay';
 import { commands } from '@/platform/tauri/bindings';
@@ -12,6 +11,7 @@ import { toast } from '@/services/toastService';
 import { formatBytes } from '@/shared/utils/formatBytes';
 import { useModalStore } from '@/state/modalStore';
 import { useRuntimeStore } from '@/state/runtimeStore';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Button } from '@/ui/shadcn/button';
 import {
     Dialog,
@@ -42,11 +42,16 @@ export function LocalTestAvatarsButton() {
 
     return (
         <>
-            <ToolbarIconButton
-                icon={FlaskConicalIcon}
-                label={t('view.my_avatars.action.open_local_test_avatars')}
+            <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0"
                 onClick={() => setOpen(true)}
-            />
+            >
+                <FlaskConicalIcon data-icon="inline-start" />
+                {t('view.my_avatars.action.open_local_test_avatars')}
+            </Button>
             <Dialog open={open} onOpenChange={setOpen}>
                 <DialogContent className="sm:max-w-xl">
                     {open ? <LocalTestAvatarsDialogBody /> : null}
@@ -207,22 +212,23 @@ function LocalTestAvatarsDialogBody() {
                                         .join(' · ')}
                                 </span>
                             </div>
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-sm"
-                                aria-label={t('common.actions.delete')}
-                                disabled={Boolean(deletingFileName)}
-                                onClick={() => {
-                                    void handleDelete(avatar);
-                                }}
-                            >
-                                {deletingFileName === avatar.fileName ? (
-                                    <Spinner />
-                                ) : (
-                                    <Trash2Icon />
-                                )}
-                            </Button>
+                            <HintTooltip label={t('common.actions.delete')}>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    disabled={Boolean(deletingFileName)}
+                                    onClick={() => {
+                                        void handleDelete(avatar);
+                                    }}
+                                >
+                                    {deletingFileName === avatar.fileName ? (
+                                        <Spinner />
+                                    ) : (
+                                        <Trash2Icon />
+                                    )}
+                                </Button>
+                            </HintTooltip>
                         </li>
                     ))}
                 </ul>

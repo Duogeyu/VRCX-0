@@ -161,16 +161,50 @@ fn start_background_mode_from_shell(app: tauri::AppHandle) {
 fn update_desktop_widget_from_tray(
     app: &tauri::AppHandle,
     update: impl FnOnce(
-        &vrcx_0_runtime_host_desktop::desktop_widget::DesktopWidget,
-    ) -> vrcx_0_application_core::Result<
-        vrcx_0_runtime_host_desktop::desktop_widget::DesktopWidgetSnapshot,
-    >,
+            &vrcx_0_runtime_host_desktop::desktop_widget::DesktopWidget,
+        ) -> vrcx_0_application_core::Result<
+            vrcx_0_runtime_host_desktop::desktop_widget::DesktopWidgetSnapshot,
+        > + Send
+        + 'static,
 ) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        if let Err(error) = update(&state.runtime_host().desktop_widget()) {
+            tracing::warn!(error = %error, "failed to update the activity window from tray");
+        }
+    });
+}
+
+fn toggle_game_isolation_from_tray(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    if let Err(error) = update(&state.runtime_host().desktop_widget()) {
-        tracing::warn!(error = %error, "failed to update the activity window from tray");
+    if state.runtime_host().game_isolation_snapshot().enabled {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            if let Err(error) = state.runtime_host().set_game_isolation_enabled(false) {
+                tracing::warn!(error = %error, "failed to turn off game isolation from tray");
+            }
+            refresh_tray_menu_after_game_isolation_update(&app, &state);
+        });
+        return;
+    }
+    restore_or_ensure_main_window(app, "failed to show main window for game isolation");
+    if let Err(error) = app.emit("gameIsolationConfirmRequested", serde_json::json!({})) {
+        tracing::warn!(error = %error, "failed to emit game isolation confirm request");
+    }
+    refresh_tray_menu_after_game_isolation_update(app, &state);
+}
+
+fn refresh_tray_menu_after_game_isolation_update(app: &tauri::AppHandle, state: &AppState) {
+    if let Err(error) = bootstrap::refresh_tray_menu(app, state) {
+        tracing::warn!(error = %error, "failed to refresh tray menu after game isolation update");
     }
 }
 
@@ -333,6 +367,19 @@ pub fn run() {
                 }
             }
 
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            if matches!(event, WindowEvent::Destroyed) {
+                use webkit2gtk::glib;
+                glib::idle_add_once(|| {
+                    // SAFETY: `malloc_trim(0)` is a thread-safe glibc extension that releases free
+                    // heap memory back to the OS after GTK/WebKit widgets have been destroyed.
+                    // It takes a numeric pad argument and does not dereference any raw pointers.
+                    unsafe {
+                        libc::malloc_trim(0);
+                    }
+                });
+            }
+
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
                 let snapshot = state.runtime_host().backend_runtime_snapshot();
@@ -402,6 +449,9 @@ pub fn run() {
             }
             "tray-dnd-turn-off" => {
                 set_do_not_disturb_from_tray(app, NotificationDoNotDisturbMode::Off);
+            }
+            "tray-game-isolation" => {
+                toggle_game_isolation_from_tray(app);
             }
             "tray-desktop-widget-on" => {
                 update_desktop_widget_from_tray(app, |widget| widget.set_enabled(true));

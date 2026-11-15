@@ -15,13 +15,12 @@ use vrcx_0_application_core::{
 use vrcx_0_application_realtime::{RealtimeHostRuntime, RealtimeHostRuntimeDeps};
 use vrcx_0_contracts::feed::{FeedRowOutput, FeedRowsQueryInput};
 use vrcx_0_persistence::{
-    config::ConfigRepository, game_log::ensure_game_log_tables, storage::StorageService,
-    DatabaseService,
+    game_log::ensure_game_log_tables, storage::StorageService, DatabaseService,
 };
 
 use crate::runtime::McpRuntime;
 use crate::{
-    McpActivityQueryPort, McpConfigPort, McpFavoritesQueryPort, McpFeedQueryPort, McpFriendCurrent,
+    McpActivityQueryPort, McpFavoritesQueryPort, McpFeedQueryPort, McpFriendCurrent,
     McpFriendLocalDataPort, McpFriendMemo, McpInterruptCheck, McpLocalModeration, McpMemoSave,
     McpMutualGraphMeta, McpMutualGraphPort, McpPlaySpan, McpSocialHistoryQueryPort,
 };
@@ -31,10 +30,6 @@ use vrcx_0_core::{FavoriteEntityKind, OwnerId};
 use vrcx_0_persistence::{
     activity_page, favorites, friends, local_moderation, memos, social_aggregates,
 };
-
-pub(crate) struct TestMcpConfigAdapter {
-    config: ConfigRepository,
-}
 
 pub(crate) struct TestMcpMutualGraphAdapter {
     runtime: MutualGraphFetchRuntime,
@@ -99,7 +94,6 @@ impl McpMutualGraphPort for TestMcpMutualGraphAdapter {
             Arc::new(vrcx_0_outbound_adapters::LocalMutualGraphStore::new(
                 Arc::clone(&self.db),
             )),
-            Arc::new(vrcx_0_outbound_adapters::VrchatMutualGraphRemoteRequests),
             Arc::new(vrcx_0_outbound_adapters::VrchatRequestAdapter::new(
                 Arc::clone(&self.web),
             )),
@@ -109,32 +103,113 @@ impl McpMutualGraphPort for TestMcpMutualGraphAdapter {
     }
 }
 
-impl TestMcpConfigAdapter {
-    pub(crate) fn new(config: ConfigRepository) -> Self {
-        Self { config }
-    }
-}
-
-impl McpConfigPort for TestMcpConfigAdapter {
-    fn get_bool(&self, key: &str, default: bool) -> vrcx_0_application_core::Result<bool> {
-        self.config.get_bool(key, default).map_err(Into::into)
-    }
-
-    fn set_bool(&self, key: &str, value: bool) -> vrcx_0_application_core::Result<()> {
-        self.config.set_bool(key, value).map_err(Into::into)
-    }
-
-    fn get_string(&self, key: &str, default: &str) -> vrcx_0_application_core::Result<String> {
-        self.config.get_string(key, default).map_err(Into::into)
-    }
-
-    fn set_string(&self, key: &str, value: &str) -> vrcx_0_application_core::Result<()> {
-        self.config.set_string(key, value).map_err(Into::into)
-    }
-}
-
 pub(crate) struct TestMcpActivityQueryAdapter {
     db: Arc<DatabaseService>,
+}
+
+pub(crate) struct TestMcpScreenshots {
+    pub(crate) cache: vrcx_0_persistence::screenshot_cache::MetadataCacheDb,
+    pub(crate) root: String,
+}
+
+impl TestMcpScreenshots {
+    pub(crate) fn new(dir: &std::path::Path) -> Self {
+        Self {
+            cache: vrcx_0_persistence::screenshot_cache::MetadataCacheDb::new(
+                &dir.join("metadataCache.db"),
+            )
+            .expect("open screenshot cache"),
+            root: dir.join("shots").to_string_lossy().into_owned(),
+        }
+    }
+}
+
+impl crate::McpScreenshotQueryPort for TestMcpScreenshots {
+    fn query(
+        &self,
+        filter: &vrcx_0_core::screenshots::ScreenshotFilter,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<vrcx_0_core::screenshots::ScreenshotQueryResult> {
+        Ok(self
+            .cache
+            .query_screenshots_for_root(&self.root, filter, Some(limit))?)
+    }
+
+    fn people(
+        &self,
+        filter: &vrcx_0_core::screenshots::ScreenshotFilter,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<vrcx_0_core::screenshots::ScreenshotFacet>> {
+        Ok(self
+            .cache
+            .screenshot_people_for_root(&self.root, filter, limit)?)
+    }
+
+    fn worlds(
+        &self,
+        filter: &vrcx_0_core::screenshots::ScreenshotFilter,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<vrcx_0_core::screenshots::ScreenshotFacet>> {
+        Ok(self
+            .cache
+            .screenshot_worlds_for_root(&self.root, filter, limit)?)
+    }
+
+    fn months(
+        &self,
+        filter: &vrcx_0_core::screenshots::ScreenshotFilter,
+        utc_offset_minutes: i64,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<vrcx_0_core::screenshots::ScreenshotFacet>> {
+        Ok(self
+            .cache
+            .screenshot_months_for_root(&self.root, filter, utc_offset_minutes, limit)?)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct TestMcpChatbox(pub(crate) Option<String>);
+
+impl TestMcpChatbox {
+    fn reply(&self, call: serde_json::Value) -> vrcx_0_application_core::Result<serde_json::Value> {
+        match &self.0 {
+            Some(error) => Err(vrcx_0_application_core::Error::Custom(error.clone())),
+            None => Ok(call),
+        }
+    }
+}
+
+impl crate::McpChatboxPort for TestMcpChatbox {
+    fn state(&self) -> vrcx_0_application_core::Result<serde_json::Value> {
+        self.reply(serde_json::json!({ "state": true }))
+    }
+
+    fn update_config(
+        &self,
+        config: serde_json::Value,
+    ) -> vrcx_0_application_core::Result<serde_json::Value> {
+        self.reply(serde_json::json!({ "config": config }))
+    }
+
+    fn send(&self, text: String) -> vrcx_0_application_core::Result<serde_json::Value> {
+        self.reply(serde_json::json!({ "send": text }))
+    }
+
+    fn set_afk(&self, afk: bool) -> vrcx_0_application_core::Result<serde_json::Value> {
+        self.reply(serde_json::json!({ "afk": afk }))
+    }
+}
+
+pub(crate) struct TestMcpWorldLookup(pub(crate) Option<serde_json::Value>);
+
+impl crate::McpWorldLookupPort for TestMcpWorldLookup {
+    fn world(
+        &self,
+        _world_id: String,
+    ) -> crate::McpFuture<'_, vrcx_0_application_core::Result<Option<serde_json::Value>>> {
+        let world = self.0.clone();
+        Box::pin(async move { Ok(world) })
+    }
 }
 
 impl TestMcpActivityQueryAdapter {
@@ -173,6 +248,31 @@ impl McpActivityQueryPort for TestMcpActivityQueryAdapter {
         input: social::TopVisitedWorldsInput,
     ) -> vrcx_0_application_core::Result<Vec<social::TopVisitedWorldRow>> {
         social_aggregates::top_visited_worlds(self.db.as_ref(), owner_user_id, input)
+            .map_err(Into::into)
+    }
+
+    fn world_visit_history(
+        &self,
+        owner_user_id: &OwnerId,
+        world_id: &str,
+        recent_limit: i64,
+    ) -> vrcx_0_application_core::Result<social::WorldVisitHistory> {
+        social_aggregates::world_visit_history(
+            self.db.as_ref(),
+            owner_user_id,
+            world_id,
+            recent_limit,
+        )
+        .map_err(Into::into)
+    }
+
+    fn find_visited_worlds(
+        &self,
+        owner_user_id: &OwnerId,
+        name: &str,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<social::VisitedWorldMatch>> {
+        social_aggregates::find_visited_worlds(self.db.as_ref(), owner_user_id, name, limit)
             .map_err(Into::into)
     }
 
@@ -400,7 +500,7 @@ impl McpFriendLocalDataPort for TestMcpFriendLocalDataAdapter {
     }
 }
 
-fn test_friend_memo(row: memos::UserMemoOutput) -> McpFriendMemo {
+fn test_friend_memo(row: vrcx_0_contracts::memos::UserMemoOutput) -> McpFriendMemo {
     McpFriendMemo {
         user_id: row.user_id,
         edited_at: row.edited_at,
@@ -454,7 +554,7 @@ impl McpFeedQueryPort for TestMcpFeedQueryAdapter {
 }
 
 pub(crate) struct TestDir {
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 impl TestDir {
@@ -511,7 +611,7 @@ fn test_runtime_with_database_and_event_bus(
     let dir = TestDir::new(name);
     let db = Arc::new(DatabaseService::new(&dir.path.join("VRCX-0.sqlite3"))?);
     ensure_game_log_tables(db.as_ref())?;
-    let storage = StorageService::new(&dir.path.join("storage.json"))?;
+    let storage = Arc::new(StorageService::new(&dir.path.join("storage.json"))?);
     let web = Arc::new(WebClient::new(
         vrcx_0_outbound_adapters::LocalWebClientAdapter::new(
             &storage,
@@ -532,6 +632,7 @@ fn test_runtime_with_database_and_event_bus(
     let world_cache = Arc::new(WorldCache::new(
         vrcx_0_outbound_adapters::LocalWorldCacheAdapter::new(
             Arc::clone(&db),
+            Arc::clone(&web),
             512,
             Duration::from_secs(30 * 60),
         ),
@@ -562,50 +663,60 @@ fn test_runtime_with_database_and_event_bus(
         ),
         event_bus.clone(),
     );
-    let realtime_store: Arc<dyn vrcx_0_application_realtime::RealtimeStore> = Arc::new(
+    let realtime_stores = vrcx_0_application_realtime::RealtimeStores::shared(Arc::new(
         vrcx_0_outbound_adapters::PersistenceRealtimeStore::new(Arc::clone(&db)),
-    );
+    ));
     let realtime_transport: Arc<dyn vrcx_0_application_realtime::RealtimeTransport> =
         Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeTransport::new(
-            Arc::clone(&realtime_store),
+            db.db_path().to_path_buf(),
             Arc::clone(&web),
             backend_status.clone(),
         ));
-    let realtime_runtime = Arc::new(RealtimeHostRuntime::new(RealtimeHostRuntimeDeps::new(
-        realtime_store,
-        realtime_transport,
-        Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeRemoteRequests),
+    let realtime_runtime = Arc::new(RealtimeHostRuntime::new(
+        RealtimeHostRuntimeDeps {
+            stores: realtime_stores,
+            config: Arc::new(vrcx_0_outbound_adapters::LocalConfigStore::new(
+                Arc::clone(&db),
+                Arc::clone(&storage),
+            )),
+            transport: realtime_transport,
+            remote_requests: Arc::new(vrcx_0_outbound_adapters::VrchatRealtimeRemoteRequests),
+            event_bus: event_bus.clone(),
+            backend_status,
+            friend_projection_sink: vrcx_0_application_realtime::FriendProjectionSink::new(
+                event_bus.clone(),
+                None,
+            ),
+            sync,
+            tasks: tasks.clone(),
+            session,
+            auth_scope: auth_scope.clone(),
+            remote_mutations,
+            local_game_context: Arc::new(UnavailableLocalGameContextSource),
+            activity: None,
+            notification_projection_observer: None,
+            world_cache,
+            file_cache: vrcx_0_application_core::FileCache::new(
+                vrcx_0_application_core::MemoryFileCachePort::default(),
+            ),
+            instance_dwell: Arc::new(vrcx_0_application_realtime::InstanceDwellRegistry::new()),
+            print_cleanup: Arc::new(NoopPrintCleanupInputSink),
+            current_user_snapshot_sink: None,
+        },
         Arc::clone(&web),
-        event_bus.clone(),
-        backend_status,
-        vrcx_0_application_realtime::FriendProjectionSink::new(event_bus.clone(), None),
-        sync,
-        tasks.clone(),
-        session,
-        auth_scope.clone(),
-        remote_mutations,
-        Arc::new(UnavailableLocalGameContextSource),
-        None,
-        None,
-        world_cache,
-        vrcx_0_application_core::FileCache::new(
-            vrcx_0_application_core::MemoryFileCachePort::default(),
-        ),
-        Arc::new(vrcx_0_application_core::InstanceDwellRegistry::new()),
-        Arc::new(NoopPrintCleanupInputSink),
-        None,
-    )));
+    ));
     let runtime = McpRuntime {
         realtime_runtime,
         auth_scope: auth_scope.clone(),
-        config: Arc::new(TestMcpConfigAdapter::new(ConfigRepository::new(
-            Arc::clone(&db),
-        ))),
+        config: Arc::new(vrcx_0_application_core::MemoryConfigStore::default()),
         activity_queries: Arc::new(TestMcpActivityQueryAdapter::new(Arc::clone(&db))),
         social_history_queries: Arc::new(TestMcpSocialHistoryQueryAdapter::new(Arc::clone(&db))),
         friend_local_data: Arc::new(TestMcpFriendLocalDataAdapter::new(Arc::clone(&db))),
         favorites_queries: Arc::new(TestMcpFavoritesQueryAdapter::new(Arc::clone(&db))),
         feed_queries: Arc::new(TestMcpFeedQueryAdapter::new(Arc::clone(&db))),
+        world_lookup: Arc::new(TestMcpWorldLookup(None)),
+        screenshots: Arc::new(TestMcpScreenshots::new(&dir.path)),
+        chatbox: Arc::new(TestMcpChatbox::default()),
         mutual_graph: Arc::new(TestMcpMutualGraphAdapter::new(
             MutualGraphFetchRuntime::new(),
             Arc::clone(&db),

@@ -12,6 +12,7 @@ import type {
 } from './searchRequests';
 
 export type SearchActiveTab = 'avatar' | 'group' | 'user' | 'world';
+export type SearchPageTab = SearchActiveTab | 'hot';
 export type SearchWorldCategory = WorldSearchCategory & {
     index: string | number;
     name?: string;
@@ -34,4 +35,6 @@ export type SearchPaginationState = {
     nextDisabled: boolean;
     onPrev: () => void;
     onNext: () => void;
+    pageSize: number;
+    onPageSizeChange: (pageSize: number) => void;
 };

@@ -1,4 +1,5 @@
 mod activity;
+mod chatbox;
 mod common;
 mod favorites;
 mod feed;
@@ -7,3 +8,5 @@ mod graph;
 mod invites;
 mod presence;
 mod registry;
+mod screenshots;
+mod worlds;

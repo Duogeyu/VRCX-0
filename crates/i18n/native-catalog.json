@@ -113,6 +113,22 @@
                     "source": "notifications.group_transfer_request_title"
                 },
                 {
+                    "key": "notifications.group_left",
+                    "source": "notifications.group_left"
+                },
+                {
+                    "key": "notifications.group_member_updated",
+                    "source": "notifications.group_member_updated"
+                },
+                {
+                    "key": "notifications.group_member_roles",
+                    "source": "notifications.group_member_roles"
+                },
+                {
+                    "key": "notifications.group_role_updated",
+                    "source": "notifications.group_role_updated"
+                },
+                {
                     "key": "notifications.group_queue_ready_title",
                     "source": "notifications.group_queue_ready_title"
                 },
@@ -135,6 +151,10 @@
                 {
                     "key": "notifications.instance_closed_title",
                     "source": "notifications.instance_closed_title"
+                },
+                {
+                    "key": "notifications.instance_closed_location",
+                    "source": "notifications.instance_closed_location"
                 },
                 {
                     "key": "notifications.event_title",
@@ -372,6 +392,16 @@
                 }
             ]
         },
+        "chatbox": {
+            "locales": "all",
+            "coverage": "fallback",
+            "messages": [
+                {
+                    "key": "chatbox.afk",
+                    "source": "view.tools.chatbox.in_game.afk"
+                }
+            ]
+        },
         "desktopWidget": {
             "locales": "all",
             "coverage": "fallback",
@@ -439,6 +469,10 @@
                     "source": "nativeShell.tray.doNotDisturbTurnOff"
                 },
                 {
+                    "key": "nativeShell.tray.gameIsolation",
+                    "source": "nativeShell.tray.gameIsolation"
+                },
+                {
                     "key": "nativeShell.tray.rebuildUi",
                     "source": "nativeShell.tray.rebuildUi"
                 },
@@ -453,6 +487,10 @@
                 {
                     "key": "nativeShell.tray.exit",
                     "source": "nativeShell.tray.exit"
+                },
+                {
+                    "key": "nativeShell.tray.realtimeReconnecting",
+                    "source": "nativeShell.tray.realtimeReconnecting"
                 },
                 {
                     "key": "nativeShell.notification.backgroundModeStarted.title",
@@ -613,10 +651,6 @@
                 {
                     "key": "nativeShell.menu.help.reportIssue",
                     "source": "nativeShell.menu.help.reportIssue"
-                },
-                {
-                    "key": "nativeShell.menu.help.qqGroup",
-                    "source": "nativeShell.menu.help.qqGroup"
                 },
                 {
                     "key": "nativeShell.menu.help.openDevtools",

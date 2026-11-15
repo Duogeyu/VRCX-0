@@ -741,6 +741,7 @@ export function useGroupDialogState({
             joinGroup,
             leaveGroup,
             refreshGroup,
+            reloadGroupProfile: refreshGroupProfile,
             updateGroupBlock,
             updateGroupMemberProps,
             updateGroupProfile,

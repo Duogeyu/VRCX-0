@@ -1,22 +1,27 @@
 use std::sync::Arc;
 
+use crate::game_isolation::GameIsolationRuntime;
 use crate::log_watcher::{GameLogEvent, GameLogEventOrigin, GameLogEventSink, LogWatcher};
 use crate::{HostFileAccess, Result};
 use vrcx_0_application_activity::ActivityRouter;
 use vrcx_0_application_core::Error as RuntimeError;
 use vrcx_0_application_core::Result as RuntimeResult;
 use vrcx_0_application_core::{
-    BackendRuntimeStatusPublisher, GameProcessEvent, GameProcessEventSink, HostSessionRuntime,
-    ImageCache, InstanceRosterObserver, RuntimeAuthScope, RuntimeEventBus, RuntimeSyncEngine,
+    BackendRuntimeStatusPublisher, ConfigStore, GameProcessEvent, GameProcessEventSink,
+    HostSessionRuntime, ImageCache, RuntimeAuthScope, RuntimeEventBus, RuntimeSyncEngine,
     TaskSupervisor, WebClient, WorldCache,
 };
 use vrcx_0_application_game::{
     GameLogHostActions, GameLogRuntime, GameLogRuntimeDeps, GameLogSideEffectSink,
     RuntimeSnapshotStore,
 };
+use vrcx_0_contracts::InstanceRosterObserver;
 use vrcx_0_host_desktop::{clipboard, game_launch, vrchat_paths};
 use vrcx_0_persistence::DatabaseService;
 use vrcx_0_platform::app_paths::AppPaths;
+
+pub(crate) const GAME_LOG_PERSISTENCE_RESUME_AFTER_CONFIG_KEY: &str =
+    "gameLogPersistenceResumeAfter";
 
 fn host_error(error: vrcx_0_platform::Error) -> RuntimeError {
     match error {
@@ -82,10 +87,12 @@ impl GameLogHostActions for HostGameLogActions {
 pub struct GameLogHostRuntime {
     db: Arc<DatabaseService>,
     session: HostSessionRuntime,
+    isolation: GameIsolationRuntime,
     inner: GameLogRuntime,
 }
 
 pub struct GameLogHostRuntimeDeps {
+    pub config: Arc<dyn ConfigStore>,
     pub db: Arc<DatabaseService>,
     pub web: Arc<WebClient>,
     pub image_cache: Arc<ImageCache>,
@@ -102,6 +109,7 @@ pub struct GameLogHostRuntimeDeps {
     pub instance_roster_observer: Option<Arc<dyn InstanceRosterObserver>>,
     pub backend_status: BackendRuntimeStatusPublisher,
     pub side_effect_sink: GameLogSideEffectSink,
+    pub isolation: GameIsolationRuntime,
 }
 
 impl GameLogHostRuntime {
@@ -116,32 +124,34 @@ impl GameLogHostRuntime {
                 Arc::clone(&deps.web),
                 Arc::clone(&deps.image_cache),
             ));
-        let inner = GameLogRuntime::new(GameLogRuntimeDeps::new(
-            Arc::new(crate::game_state_store::PersistenceGameStateStore::new(
-                Arc::clone(&deps.db),
+        let inner = GameLogRuntime::new(GameLogRuntimeDeps {
+            stores: vrcx_0_application_game::GameLogStores::shared(Arc::new(
+                crate::game_state_store::PersistenceGameStateStore::new(Arc::clone(&deps.db)),
             )),
+            config: deps.config,
             instance_media,
             video_metadata,
-            deps.event_bus,
-            deps.backend_status,
-            deps.side_effect_sink,
-            deps.tasks,
-            deps.sync,
-            deps.auth_scope,
-            deps.session.clone(),
-            deps.snapshot,
-            Arc::new(HostGameLogActions {
+            event_bus: deps.event_bus,
+            backend_status: deps.backend_status,
+            side_effect_sink: deps.side_effect_sink,
+            tasks: deps.tasks,
+            sync: deps.sync,
+            auth_scope: deps.auth_scope,
+            session: deps.session.clone(),
+            snapshot: deps.snapshot,
+            host_actions: Arc::new(HostGameLogActions {
                 file_access: deps.file_access,
                 app_paths: deps.app_paths,
             }),
-            Arc::new(deps.activity_router),
-            Arc::clone(&deps.world_cache),
-            deps.instance_roster_observer,
-        ));
+            activity: Arc::new(deps.activity_router),
+            world_cache: Arc::clone(&deps.world_cache),
+            instance_roster_observer: deps.instance_roster_observer,
+        });
 
         Self {
             db: deps.db,
             session: deps.session,
+            isolation: deps.isolation,
             inner,
         }
     }
@@ -153,8 +163,11 @@ impl GameLogHostRuntime {
             return Ok(());
         }
         let last_persisted = vrcx_0_persistence::game_log::get_last_game_log_date(&self.db)?;
-        let resume_after =
-            vrcx_0_persistence::config::get_string(&self.db, "gameLogPersistenceResumeAfter", "")?;
+        let resume_after = vrcx_0_persistence::config::get_string(
+            &self.db,
+            GAME_LOG_PERSISTENCE_RESUME_AFTER_CONFIG_KEY,
+            "",
+        )?;
         let date_till =
             later_timestamp(&last_persisted, &resume_after).unwrap_or(last_persisted.as_str());
         self.inner.set_persistence_resume_after(&resume_after);
@@ -168,9 +181,10 @@ impl GameLogHostRuntime {
 
     pub fn set_persistence_disabled(&self, log_watcher: &LogWatcher, disabled: bool) -> Result<()> {
         if self.session.snapshot().is_game_running {
-            return Err(crate::Error::Custom(
+            return Err(vrcx_0_application_core::Error::Custom(
                 "VRChat must be closed before changing GameLog history persistence.".into(),
-            ));
+            )
+            .into());
         }
 
         log_watcher
@@ -192,7 +206,7 @@ impl GameLogHostRuntime {
                 ];
                 if !disabled {
                     values.push(vrcx_0_persistence::config::ConfigWriteEntry {
-                        key: "gameLogPersistenceResumeAfter".into(),
+                        key: GAME_LOG_PERSISTENCE_RESUME_AFTER_CONFIG_KEY.into(),
                         value: resume_after.clone(),
                     });
                 }
@@ -229,16 +243,34 @@ impl GameLogEventSink for GameLogHostRuntime {
         cursor: vrcx_0_application_game::GameLogScanCursor,
         publish: bool,
     ) -> RuntimeResult<()> {
-        self.inner
-            .ingest_game_log_scan(events, origin, cursor, publish)
+        if publish {
+            let account = cursor
+                .authenticated_user()
+                .filter(|_| self.session.snapshot().is_game_running)
+                .map(|user| crate::LocalGameAccount {
+                    user_id: user.user_id.clone(),
+                    display_name: user.display_name.clone(),
+                });
+            self.isolation.set_local_game_account(account);
+        }
+        self.isolation.ingest_game_log(events, |events| {
+            self.inner
+                .ingest_game_log_scan(events, origin, cursor, publish)
+        })
     }
 
     fn ingest_game_log_event(&self, event: &GameLogEvent) -> RuntimeResult<()> {
-        self.inner.ingest_game_log_event(event)
+        self.isolation
+            .ingest_game_log(std::slice::from_ref(event), |events| {
+                events
+                    .iter()
+                    .try_for_each(|event| self.inner.ingest_game_log_event(event))
+            })
     }
 
     fn ingest_game_log_events(&self, events: &[GameLogEvent]) -> RuntimeResult<()> {
-        self.inner.ingest_game_log_events(events)
+        self.isolation
+            .ingest_game_log(events, |events| self.inner.ingest_game_log_events(events))
     }
 
     fn ingest_game_log_events_with_origin(
@@ -246,12 +278,14 @@ impl GameLogEventSink for GameLogHostRuntime {
         events: &[GameLogEvent],
         origin: GameLogEventOrigin,
     ) -> RuntimeResult<()> {
-        self.inner
-            .ingest_game_log_events_with_origin(events, origin)
+        self.isolation.ingest_game_log(events, |events| {
+            self.inner
+                .ingest_game_log_events_with_origin(events, origin)
+        })
     }
 }
 
-fn later_timestamp<'a>(left: &'a str, right: &'a str) -> Option<&'a str> {
+pub(crate) fn later_timestamp<'a>(left: &'a str, right: &'a str) -> Option<&'a str> {
     let left_at = vrcx_0_application_game::parse_event_time_ms(left);
     let right_at = vrcx_0_application_game::parse_event_time_ms(right);
     match (left_at, right_at) {
@@ -264,6 +298,9 @@ fn later_timestamp<'a>(left: &'a str, right: &'a str) -> Option<&'a str> {
 
 impl GameProcessEventSink for GameLogHostRuntime {
     fn on_game_process_event(&self, event: GameProcessEvent) -> RuntimeResult<()> {
+        if !event.is_game_running {
+            self.isolation.set_local_game_account(None);
+        }
         self.inner.on_game_process_event(event)
     }
 }

@@ -112,6 +112,16 @@ pub async fn spawn_in_process_tools(runtime: McpRuntime) -> Result<InProcessMcpT
 }
 
 #[cfg(test)]
+mod chatbox_tests;
+#[cfg(test)]
+mod disambiguation_tests;
+#[cfg(test)]
+mod profile_encounter_tests;
+#[cfg(test)]
+mod screenshot_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod visit_timeline_tests;
+#[cfg(test)]
+mod world_profile_tests;

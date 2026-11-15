@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use cookie_store::{CookieStore, RawCookie};
-use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE, REFERER};
+use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE, REFERER, USER_AGENT};
 use reqwest::multipart::{Form, Part};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method, Proxy};
@@ -39,6 +39,7 @@ use WebClientError as Error;
 pub use crate::cookies::{
     deserialize_cookie_store, deserialize_legacy_cookie_entries, serialize_cookie_store,
 };
+pub use vrcx_0_contracts::{WebExecuteRequest, WebMultipartPart, WebUploadMode};
 
 pub(crate) fn build_vrcx_user_agent(app_version: &str) -> String {
     let app_version = app_version.trim();
@@ -59,52 +60,6 @@ pub struct AuthCookieState {
 pub struct AuthCookieSummary {
     pub total_cookie_count: usize,
     pub auth_cookies: Vec<AuthCookieState>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub enum WebUploadMode {
-    #[default]
-    None,
-    FilePut {
-        file_data: Vec<u8>,
-        file_mime: String,
-        file_md5: Option<String>,
-    },
-    LegacyImage {
-        image_data: String,
-        post_data: Option<String>,
-    },
-    Image {
-        image_data: String,
-        post_data: Option<String>,
-    },
-    PrintImage {
-        image_data: String,
-        post_data: Option<String>,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub struct WebExecuteRequest {
-    pub url: String,
-    pub method: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Option<String>,
-    pub upload: WebUploadMode,
-    pub response_body_limit: Option<usize>,
-}
-
-impl WebExecuteRequest {
-    pub fn new(url: String, method: String) -> Self {
-        Self {
-            url,
-            method,
-            headers: Vec::new(),
-            body: None,
-            upload: WebUploadMode::None,
-            response_body_limit: None,
-        }
-    }
 }
 
 pub fn validate_vrchat_cookies_b64(b64: &str) -> Result<()> {
@@ -495,15 +450,44 @@ impl WebClient {
         normalize_execute_result(result)
     }
 
-    pub async fn execute_without_redirects(
+    pub async fn execute_external(
         &self,
         request: WebExecuteRequest,
+        follow_redirects: bool,
     ) -> Result<(i32, String)> {
-        let result = self
-            .do_execute_fresh_standard_with_redirects(request, false)
-            .await;
+        let result = self.do_execute_external(request, follow_redirects).await;
 
         normalize_execute_result(result)
+    }
+
+    async fn do_execute_external(
+        &self,
+        mut request: WebExecuteRequest,
+        follow_redirects: bool,
+    ) -> Result<(i32, String)> {
+        if !matches!(&request.upload, WebUploadMode::None) {
+            return Err(Error::Custom(
+                "external HTTP execution does not support uploads".into(),
+            ));
+        }
+        let fresh_client;
+        let client = if follow_redirects {
+            &self.client
+        } else {
+            fresh_client = build_http_client_with_redirects(
+                Arc::clone(&self.jar),
+                self.proxy_url.as_deref(),
+                &self.user_agent,
+                false,
+            )?;
+            &fresh_client
+        };
+        let response_body_limit = request.response_body_limit;
+        let mut http_request = self.build_standard_request_with(client, &mut request)?;
+        http_request
+            .headers_mut()
+            .insert(USER_AGENT, HeaderValue::from_static(BASE_USER_AGENT));
+        execute_request(client, http_request, response_body_limit).await
     }
 
     pub async fn execute_fresh_standard(
@@ -515,26 +499,19 @@ impl WebClient {
         normalize_execute_result(result)
     }
 
-    async fn do_execute_fresh_standard(&self, request: WebExecuteRequest) -> Result<(i32, String)> {
-        self.do_execute_fresh_standard_with_redirects(request, true)
-            .await
-    }
-
-    async fn do_execute_fresh_standard_with_redirects(
+    async fn do_execute_fresh_standard(
         &self,
         mut request: WebExecuteRequest,
-        follow_redirects: bool,
     ) -> Result<(i32, String)> {
         if !matches!(&request.upload, WebUploadMode::None) {
             return Err(Error::Custom(
                 "fresh HTTP client execution does not support uploads".into(),
             ));
         }
-        let client = build_http_client_with_redirects(
+        let client = build_http_client(
             Arc::clone(&self.jar),
             self.proxy_url.as_deref(),
             &self.user_agent,
-            follow_redirects,
         )?;
         let response_body_limit = request.response_body_limit;
         let request = self.build_standard_request_with(&client, &mut request)?;
@@ -569,6 +546,7 @@ impl WebClient {
             } => {
                 self.build_print_image_upload_request(&request, &image_data, post_data.as_deref())?
             }
+            WebUploadMode::Multipart { parts } => self.build_multipart_request(&request, parts)?,
         };
 
         execute_request(&self.client, request, response_body_limit).await
@@ -688,6 +666,28 @@ impl WebClient {
             .multipart(form)
             .build()
             .map_err(|e| Error::Custom(format!("build legacy upload: {e}")))
+    }
+
+    fn build_multipart_request(
+        &self,
+        request: &WebExecuteRequest,
+        parts: Vec<WebMultipartPart>,
+    ) -> Result<reqwest::Request> {
+        let mut form = Form::new();
+        for part in parts {
+            let mut body = Part::bytes(part.data)
+                .mime_str(&part.mime)
+                .map_err(|e| Error::Custom(format!("multipart mime: {e}")))?;
+            if let Some(file_name) = part.file_name {
+                body = body.file_name(file_name);
+            }
+            form = form.part(part.name, body);
+        }
+        self.client
+            .post(&request.url)
+            .multipart(form)
+            .build()
+            .map_err(|e| Error::Custom(format!("build multipart upload: {e}")))
     }
 
     fn build_image_upload_request(

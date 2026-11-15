@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use vrcx_0_application::favorites::FavoriteMutationCoordinator;
-use vrcx_0_application_core::{RuntimeAuthScope, TaskSupervisor};
+use vrcx_0_application_core::{ConfigStore, RuntimeAuthScope, TaskSupervisor};
 use vrcx_0_application_realtime::RealtimeHostRuntime;
 
 use crate::ports::{
-    McpActivityQueries, McpConfig, McpFavoritesQueries, McpFeedQueries, McpFriendLocalData,
-    McpMutualGraph, McpSocialHistoryQueries,
+    McpActivityQueries, McpChatbox, McpFavoritesQueries, McpFeedQueries, McpFriendLocalData,
+    McpMutualGraph, McpScreenshotQueries, McpSocialHistoryQueries, McpWorldLookup,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,13 +19,16 @@ pub enum McpCaller {
 pub struct McpRuntime {
     pub(crate) realtime_runtime: Arc<RealtimeHostRuntime>,
     pub(crate) auth_scope: RuntimeAuthScope,
-    pub(crate) config: McpConfig,
+    pub(crate) config: Arc<dyn ConfigStore>,
     pub(crate) activity_queries: McpActivityQueries,
     pub(crate) social_history_queries: McpSocialHistoryQueries,
     pub(crate) friend_local_data: McpFriendLocalData,
     pub(crate) favorites_queries: McpFavoritesQueries,
     pub(crate) feed_queries: McpFeedQueries,
     pub(crate) mutual_graph: McpMutualGraph,
+    pub(crate) world_lookup: McpWorldLookup,
+    pub(crate) screenshots: McpScreenshotQueries,
+    pub(crate) chatbox: McpChatbox,
     pub(crate) favorite_mutations: FavoriteMutationCoordinator,
     pub(crate) tasks: TaskSupervisor,
     pub(crate) caller: McpCaller,
@@ -34,13 +37,16 @@ pub struct McpRuntime {
 pub struct McpRuntimeDeps {
     pub realtime_runtime: Arc<RealtimeHostRuntime>,
     pub auth_scope: RuntimeAuthScope,
-    pub config: McpConfig,
+    pub config: Arc<dyn ConfigStore>,
     pub activity_queries: McpActivityQueries,
     pub social_history_queries: McpSocialHistoryQueries,
     pub friend_local_data: McpFriendLocalData,
     pub favorites_queries: McpFavoritesQueries,
     pub feed_queries: McpFeedQueries,
     pub mutual_graph: McpMutualGraph,
+    pub world_lookup: McpWorldLookup,
+    pub screenshots: McpScreenshotQueries,
+    pub chatbox: McpChatbox,
     pub favorite_mutations: FavoriteMutationCoordinator,
     pub tasks: TaskSupervisor,
 }
@@ -57,6 +63,9 @@ impl McpRuntime {
             favorites_queries: deps.favorites_queries,
             feed_queries: deps.feed_queries,
             mutual_graph: deps.mutual_graph,
+            world_lookup: deps.world_lookup,
+            screenshots: deps.screenshots,
+            chatbox: deps.chatbox,
             favorite_mutations: deps.favorite_mutations,
             tasks: deps.tasks,
             caller,

@@ -11,7 +11,8 @@ use super::activity_builders::{
 use super::{
     discord_enrichment_status_retryable, set_assets_or_noop, BackgroundDiscordActivityPayload,
     BackgroundDiscordPresenceCommand, BackgroundDiscordPresenceState, DiscordConfig,
-    DiscordLocationDetails, DiscordPresenceLabels, DISCORD_ENRICHMENT_RETRY_MAX,
+    DiscordLocationDetails, DiscordPresenceLabels, DISCORD_ACTIVITY_REFRESH_INTERVAL,
+    DISCORD_ENRICHMENT_RETRY_MAX,
 };
 
 #[test]
@@ -127,6 +128,79 @@ fn discord_rpc_world_uses_now_playing_details_and_thumbnail() {
             .and_then(Value::as_i64),
         timestamp_seconds("2026-05-19T01:02:00Z")
     );
+}
+
+fn now_playing_activity(now_playing: NowPlayingSnapshot) -> serde_json::Map<String, Value> {
+    let config = DiscordConfig {
+        discord_world_integration: true,
+        ..Default::default()
+    };
+    let facts = BackgroundPresenceFacts {
+        is_game_running: true,
+        current_location_started_at: "2026-10-30T13:00:00Z".into(),
+        current_user: json!({ "status": "active" }).into(),
+        now_playing: std::sync::Arc::new(now_playing),
+        ..Default::default()
+    };
+    let parsed = parse_location("wrld_club:1");
+    let details = DiscordLocationDetails {
+        world_name: "Club".into(),
+        thumbnail_image_url: "https://image.example/world.jpg".into(),
+        parsed: Some(parsed.clone()),
+        ..Default::default()
+    };
+    let payload = build_discord_activity(
+        &config,
+        &facts,
+        &DiscordPresenceLabels::default(),
+        &details,
+        &parsed,
+    );
+    assert_eq!(payload.app_id, DEFAULT_APP_ID);
+    payload.activity.as_object().unwrap().clone()
+}
+
+#[test]
+fn any_world_shows_titled_media_as_watching_from_its_real_position() {
+    let titled = NowPlayingSnapshot {
+        url: "https://youtu.be/abcdefghijk".into(),
+        name: "Song".into(),
+        thumbnail_url: "https://image.example/cover.jpg".into(),
+        started_at: Some("2026-10-30T13:40:57Z".into()),
+        position: 129,
+        length: 216,
+        titled: true,
+        ..Default::default()
+    };
+    let activity = now_playing_activity(titled.clone());
+    let started = timestamp_seconds("2026-10-30T13:40:57Z").unwrap() - 129;
+    assert_eq!(activity["type"], json!(3));
+    assert_eq!(activity["details"], json!("Club"));
+    assert_eq!(activity["timestamps"]["start"], json!(started));
+    assert_eq!(activity["timestamps"]["end"], json!(started + 216));
+    assert_eq!(
+        activity["assets"]["large_image"],
+        json!("https://image.example/cover.jpg")
+    );
+
+    for hidden in [
+        NowPlayingSnapshot {
+            paused: true,
+            ..titled.clone()
+        },
+        NowPlayingSnapshot {
+            titled: false,
+            ..titled
+        },
+    ] {
+        let activity = now_playing_activity(hidden);
+        assert_eq!(activity["type"], json!(0));
+        assert_eq!(activity["timestamps"].get("end"), None);
+        assert_eq!(
+            activity["assets"]["large_image"],
+            json!("https://image.example/world.jpg")
+        );
+    }
 }
 
 #[test]
@@ -313,13 +387,48 @@ fn discord_unchanged_payload_is_not_published_twice() {
     };
     let mut state = BackgroundDiscordPresenceState::default();
     state.apply_set_assets_result(&payload, true);
+    let now = Instant::now();
 
     assert!(matches!(
-        set_assets_or_noop(&state, payload.clone(), false),
+        set_assets_or_noop(&state, payload.clone(), false, now),
         BackgroundDiscordPresenceCommand::Noop { .. }
     ));
     assert!(matches!(
-        set_assets_or_noop(&state, payload, true),
+        set_assets_or_noop(&state, payload, true, now),
         BackgroundDiscordPresenceCommand::SetAssets { .. }
     ));
+}
+
+#[test]
+fn discord_unchanged_payload_is_refreshed_after_interval() {
+    let payload = BackgroundDiscordActivityPayload {
+        app_id: DEFAULT_APP_ID.into(),
+        activity: json!({ "details": "VRChat" }).into(),
+        detail: "VRChat".into(),
+    };
+    let mut state = BackgroundDiscordPresenceState::default();
+    state.apply_set_assets_result(&payload, true);
+    let published_at = state.last_published_at.unwrap();
+
+    assert!(matches!(
+        set_assets_or_noop(
+            &state,
+            payload.clone(),
+            false,
+            published_at + DISCORD_ACTIVITY_REFRESH_INTERVAL - Duration::from_secs(1),
+        ),
+        BackgroundDiscordPresenceCommand::Noop { .. }
+    ));
+    assert!(matches!(
+        set_assets_or_noop(
+            &state,
+            payload.clone(),
+            false,
+            published_at + DISCORD_ACTIVITY_REFRESH_INTERVAL,
+        ),
+        BackgroundDiscordPresenceCommand::SetAssets { .. }
+    ));
+
+    state.apply_set_assets_result(&payload, false);
+    assert!(state.last_published_at.is_none());
 }
