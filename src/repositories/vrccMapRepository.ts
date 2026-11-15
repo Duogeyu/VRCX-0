@@ -4,7 +4,6 @@ import { queryOptions } from '@tanstack/react-query';
 
 import { entityQueryPolicies, queryKeys } from '@/lib/entityQueryCache';
 import { normalizeVrccError } from '@/lib/vrccError';
-import { scopeGrants } from '@/lib/vrccScope';
 import { commands } from '@/platform/tauri/bindings';
 import type { VrccMyMap } from '@/platform/tauri/bindings';
 
@@ -60,10 +59,12 @@ export function vrccPublicMapQueryOptions(worldId: string) {
  */
 export function vrccMyMapPageQueryOptions(
     worldId: string,
-    sort: 'hot' | 'new'
+    sort: 'hot' | 'new',
+    star: number | null
 ) {
     return queryOptions({
-        queryKey: queryKeys.worldVrccSignedIn(worldId, sort),
+        // `star` 进键：这是某一个星遇同频账号的数据，见 `queryKeys.worldVrccSignedIn`。
+        queryKey: queryKeys.worldVrccSignedIn(worldId, sort, star),
         queryFn: async () =>
             worldId.startsWith('wrld_')
                 ? commands.appVrccMyMapPage(worldId, sort)
@@ -325,33 +326,4 @@ export async function prefetchVrccWorldCovers(
         )
     );
     return stored;
-}
-
-/**
- * 当前令牌有没有某项权限。
- *
- * ## 为什么要问后端
- *
- * 「有没有 `maps.rate`」取决于**玩家当初授权时拿到的 scope 字符串**，那是
- * 令牌的属性，不在前端状态里。已经连上、但令牌是加权限之前签发的玩家，
- * 正是这里的分水岭：他们有 `maps` 却没有 `maps.rate`，服务器会回
- * `403 scope`。前端猜不出来，只能读。
- *
- * ## 判定是**严格**的：宁可少给，不给一个点了必然失败的按钮
- *
- * 拿不到 scope（未连接、旧版本没记、或读连接状态本身失败）时按**没有**处理，
- * 界面于是要求玩家重新连接一次。这是**故意与契约层的 `scope_grants` 相反**：
- * 那里问的是「该不该替服务器先拦下请求」，不知道就放行（`None => true`，交给
- * 服务器判）；这里问的是「该不该给玩家看一个按钮」，不知道就不给。
- *
- * 官方的 scope 分隔符兼容空格、逗号与 `+`，判定本身在
- * [`scopeGrants`](@/lib/vrccScope)，页面那边用的是同一个。
- */
-export async function fetchVrccScopeGrants(scope: string): Promise<boolean> {
-    try {
-        const connection = await commands.appVrccConnection();
-        return scopeGrants(connection.scope, scope);
-    } catch {
-        return false;
-    }
 }

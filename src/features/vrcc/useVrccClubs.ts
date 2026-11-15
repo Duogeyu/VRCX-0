@@ -52,10 +52,12 @@ export function useVrccClubs({
     const source: 'public' | 'mine' = wantsMine ? 'mine' : 'public';
 
     const query = useQuery({
+        // 玩家视角是某一个星遇同频账号的数据，键里带 `star`（公开列表不带）。
         queryKey: queryKeys.vrccClubs(
             source,
             source === 'public' ? limit : 0,
-            source === 'public' ? offset : 0
+            source === 'public' ? offset : 0,
+            source === 'mine' ? (connection?.star ?? null) : null
         ),
         queryFn: async () =>
             source === 'mine'

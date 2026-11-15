@@ -9,7 +9,7 @@
  *
  * - `VrccPage` 判断「要不要显示星轨相交这个入口」——不知道就不显示；
  * - `repositories/vrccMapRepository` 判断「要不要给玩家看打分按钮」——
- *   同样是不知道就不给（那边有 `fetchVrccScopeGrants`，会自己读连接状态）。
+ *   同样是不知道就不给（那边用 `useVrccConnection` 读连接状态）。
  *
  * 两者都比契约层的 `scope_grants` **严格**。那个是 Rust 侧决定「该不该替
  * 服务器先把请求拦下来」：不知道就放行（`None => true`），交给服务器判——

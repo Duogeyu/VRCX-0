@@ -70,4 +70,30 @@ describe('entityQueryCache', () => {
         await vi.advanceTimersByTimeAsync(1);
         expect(queryClient.getQueryData(key)).toBeUndefined();
     });
+
+    it('keys vrcc personal data by star so two vrcc accounts never share an entry', () => {
+        const personal = [
+            (star: number | null) =>
+                queryKeys.worldVrccSignedIn('wrld_a', 'hot', star),
+            (star: number | null) => queryKeys.worldVrccMine('wrld_a', star),
+            (star: number | null) =>
+                queryKeys.groupVrccClubDetail('VRCC.1234', star),
+            (star: number | null) => queryKeys.vrccClubs('mine', 0, 0, star)
+        ];
+        for (const key of personal) {
+            expect(key(77)).not.toEqual(key(88));
+            expect(key(77)).not.toEqual(key(null));
+        }
+        // 公开数据不属于任何账号，键里没有 star。
+        expect(queryKeys.worldVrcc('wrld_a')).toEqual([
+            'world',
+            'wrld_a',
+            'vrcc'
+        ]);
+        expect(queryKeys.groupVrccClub('VRCC.1234')).toEqual([
+            'group',
+            'vrcc-club',
+            'VRCC.1234'
+        ]);
+    });
 });

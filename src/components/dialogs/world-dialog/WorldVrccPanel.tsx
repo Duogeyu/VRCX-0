@@ -11,8 +11,8 @@ import { queryKeys } from '@/lib/entityQueryCache';
 import { cn } from '@/lib/utils';
 import { VrccError } from '@/lib/vrccError';
 import type { VrccMyMapPage } from '@/platform/tauri/bindings';
+import { useVrccConnection } from '@/repositories/vrccConnectionRepository';
 import {
-    fetchVrccScopeGrants,
     readVrccMyMap,
     voteVrccMapContent,
     vrccMyMapPageQueryOptions,
@@ -97,38 +97,30 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
         enabled: Boolean(worldId)
     });
 
-    const signedIn = useQuery({
-        ...vrccMyMapPageQueryOptions(worldId, sort),
-        enabled: Boolean(worldId)
-    });
-
-    // 令牌里有没有 `maps.rate`。**必须在任何提前 return 之前调用**：
+    // 当前星遇同频账号与权限。**必须在任何提前 return 之前调用**：
     // 这个 Hook 写在下面（数据就绪之后）会让 Hook 顺序随渲染路径变化。
-    const scopeQuery = useQuery({
-        queryKey: queryKeys.vrccScope('maps.rate'),
-        queryFn: () => fetchVrccScopeGrants('maps.rate'),
-        staleTime: 60 * 1000,
-        retry: 0,
-        refetchOnWindowFocus: false
+    const vrcc = useVrccConnection();
+
+    // 带令牌的那一半挂在当前账号（`star`）下，要等这次挂载读到连接再发：
+    // 缓存里的旧连接可能是上一个账号的。
+    const signedIn = useQuery({
+        ...vrccMyMapPageQueryOptions(worldId, sort, vrcc.star),
+        enabled: Boolean(worldId) && vrcc.ready
     });
 
+    // 令牌里有没有 `maps.rate`（打分）。
+    const canRateScope = vrcc.grants('maps.rate');
     // 投票是另一项权限（maps.write），和打分（maps.rate）分开判定：
     // 两个敏感权限都可以单独缺失，混成一个布尔会让「能打分不能投票」的
-    // 玩家看到一个点不动的赞。**同样必须在提前 return 之前调用。**
-    const writeScopeQuery = useQuery({
-        queryKey: queryKeys.vrccScope('maps.write'),
-        queryFn: () => fetchVrccScopeGrants('maps.write'),
-        staleTime: 60 * 1000,
-        retry: 0,
-        refetchOnWindowFocus: false
-    });
+    // 玩家看到一个点不动的赞。
+    const canVoteScope = vrcc.grants('maps.write');
 
     // 带令牌的状态：只有它能区分「未收录」和「待审核」。
     // 公开接口对这两种都回 404。**同样必须在提前 return 之前调用。**
     const myMapQuery = useQuery({
-        queryKey: queryKeys.worldVrccMine(worldId),
+        queryKey: queryKeys.worldVrccMine(worldId, vrcc.star),
         queryFn: () => readVrccMyMap(worldId),
-        enabled: Boolean(worldId) && scopeQuery.data === true,
+        enabled: Boolean(worldId) && canRateScope === true,
         // 状态会变（投稿后进入审核、审核后上榜），别缓存太久。
         staleTime: 30 * 1000,
         retry: 0,
@@ -357,8 +349,8 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
     // 已经连上、但令牌是加权限之前发的玩家，正是这里的分水岭：他们有 `maps`
     // 却没有 `maps.rate`，服务器会回 `403 scope`。给这类玩家看一个点不动的
     // 打分器，不如直接告诉他「重新连接一次即可」。
-    const canRate = scopeQuery.data === true;
-    const canVote = writeScopeQuery.data === true;
+    const canRate = canRateScope === true;
+    const canVote = canVoteScope === true;
 
     return (
         // `h-full` + 内部 flex：让这一页永远不超过标签页容器的高度。
@@ -458,7 +450,7 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                         />
                     ) : mine ? (
                         <MineRating rate={mine} />
-                    ) : signedIn.data && scopeQuery.data === false ? (
+                    ) : signedIn.data && canRateScope === false ? (
                         // 连上了，但令牌里没有 maps.rate。这种情况几乎都是
                         // 「令牌是加权限之前签发的」，重连一次就好——直接说清楚，
                         // 比给一个点了必然 403 的控件有用。
