@@ -139,3 +139,24 @@ fn do_not_disturb_pauses_every_local_surface() {
         .has_local_transport());
     assert!(!policy.hmd_allowed());
 }
+
+#[test]
+fn game_isolation_also_narrows_plans_built_outside_the_policy() {
+    // 星遇同频的站外提醒自己算计划（不看游戏状态），再交给这一步收窄。
+    let (_dir, _config, policy, isolation) = policy_with_isolation("policy-isolation-external");
+    let external = crate::notification::NotificationDeliveryPlan {
+        desktop: true,
+        xs: true,
+        ovrt: true,
+        ovrt_hud: true,
+        ovrt_wrist: false,
+        tts: true,
+    };
+
+    assert_eq!(policy.restrict_for_game_isolation(external), external);
+
+    isolation.set_enabled(true).unwrap();
+    let narrowed = policy.restrict_for_game_isolation(external);
+    assert!(narrowed.desktop);
+    assert!(!narrowed.xs && !narrowed.ovrt && !narrowed.ovrt_hud && !narrowed.tts);
+}

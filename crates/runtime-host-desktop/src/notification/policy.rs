@@ -105,6 +105,18 @@ impl LocalNotificationPolicy {
         }
         let plan =
             decide_notification_plan(delivery, &settings.preferences, &self.game_state(settings));
+        self.restrict_for_game_isolation(plan)
+    }
+
+    /// 游戏隔离开启时（用另一个账号玩 VRChat），本地通知只留桌面一路：浮层和
+    /// 朗读都会出现在那个账号的游戏里。
+    ///
+    /// 单独拎出来，是因为不走 [`Self::plan`] 的通道（星遇同频的站外提醒）也要
+    /// 遵守同一条规则，规则只该写在一处。
+    pub(crate) fn restrict_for_game_isolation(
+        &self,
+        plan: NotificationDeliveryPlan,
+    ) -> NotificationDeliveryPlan {
         if self.game_isolation.is_enabled() {
             return NotificationDeliveryPlan {
                 desktop: plan.desktop,
