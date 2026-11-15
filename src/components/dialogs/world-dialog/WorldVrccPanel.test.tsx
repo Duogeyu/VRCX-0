@@ -680,6 +680,123 @@ describe('WorldVrccPanel', () => {
         ).toBe('还没提交的草稿');
     });
 
+    it('切短评排序时，新排序到之前不把上一个排序的短评当成这一个显示', async () => {
+        appVrccMapPage.mockResolvedValue(mapPage());
+        let deliverNew: (page: unknown) => void = () => {};
+        appVrccMyMapPage.mockImplementation((_world: string, sort: string) =>
+            sort === 'new'
+                ? new Promise((resolve) => {
+                      deliverNew = resolve;
+                  })
+                : Promise.resolve(myMapPage())
+        );
+        renderWithClient(<WorldVrccPanel worldId="wrld_test" />);
+        await screen.findByText('光影很舒服');
+
+        fireEvent.click(screen.getByText('dialog.world.vrcc.sort_new'));
+        // 「我的评分」沿用（打分器还在），短评列表不沿用：显示加载中，
+        // 也不能说「还没有短评」。
+        expect(screen.queryByText('光影很舒服')).toBeNull();
+        expect(screen.getByText('common.loading')).toBeTruthy();
+        expect(screen.queryByText('dialog.world.vrcc.no_words_yet')).toBeNull();
+        expect(
+            screen.getByPlaceholderText('dialog.world.vrcc.words_placeholder')
+        ).toBeTruthy();
+
+        await act(async () => {
+            deliverNew(
+                myMapPage({
+                    sort: 'new',
+                    rates: [{ id: 3, text: '最新的一条', score: 8 }]
+                })
+            );
+        });
+        expect(await screen.findByText('最新的一条')).toBeTruthy();
+    });
+
+    it('提交评分后切到另一个排序，那边缓存的旧评分不会顶掉新写的草稿', async () => {
+        appVrccMapPage.mockResolvedValue(mapPage());
+        // 服务器上「我的评分」：提交后变成 9 分。
+        let serverScore = 7;
+        let holdNew = false;
+        let deliverNew: (page: unknown) => void = () => {};
+        appVrccMyMapPage.mockImplementation((_world: string, sort: string) => {
+            const page = myMapPage({
+                sort,
+                mine: {
+                    rate: {
+                        score: serverScore,
+                        text: '我写的这条',
+                        check: 'ok'
+                    }
+                }
+            });
+            if (sort === 'new' && holdNew) {
+                return new Promise((resolve) => {
+                    deliverNew = () => resolve(page);
+                });
+            }
+            return Promise.resolve(page);
+        });
+        appVrccRateMap.mockImplementation(async () => {
+            serverScore = 9;
+            return null;
+        });
+        renderWithClient(<WorldVrccPanel worldId="wrld_test" />);
+        await screen.findByText('光影很舒服');
+
+        // 两个排序都看过一遍：「最新」那份（7 分）进了缓存。
+        fireEvent.click(screen.getByText('dialog.world.vrcc.sort_new'));
+        await waitFor(() =>
+            expect(appVrccMyMapPage).toHaveBeenCalledWith('wrld_test', 'new')
+        );
+        fireEvent.click(screen.getByText('dialog.world.vrcc.sort_hot'));
+
+        // 在「最热」下改成 9 分提交；重新拉到 9 分后再写一段新草稿。
+        const scores = await screen.findAllByRole('radio', {
+            name: 'dialog.world.vrcc.rate_value'
+        });
+        fireEvent.click(scores[8]);
+        fireEvent.click(screen.getByText('dialog.world.vrcc.rate_submit'));
+        await waitFor(() => expect(appVrccRateMap).toHaveBeenCalled());
+        await waitFor(() =>
+            expect(
+                screen
+                    .getAllByRole('radio', {
+                        name: 'dialog.world.vrcc.rate_value'
+                    })[8]
+                    .getAttribute('aria-checked')
+            ).toBe('true')
+        );
+        fireEvent.change(
+            screen.getByPlaceholderText('dialog.world.vrcc.words_placeholder'),
+            { target: { value: '提交之后接着写的' } }
+        );
+
+        // 切到「最新」：那份缓存是提交前的 7 分。它要是先顶上来，编辑器的
+        // key 会变回 7 分、重新挂载，草稿就没了。
+        holdNew = true;
+        fireEvent.click(screen.getByText('dialog.world.vrcc.sort_new'));
+        expect(
+            (
+                screen.getByPlaceholderText(
+                    'dialog.world.vrcc.words_placeholder'
+                ) as HTMLTextAreaElement
+            ).value
+        ).toBe('提交之后接着写的');
+
+        await act(async () => {
+            deliverNew(null);
+        });
+        expect(
+            (
+                screen.getByPlaceholderText(
+                    'dialog.world.vrcc.words_placeholder'
+                ) as HTMLTextAreaElement
+            ).value
+        ).toBe('提交之后接着写的');
+    });
+
     it('我的评分还没到时不给打分器；到了之后只改分数不会删掉原来的短评', async () => {
         appVrccMapPage.mockResolvedValue(mapPage());
         // 权限查询几乎立刻就回，带令牌的那一页要慢一些：这是真实的先后顺序。
