@@ -64,6 +64,17 @@ export const entityQueryPolicies = Object.freeze({
         retry: 0,
         refetchOnWindowFocus: false
     }),
+    // 社团列表（`GET /clubs` 公开 / `GET /me/clubs` 玩家视角）。
+    //
+    // 服务器最多 5 分钟重新生成一次，问再勤也是同一份——所以 5 分钟，和官网
+    // 那张网页的刷新节奏对齐。**重试 1**：这是公开数据，失败一次多半是网络抖，
+    // 和「群组没入驻社团」那种确定结论不同。
+    vrccClubs: Object.freeze({
+        staleTime: 5 * MINUTE_MS,
+        gcTime: 30 * MINUTE_MS,
+        retry: 1,
+        refetchOnWindowFocus: false
+    }),
     groupCollection: Object.freeze({
         staleTime: 60 * SECOND_MS,
         gcTime: 300 * SECOND_MS,
@@ -245,6 +256,11 @@ export const queryKeys = Object.freeze({
     // 把同一个接口问两遍，而它在客户端侧带 30 秒 `min_gap`、还吃每日额度。
     groupVrccClubDetail: (code: string) =>
         ['group', 'vrcc-club-detail', code] as const,
+    // 社团列表。**键里带来源**：公开列表按页取、玩家视角是全量，两者形状虽然
+    // 归一过，缓存却不能混——混了以后切回来会拿到另一份的行（有人有 `likes`、
+    // 有人没有）。
+    vrccClubs: (source: 'public' | 'mine', limit = 0, offset = 0) =>
+        ['vrcc', 'clubs', source, limit, offset] as const,
     // 一张地图在榜上的状态（board / pending / off）。只有带令牌的接口能区分
     // 「未收录」和「待审核」，所以独立一个键，不与公开页共用。
     worldVrccMine: (worldId: string) =>

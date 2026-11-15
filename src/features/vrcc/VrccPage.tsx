@@ -32,6 +32,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/ui/shadcn/tabs';
 
 import { announcementSummary } from './components/VrccAnnouncementBody';
 import { VrccAnnouncementDialog } from './components/VrccAnnouncementDialog';
+import { VrccClubsPanel } from './components/VrccClubsPanel';
 import { VrccCrossingsPanel } from './components/VrccCrossingsPanel';
 import { VrccCurrentMapCard } from './components/VrccCurrentMapCard';
 import { VrccMapsPanel } from './components/VrccMapsPanel';
@@ -63,6 +64,7 @@ import { countVrccCrossingsUnread, countVrccUnread } from './vrccUnreadCount';
 const VRCC_TABS: readonly VrccTab[] = [
     'maps',
     'models',
+    'clubs',
     'notifications',
     'mutuals',
     'crossings',
@@ -163,15 +165,19 @@ export function VrccPage() {
         if (!isVrccTab(requestedTab)) {
             return;
         }
-        // **不需要连接就能看的页签要立刻落过去**：地图榜是开放数据，「我的」
-        // 页正是连接入口本身。首连引导的「现在连接」就靠 `?tab=me` 把玩家
-        //送到连接卡片前面——早先这里对未连接一律 return，引导点下去会停在
-        // 默认页签、参数还留在地址栏里，等哪天连上了才突然跳走。
+        // **不需要连接就能看的页签要立刻落过去**：地图榜、模型榜、社团列表都是
+        // 开放数据，「我的」页正是连接入口本身。首连引导的「现在连接」就靠
+        // `?tab=me` 把玩家送到连接卡片前面——早先这里对未连接一律 return，引导
+        // 点下去会停在默认页签、参数还留在地址栏里，等哪天连上了才突然跳走。
         //
         // 其余页签仍然等连接就绪：`setTab` 在未连接时会跳过「提醒」页的已读
         // 同步，先落过去就是落过去了而同步没发生。
         const reachableNow =
-            connected || requestedTab === 'maps' || requestedTab === 'me';
+            connected ||
+            requestedTab === 'maps' ||
+            requestedTab === 'models' ||
+            requestedTab === 'clubs' ||
+            requestedTab === 'me';
         if (!reachableNow) {
             return;
         }
@@ -402,6 +408,11 @@ export function VrccPage() {
                             <TabsTrigger value="models">
                                 {t('vrcc.tab.models')}
                             </TabsTrigger>
+                            {/* 社团列表也是开放数据：不需要连接就能看，排在
+                                个人内容前面。 */}
+                            <TabsTrigger value="clubs">
+                                {t('vrcc.tab.clubs')}
+                            </TabsTrigger>
                             <TabsTrigger value="notifications">
                                 {t('vrcc.tab.notifications')}
                                 {unreadTotal > 0 && (
@@ -468,6 +479,10 @@ export function VrccPage() {
                                 onSortChange={setModelSort}
                                 onRefresh={() => void refreshModels()}
                             />
+                        </TabsContent>
+
+                        <TabsContent value="clubs" className="min-h-0 flex-1">
+                            <VrccClubsPanel connection={connection} />
                         </TabsContent>
 
                         <TabsContent

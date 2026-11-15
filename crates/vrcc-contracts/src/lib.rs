@@ -2602,6 +2602,32 @@ pub struct VrccMyClubResponse {
     pub club: Option<VrccMyClubDetail>,
 }
 
+/// `GET /clubs`：所有公开社团（1.19.2 起）。
+///
+/// 不用令牌，只要 `client` 头。顺序**固定**：点赞多的在前，再按群组人数、短码
+/// ——接口**没有 `sort` 参数**，客户端改不了顺序。
+///
+/// **不返回点赞数本身**：榜是按点赞排的，但 [`VrccClub`] 里没有 `likes`。想显示
+/// 「为什么排这个位置」只能靠带令牌的 `GET /me/clubs` 再叠一层。
+///
+/// 翻页按 `limit` / `offset`，回答给 `total` 与 `next`（最后一页是 `null`）。
+/// 服务器最多 5 分钟更新一次；社团功能关着时是空列表。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccClubs {
+    /// 一共几个公开社团。
+    #[serde(default)]
+    pub total: Option<i64>,
+    #[serde(default)]
+    pub clubs: Vec<VrccClub>,
+    /// 下一页的 `offset`；已经是最后一页时是 `null`。
+    #[serde(default)]
+    pub next: Option<i64>,
+    /// 列表生成的时间（毫秒）。
+    #[serde(default)]
+    pub at: Option<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // 错误体
 // ---------------------------------------------------------------------------

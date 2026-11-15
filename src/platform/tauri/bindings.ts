@@ -520,6 +520,15 @@ const generatedCommands = {
         return await TAURI_INVOKE('app__vrcc_club', { code });
     },
     /**
+     * 所有公开社团（`GET /clubs`）。**不需要连接。**
+     *
+     * 顺序由服务器定死（点赞多 → 群组人数多 → 短码），没有 `sort` 参数；翻页用
+     * `limit` / `offset`，回答里有 `total` 与 `next`。
+     */
+    async appVrccClubs(limit: number, offset: number): Promise<VrccClubs> {
+        return await TAURI_INVOKE('app__vrcc_clubs', { limit, offset });
+    },
+    /**
      * 玩家能看到的社团（`GET /me/clubs`）。需要 `clubs` 敏感权限。
      *
      * 16–17 岁星池、社团功能关着时也返回 `null`（`404 club_off`），那是正常
@@ -7817,6 +7826,33 @@ export type VrccClubTextSeg = {
      * 这一段是联系方式，官方要求打码显示。
      */
     hidden: boolean;
+};
+/**
+ * `GET /clubs`：所有公开社团（1.19.2 起）。
+ *
+ * 不用令牌，只要 `client` 头。顺序**固定**：点赞多的在前，再按群组人数、短码
+ * ——接口**没有 `sort` 参数**，客户端改不了顺序。
+ *
+ * **不返回点赞数本身**：榜是按点赞排的，但 [`VrccClub`] 里没有 `likes`。想显示
+ * 「为什么排这个位置」只能靠带令牌的 `GET /me/clubs` 再叠一层。
+ *
+ * 翻页按 `limit` / `offset`，回答给 `total` 与 `next`（最后一页是 `null`）。
+ * 服务器最多 5 分钟更新一次；社团功能关着时是空列表。
+ */
+export type VrccClubs = {
+    /**
+     * 一共几个公开社团。
+     */
+    total?: number | null;
+    clubs?: VrccClub[];
+    /**
+     * 下一页的 `offset`；已经是最后一页时是 `null`。
+     */
+    next?: number | null;
+    /**
+     * 列表生成的时间（毫秒）。
+     */
+    at?: number | null;
 };
 /**
  * 连接状态投影。

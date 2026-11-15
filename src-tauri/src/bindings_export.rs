@@ -222,6 +222,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::application::vrcc::app__vrcc_map_page,
             commands::application::vrcc::app__vrcc_my_map_page,
             commands::application::vrcc::app__vrcc_club,
+            commands::application::vrcc::app__vrcc_clubs,
             commands::application::vrcc::app__vrcc_my_clubs,
             commands::application::vrcc::app__vrcc_my_club,
             commands::application::vrcc::app__vrcc_rate_map,

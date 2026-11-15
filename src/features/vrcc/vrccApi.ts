@@ -74,6 +74,28 @@ export const vrccApi = {
     model: (id: number) => call(() => commands.appVrccModel(id)),
 
     /**
+     * 所有公开社团（`GET /clubs`，接口 1.19.2 起）。不需要连接。
+     *
+     * 顺序由服务器定死（点赞多 → 群组人数多 → 短码），**没有 `sort` 参数**：
+     * 客户端只能翻页，不能重排。
+     *
+     * **回答里没有点赞数**：榜是按点赞排的，但 `club` 里不带 `likes`。要显示
+     * 「为什么排这个位置」只能再用 [`myClubs`](#myClubs) 叠一层。
+     *
+     * `total` / `next` 都可能缺席（老服务器），调用方按「这个接口不给」处理。
+     */
+    clubs: (limit = 20, offset = 0) =>
+        call(() => commands.appVrccClubs(limit, offset)),
+
+    /**
+     * 玩家所在星池里能看到的社团（`GET /me/clubs`）。需要 `clubs` 敏感权限。
+     *
+     * 比公开列表多：只给成员看的社团、点赞数、关注、挂着没、现在有没有房/活动。
+     * **没有 `total`**——它是全量，不是分页。
+     */
+    myClubs: () => call(() => commands.appVrccMyClubs()),
+
+    /**
      * 按世界 ID 批量查地图（`GET /maps?ids=`）。不需要连接。
      *
      * 一次最多 20 张，**只返回在榜上的**——结果条数可能少于传入的数量，
@@ -347,3 +369,9 @@ export type VrccMyBoardSort = NonNullable<
     Parameters<typeof commands.appVrccMyBoard>[0]
 >;
 export type VrccMyBoardMap = NonNullable<VrccMyBoard['maps']>[number];
+export type VrccClubs = Awaited<ReturnType<typeof commands.appVrccClubs>>;
+export type VrccClub = NonNullable<VrccClubs['clubs']>[number];
+export type VrccMyClubs = NonNullable<
+    Awaited<ReturnType<typeof commands.appVrccMyClubs>>
+>;
+export type VrccMyClub = NonNullable<VrccMyClubs['clubs']>[number];
