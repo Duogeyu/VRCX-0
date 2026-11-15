@@ -704,6 +704,13 @@ impl DesktopRuntimeHostState {
             // 服务名要按界面语言取官方译名（`vrcc.title`），所以给它配置仓库。
             runtime.desktop_assembly().config().clone(),
         ));
+        // 令牌按账号存，而这里还没登录：登录、换号、登出时都要按新账号重新恢复
+        // 会话。作用域只存弱引用，`vrcc` 由宿主状态持有。要先于后台轮询挂上（见
+        // `start_vrcc_background_poll`）：观察者按注册顺序回调，轮询起任务时会话
+        // 应当已经恢复好了。
+        runtime.desktop_assembly().auth_scope().add_observer(
+            Arc::clone(&vrcc) as Arc<dyn vrcx_0_application_core::RuntimeAuthScopeObserver>
+        );
         let hmd_membership_runtime = Arc::downgrade(runtime.realtime_runtime());
         desktop
             .vr_overlay_runtime

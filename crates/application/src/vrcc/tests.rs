@@ -839,6 +839,154 @@ fn connecting_again_clears_the_recorded_outcome() {
     assert_eq!(service.snapshot().credential, VrccCredentialState::Active);
 }
 
+/// 按账号分开存的仓库：和真仓库一样，「当前账号」每次读写时现取。
+///
+/// 没登录时一律答「没有」，写入也落空——真仓库就是这样，`VrccService::new`
+/// 发生在登录之前，所以它那一次恢复必然什么都读不到。
+#[derive(Default)]
+struct AccountStore {
+    owner: Mutex<Option<String>>,
+    accounts: Mutex<HashMap<String, Arc<MemoryStore>>>,
+}
+
+impl AccountStore {
+    fn account(&self, owner: &str) -> Arc<MemoryStore> {
+        Arc::clone(
+            self.accounts
+                .lock()
+                .unwrap()
+                .entry(owner.to_string())
+                .or_default(),
+        )
+    }
+
+    fn sign_in_as(&self, owner: Option<&str>) {
+        *self.owner.lock().unwrap() = owner.map(str::to_string);
+    }
+
+    fn current(&self) -> Option<Arc<MemoryStore>> {
+        let owner = self.owner.lock().unwrap().clone()?;
+        Some(self.account(&owner))
+    }
+}
+
+impl VrccTokenStore for AccountStore {
+    fn load(&self) -> Result<Option<StoredCredential>> {
+        self.current().map_or(Ok(None), |store| store.load())
+    }
+    fn save(&self, credential: &StoredCredential) -> Result<()> {
+        self.current()
+            .map_or(Ok(()), |store| store.save(credential))
+    }
+    fn clear(&self) -> Result<()> {
+        self.current().map_or(Ok(()), |store| store.clear())
+    }
+    fn load_state(&self) -> Result<VrccCredentialState> {
+        self.current()
+            .map_or(Ok(VrccCredentialState::Never), |store| store.load_state())
+    }
+    fn save_state(&self, state: VrccCredentialState) -> Result<()> {
+        self.current()
+            .map_or(Ok(()), |store| store.save_state(state))
+    }
+    fn load_guidance(&self) -> Result<VrccGuidanceState> {
+        self.current()
+            .map_or(Ok(VrccGuidanceState::default()), |store| {
+                store.load_guidance()
+            })
+    }
+    fn save_guidance(&self, state: VrccGuidanceState) -> Result<()> {
+        self.current()
+            .map_or(Ok(()), |store| store.save_guidance(state))
+    }
+}
+
+#[test]
+fn logging_in_after_startup_restores_that_accounts_session() {
+    // 应用启动：还没登录，构造时那一次恢复读不到任何东西。
+    let store = Arc::new(AccountStore::default());
+    store
+        .account("usr_a")
+        .save(&StoredCredential {
+            token: "tok-a".into(),
+            star: Some(7),
+            vrc_name: Some("甲".into()),
+            scope: None,
+            client_id: None,
+        })
+        .unwrap();
+    store
+        .account("usr_a")
+        .save_guidance(VrccGuidanceState::Seen)
+        .unwrap();
+    let service = VrccService::new(
+        Arc::clone(&store) as Arc<dyn VrccTokenStore>,
+        FakeRemote::new(),
+    );
+    assert!(!service.snapshot().connected);
+    assert_eq!(service.credential_state(), VrccCredentialState::Never);
+    assert_eq!(service.guidance_state(), VrccGuidanceState::Unseen);
+
+    // 登录完成：按这个账号重新恢复，不用再授权一次，也不再弹首连引导。
+    store.sign_in_as(Some("usr_a"));
+    service.reload_account();
+    let snapshot = service.snapshot();
+    assert!(snapshot.connected);
+    assert_eq!(snapshot.star, Some(7));
+    assert_eq!(service.credential_state(), VrccCredentialState::Active);
+    assert_eq!(service.guidance_state(), VrccGuidanceState::Seen);
+}
+
+#[test]
+fn switching_accounts_or_logging_out_leaves_nothing_of_the_previous_one() {
+    let store = Arc::new(AccountStore::default());
+    store
+        .account("usr_a")
+        .save(&StoredCredential {
+            token: "tok-a".into(),
+            star: Some(7),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .account("usr_b")
+        .save_state(VrccCredentialState::Disconnected)
+        .unwrap();
+    store.sign_in_as(Some("usr_a"));
+    let remote = FakeRemote::new();
+    *remote.unread.lock().unwrap() = Some(VrccUnread::default());
+    let service = VrccService::new(Arc::clone(&store) as Arc<dyn VrccTokenStore>, remote);
+    assert!(service.snapshot().connected);
+    service.note_unread(&VrccUnread::default());
+    assert!(service.cached_unread().is_some());
+
+    // 换到 B：A 的令牌、身份和未读数都不能带过来，B 自己的结局要读出来。
+    store.sign_in_as(Some("usr_b"));
+    service.reload_account();
+    let snapshot = service.snapshot();
+    assert!(!snapshot.connected);
+    assert_eq!(snapshot.star, None);
+    assert!(service.cached_unread().is_none());
+    assert_eq!(
+        service.credential_state(),
+        VrccCredentialState::Disconnected
+    );
+    // 换号只清本地：A 存下的令牌还在，换回来接着用。
+    assert!(store.account("usr_a").load().unwrap().is_some());
+
+    // 登出：谁的会话都不该留着。
+    store.sign_in_as(None);
+    service.reload_account();
+    assert!(!service.snapshot().connected);
+    assert_eq!(service.credential_state(), VrccCredentialState::Never);
+
+    // 换回 A：令牌还在，直接恢复成已连接。
+    store.sign_in_as(Some("usr_a"));
+    service.reload_account();
+    assert!(service.snapshot().connected);
+    assert_eq!(service.snapshot().star, Some(7));
+}
+
 #[test]
 fn guidance_starts_unseen_and_survives_a_restart() {
     let store = Arc::new(MemoryStore::default());
