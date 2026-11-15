@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { queryKeys } from '@/lib/entityQueryCache';
+import { queryClient } from '@/lib/queryClient';
 import { scopeGrants } from '@/lib/vrccScope';
 import { tauriClient } from '@/platform/tauri/client';
 import { copyTextToClipboard } from '@/services/clipboardService';
@@ -441,6 +443,10 @@ export function useVrccController() {
         connectionRef.current = connection;
         myBoardUnavailable.current = false;
         boardCache.current.clear();
+        // 世界、群组详情里的星遇同频面板读的是同一份连接缓存（`useVrccConnection`），
+        // 写进去它们就会换到新账号的键上；不写的话，面板开着时断开或重连，它们
+        // 还拿着旧账号拼键。
+        queryClient.setQueryData(queryKeys.vrccConnection(), connection);
         patch({ connection, usage });
         return connection;
     }, [patch]);
@@ -539,6 +545,11 @@ export function useVrccController() {
                     remember(cacheKey, fromMyBoard(board), wanted, true);
                     return;
                 } catch (error) {
+                    // 已经有更新的请求了：这次失败说的是旧排序 / 旧搜索，既不该
+                    // 报错，也不该据此把玩家视角判成「用不了」降级到公开榜。
+                    if (superseded()) {
+                        return;
+                    }
                     // **本地限流不是「用不了」**。
                     //
                     // 同一个排序（同一个 `q` 也算同一份）60 秒内问第二次时，
@@ -1457,6 +1468,10 @@ export function useVrccController() {
         try {
             await vrccApi.disconnect();
             patch({
+                // 玩家视角的地图榜（「我打 X 分」「去过 N 次」）是上一个账号的：
+                // 先清掉，再去拉公开榜——公开榜那次请求要是失败，界面也不该
+                // 留着别人的数据。
+                boards: null,
                 deviceAuth: null,
                 recent: null,
                 unread: null,

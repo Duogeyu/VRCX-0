@@ -238,19 +238,19 @@ export const queryKeys = Object.freeze({
     // 被登录数据顶掉，反之亦然。`sort` 也进键：`hot` 和 `new` 是两份不同的
     // 列表，玩家切了排序不该看到上一份。
     //
-    // **星遇同频的个人数据，键里都带 `star`**（这里、`worldVrccMine`、
+    // **星遇同频的个人数据，键里都带账号**（这里、`worldVrccMine`、
     // `groupVrccClubDetail`、玩家视角的 `vrccClubs`）：换 VRChat 账号时整份缓存
     // 会被清掉，但同一个 VRChat 账号里断开、令牌失效或换连另一个星遇同频账号
-    // 不会；不带账号的话，staleTime 内会先显示上一个账号的评分和关注。`star`
-    // 取自 `useVrccConnection`，没连接时是 `null`。
+    // 不会；不带账号的话，staleTime 内会先显示上一个账号的评分和关注。账号标识
+    // 取自 `vrccAccountKey`（`star:<编号>` / `star:none` / `offline`）。
     worldVrccSignedIn: (
         worldId: string,
         sort: 'hot' | 'new' = 'hot',
-        star: number | null = null,
+        account: string = 'offline',
         endpoint: string = ''
     ) =>
         withEndpoint(
-            ['world', worldId, 'vrcc', 'signedIn', sort, star],
+            ['world', worldId, 'vrcc', 'signedIn', sort, account],
             endpoint
         ),
     // 当前的星遇同频连接（本地会话快照），见 `useVrccConnection`。
@@ -265,8 +265,8 @@ export const queryKeys = Object.freeze({
     //
     // **卡片和房间列表共用这一个键**：两个组件各自建键的话，打开一次群组详情会
     // 把同一个接口问两遍，而它在客户端侧带 30 秒 `min_gap`、还吃每日额度。
-    groupVrccClubDetail: (code: string, star: number | null = null) =>
-        ['group', 'vrcc-club-detail', code, star] as const,
+    groupVrccClubDetail: (code: string, account: string = 'offline') =>
+        ['group', 'vrcc-club-detail', code, account] as const,
     // 社团列表。**键里带来源**：公开列表按页取、玩家视角是全量，两者形状虽然
     // 归一过，缓存却不能混——混了以后切回来会拿到另一份的行（有人有 `likes`、
     // 有人没有）。
@@ -274,12 +274,12 @@ export const queryKeys = Object.freeze({
         source: 'public' | 'mine',
         limit = 0,
         offset = 0,
-        star: number | null = null
-    ) => ['vrcc', 'clubs', source, limit, offset, star] as const,
+        account: string = 'offline'
+    ) => ['vrcc', 'clubs', source, limit, offset, account] as const,
     // 一张地图在榜上的状态（board / pending / off）。只有带令牌的接口能区分
     // 「未收录」和「待审核」，所以独立一个键，不与公开页共用。
-    worldVrccMine: (worldId: string, star: number | null = null) =>
-        ['world', worldId, 'vrcc', 'mine', star] as const,
+    worldVrccMine: (worldId: string, account: string = 'offline') =>
+        ['world', worldId, 'vrcc', 'mine', account] as const,
     groupMembers: (params: VrchatGroupMembersInput, endpoint: string = '') =>
         withEndpoint(
             ['group', params.groupId, 'members', stableParams(params)],

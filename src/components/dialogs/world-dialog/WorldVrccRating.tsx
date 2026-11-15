@@ -65,9 +65,9 @@ export function WorldVrccRating({ worldId }: { worldId: string }) {
     // 让他们每打开一张地图就吃一次必然失败的请求（还要重试一次）没有意义。
     const vrcc = useVrccConnection();
     const signedIn = useQuery({
-        // 和「星遇同频」页签**同一个键**（默认排序就是 `hot`，同一个 `star`），
+        // 和「星遇同频」页签**同一个键**（默认排序就是 `hot`，同一个账号），
         // 所以玩家之后切过去时零额外请求——这张卡片等于提前把它预热了。
-        ...vrccMyMapPageQueryOptions(worldId, 'hot', vrcc.star),
+        ...vrccMyMapPageQueryOptions(worldId, 'hot', vrcc.account),
         enabled: isWorld && vrcc.grants('maps') === true
     });
 

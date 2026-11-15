@@ -98,6 +98,9 @@ vi.mock('react-i18next', async (importOriginal) => {
     };
 });
 
+import { queryKeys } from '@/lib/entityQueryCache';
+import { queryClient } from '@/lib/queryClient';
+
 import { cachedModelDetail, rememberModelDetail } from './useModelDetail';
 import { useVrccController } from './useVrccController';
 import { useVrccAnnouncementCache } from './vrccAnnouncementCache';
@@ -959,5 +962,60 @@ describe('useVrccController', () => {
             expect(result.current.boards?.source).toBe('public')
         );
         expect(mocks.boards).toHaveBeenCalled();
+    });
+
+    it('已经被取代的旧请求失败了，不把玩家视角判成用不了', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards?.source).toBe('mine'));
+
+        let failWeek: (error: unknown) => void = () => {};
+        mocks.myBoard.mockImplementation((sort: string | null) =>
+            sort === 'week'
+                ? new Promise((_resolve, reject) => {
+                      failWeek = reject;
+                  })
+                : Promise.resolve({ sort: sort ?? 'top', min: 1, maps: [] })
+        );
+        act(() => result.current.setBoardSort('week'));
+        act(() => result.current.setBoardSort('new'));
+        await waitFor(() => expect(result.current.boardSort).toBe('new'));
+
+        mocks.boards.mockClear();
+        await act(async () => {
+            failWeek(new Error('network down'));
+        });
+
+        // 之后换排序仍走玩家视角，不降级到公开榜。
+        act(() => result.current.setBoardSort('top'));
+        await waitFor(() => expect(result.current.boardSort).toBe('top'));
+        expect(result.current.boards?.source).toBe('mine');
+        expect(mocks.boards).not.toHaveBeenCalled();
+    });
+
+    it('断开时公开榜拉不下来，也不留着上个账号的玩家视角', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards?.source).toBe('mine'));
+
+        mocks.disconnect.mockResolvedValue(undefined);
+        mocks.connection.mockResolvedValue({
+            ...connected,
+            connected: false,
+            star: null,
+            vrcName: null,
+            scope: null
+        });
+        mocks.boards.mockRejectedValue(new Error('network down'));
+        await act(async () => {
+            await result.current.disconnect();
+        });
+
+        expect(result.current.boards?.source).not.toBe('mine');
+        // 世界 / 群组详情读的那份连接缓存也换成了断开后的。
+        expect(
+            queryClient.getQueryData<{ connected: boolean }>(
+                queryKeys.vrccConnection()
+            )?.connected
+        ).toBe(false);
+        queryClient.clear();
     });
 });

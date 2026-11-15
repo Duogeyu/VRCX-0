@@ -101,11 +101,19 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
     // 这个 Hook 写在下面（数据就绪之后）会让 Hook 顺序随渲染路径变化。
     const vrcc = useVrccConnection();
 
-    // 带令牌的那一半挂在当前账号（`star`）下，要等这次挂载读到连接再发：
+    // 带令牌的那一半挂在当前账号下，要等这次挂载读到连接再发：
     // 缓存里的旧连接可能是上一个账号的。
     const signedIn = useQuery({
-        ...vrccMyMapPageQueryOptions(worldId, sort, vrcc.star),
-        enabled: Boolean(worldId) && vrcc.ready
+        ...vrccMyMapPageQueryOptions(worldId, sort, vrcc.account),
+        enabled: Boolean(worldId) && vrcc.ready,
+        // 切短评排序时，新排序那一份还没到之前先留着上一份：「我的评分」和
+        // 排序无关，而打分器要等它才挂载——不留的话一切排序，编辑器就被卸掉，
+        // 没提交的分数和短评一起丢了。只在同一张图、同一个账号之间沿用。
+        placeholderData: (previous, previousQuery) =>
+            previousQuery?.queryKey[1] === worldId &&
+            previousQuery?.queryKey[5] === vrcc.account
+                ? previous
+                : undefined
     });
 
     // 令牌里有没有 `maps.rate`（打分）。
@@ -118,7 +126,7 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
     // 带令牌的状态：只有它能区分「未收录」和「待审核」。
     // 公开接口对这两种都回 404。**同样必须在提前 return 之前调用。**
     const myMapQuery = useQuery({
-        queryKey: queryKeys.worldVrccMine(worldId, vrcc.star),
+        queryKey: queryKeys.worldVrccMine(worldId, vrcc.account),
         queryFn: () => readVrccMyMap(worldId),
         enabled: Boolean(worldId) && canRateScope === true,
         // 状态会变（投稿后进入审核、审核后上榜），别缓存太久。
@@ -430,12 +438,12 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                         只在挂载时取一次。权限查询是本地调用、几乎立刻就回，
                         早先它一到就挂上编辑器，草稿是空的；等我的评分到了，
                         短评框仍是空的，玩家只改一下分数提交，就会被判成
-                        「清空短评」，把原来那条删掉。`key` 绑住服务器上的
+                        「清空短评」，把原来那条删掉。`key` 绑住账号和服务器上的
                         分数和短评：别处改过、或提交后重新拉到新值时，草稿
                         跟着重新取。 */}
                     {canRate && signedIn.data ? (
                         <VrccRatingEditor
-                            key={`${worldId}:${mine?.score ?? ''}:${mine?.text ?? ''}`}
+                            key={`${worldId}:${vrcc.account}:${mine?.score ?? ''}:${mine?.text ?? ''}`}
                             worldId={worldId}
                             currentScore={
                                 mine && typeof mine.score === 'number'
