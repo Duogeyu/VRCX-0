@@ -287,7 +287,9 @@ export function VrccMapsPanel({
 
             {maps.length === 0 ? (
                 <div className="text-muted-foreground flex h-32 items-center justify-center gap-2 text-sm">
-                    <Spinner className="size-3" />
+                    {/* 只在还没拿到榜单时转圈；拿到了却是空的（或搜不到），
+                        就是结论，不该一直转下去。 */}
+                    {boards == null && <Spinner className="size-3" />}
                     {query
                         ? t('vrcc.maps.search_empty', { query })
                         : t('vrcc.maps.empty')}
