@@ -82,6 +82,10 @@ pub trait VrccAuthIdentity: Send + Sync {
     ///
     /// **注册时应立即按当前状态回调一次**：已登录的玩家不该等到下一次登录才起
     /// 任务。宿主的观察者注册语义本来就带这次初始回调，实现方如实转达即可。
+    ///
+    /// **实现方必须一直持有 `observer` 的强引用**（通常与宿主同寿）。[`install`]
+    /// 自己不留任何引用，调度状态只靠这个观察者活着；宿主若只存弱引用，就得
+    /// 自己另外留一份，否则初始回调一结束订阅就没了，之后的登录、换号都听不到。
     fn subscribe(&self, observer: Arc<dyn VrccAuthObserver>);
 }
 
@@ -109,6 +113,12 @@ impl VrccPollBinding {
     }
 
     /// 按当前登录状态对齐：该起就起，该停就停。
+    ///
+    /// **整个过程都持着 `active` 的锁**，包括起任务那一步。早先在 `start` 之前
+    /// 放了锁：两次登录事件挨得很近时，两边都看到「没有任务」、各起一代，后写
+    /// 的那个覆盖 `active`，先起的那代就再也没人能叫停，同一条提醒会弹两遍。
+    /// 持锁起任务是安全的：[`VrccPollRuntime::spawn_poll`] 约定不阻塞，
+    /// [`VrccAuthIdentity::current_owner`] 也只是读一下宿主的登录状态。
     fn reconcile(&self, signed_in_as: Option<&str>) {
         let mut active = match self.active.lock() {
             Ok(active) => active,
@@ -120,12 +130,10 @@ impl VrccPollBinding {
             // owner 与令牌的一致性难以推理。
             VrccPollAction::Restart => {
                 self.stop(&mut active);
-                drop(active);
-                self.start();
+                self.start(&mut active);
             }
             VrccPollAction::Start => {
-                drop(active);
-                self.start();
+                self.start(&mut active);
             }
             VrccPollAction::Stop => {
                 self.stop(&mut active);
@@ -134,7 +142,7 @@ impl VrccPollBinding {
         }
     }
 
-    fn start(&self) {
+    fn start(&self, active: &mut Option<VrccPollStop>) {
         let Some(owner) = self.identity.current_owner() else {
             return;
         };
@@ -148,9 +156,7 @@ impl VrccPollBinding {
         match self.runtime.spawn_poll(owner, Arc::clone(&stop)) {
             VrccPollSpawn::Scheduled => {
                 tracing::info!(owner, "vrcc: background poll scheduled");
-                if let Ok(mut active) = self.active.lock() {
-                    *active = Some(stop);
-                }
+                *active = Some(stop);
             }
             other => {
                 tracing::warn!(?other, owner, "vrcc: background poll not scheduled");
@@ -187,7 +193,14 @@ pub fn install(runtime: Arc<dyn VrccPollRuntime>, identity: Arc<dyn VrccAuthIden
 
 #[cfg(test)]
 mod tests {
-    use super::{decide, VrccPollAction};
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::{
+        decide, install, VrccAuthIdentity, VrccAuthObserver, VrccPollAction, VrccPollRuntime,
+        VrccPollSpawn, VrccPollStop,
+    };
 
     #[test]
     fn signed_in_with_existing_task_restarts() {
@@ -219,5 +232,104 @@ mod tests {
     #[test]
     fn surrounding_whitespace_still_counts_as_signed_in() {
         assert_eq!(decide(Some(" usr_1 "), false), VrccPollAction::Start);
+    }
+
+    /// 记下每一代任务的 owner 和停止开关。
+    #[derive(Default)]
+    struct FakeRuntime {
+        spawned: Mutex<Vec<(String, VrccPollStop)>>,
+        /// 起任务前睡一会儿，把「检查 → 起任务」之间的窗口拉大。
+        spawn_delay: Duration,
+    }
+
+    impl FakeRuntime {
+        fn running(&self) -> Vec<String> {
+            self.spawned
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, stop)| !stop.load(Ordering::Acquire))
+                .map(|(owner, _)| owner.clone())
+                .collect()
+        }
+    }
+
+    impl VrccPollRuntime for FakeRuntime {
+        fn spawn_poll(&self, owner: &str, stop: VrccPollStop) -> VrccPollSpawn {
+            std::thread::sleep(self.spawn_delay);
+            self.spawned.lock().unwrap().push((owner.to_string(), stop));
+            VrccPollSpawn::Scheduled
+        }
+    }
+
+    /// 像宿主那样持有观察者的强引用，并能手动「换号」。
+    #[derive(Default)]
+    struct FakeIdentity {
+        owner: Mutex<Option<String>>,
+        observers: Mutex<Vec<Arc<dyn VrccAuthObserver>>>,
+    }
+
+    impl FakeIdentity {
+        fn sign_in_as(&self, owner: Option<&str>) {
+            *self.owner.lock().unwrap() = owner.map(str::to_string);
+            let observers = self.observers.lock().unwrap().clone();
+            for observer in observers {
+                observer.vrc_auth_changed(owner);
+            }
+        }
+    }
+
+    impl VrccAuthIdentity for FakeIdentity {
+        fn current_owner(&self) -> Option<String> {
+            self.owner.lock().unwrap().clone()
+        }
+
+        fn subscribe(&self, observer: Arc<dyn VrccAuthObserver>) {
+            self.observers.lock().unwrap().push(Arc::clone(&observer));
+            observer.vrc_auth_changed(self.current_owner().as_deref());
+        }
+    }
+
+    #[test]
+    fn follows_login_switch_and_logout_with_one_generation_at_a_time() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let identity = Arc::new(FakeIdentity::default());
+        install(runtime.clone(), identity.clone());
+        assert!(runtime.spawned.lock().unwrap().is_empty());
+
+        identity.sign_in_as(Some("usr_a"));
+        assert_eq!(runtime.running(), vec!["usr_a"]);
+
+        identity.sign_in_as(Some("usr_b"));
+        assert_eq!(runtime.running(), vec!["usr_b"]);
+
+        identity.sign_in_as(None);
+        assert!(runtime.running().is_empty());
+        assert_eq!(runtime.spawned.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn concurrent_auth_events_never_leave_an_orphaned_generation() {
+        let runtime = Arc::new(FakeRuntime {
+            spawn_delay: Duration::from_millis(5),
+            ..FakeRuntime::default()
+        });
+        let identity = Arc::new(FakeIdentity::default());
+        install(runtime.clone(), identity.clone());
+        *identity.owner.lock().unwrap() = Some("usr_a".to_string());
+        let observer = Arc::clone(&identity.observers.lock().unwrap()[0]);
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let observer = Arc::clone(&observer);
+                std::thread::spawn(move || observer.vrc_auth_changed(Some("usr_a")))
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(runtime.running(), vec!["usr_a"]);
+        assert_eq!(runtime.spawned.lock().unwrap().len(), 8);
     }
 }
