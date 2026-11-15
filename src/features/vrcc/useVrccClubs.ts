@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { queryKeys, entityQueryPolicies } from '@/lib/entityQueryCache';
 import { isVrccError } from '@/lib/vrccError';
 import { scopeGrants } from '@/lib/vrccScope';
+import { vrccAccountKey } from '@/repositories/vrccConnectionRepository';
 
 import { fromMyClubs, fromPublicClubs, type VrccClubListView } from './clubRow';
 import { vrccApi, type VrccConnection } from './vrccApi';
@@ -52,12 +53,12 @@ export function useVrccClubs({
     const source: 'public' | 'mine' = wantsMine ? 'mine' : 'public';
 
     const query = useQuery({
-        // 玩家视角是某一个星遇同频账号的数据，键里带 `star`（公开列表不带）。
+        // 玩家视角是某一个星遇同频账号的数据，键里带账号（公开列表不带）。
         queryKey: queryKeys.vrccClubs(
             source,
             source === 'public' ? limit : 0,
             source === 'public' ? offset : 0,
-            source === 'mine' ? (connection?.star ?? null) : null
+            source === 'mine' ? vrccAccountKey(connection) : 'offline'
         ),
         queryFn: async () =>
             source === 'mine'

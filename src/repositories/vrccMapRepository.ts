@@ -60,11 +60,11 @@ export function vrccPublicMapQueryOptions(worldId: string) {
 export function vrccMyMapPageQueryOptions(
     worldId: string,
     sort: 'hot' | 'new',
-    star: number | null
+    account: string
 ) {
     return queryOptions({
-        // `star` 进键：这是某一个星遇同频账号的数据，见 `queryKeys.worldVrccSignedIn`。
-        queryKey: queryKeys.worldVrccSignedIn(worldId, sort, star),
+        // 账号进键：这是某一个星遇同频账号的数据，见 `queryKeys.worldVrccSignedIn`。
+        queryKey: queryKeys.worldVrccSignedIn(worldId, sort, account),
         queryFn: async () =>
             worldId.startsWith('wrld_')
                 ? commands.appVrccMyMapPage(worldId, sort)

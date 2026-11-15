@@ -49,11 +49,11 @@ export function useGroupClubInstanceRecords(
 
     // 两个条件都要：没有 `clubs` 权限时那条 IPC 注定失败；公开页已答 404 时
     // 这个群组根本没入驻社团，问带令牌的只是白花额度。和社团卡传同一个
-    // `star`，所以两处共用一个键、一次请求。
+    // 账号标识，所以两处共用一个键、一次请求。
     const detailQuery = useQuery(
         vrccMyClubQueryOptions(
             code,
-            vrcc.star,
+            vrcc.account,
             vrcc.grants('clubs') === true && Boolean(clubQuery.data?.club)
         )
     );

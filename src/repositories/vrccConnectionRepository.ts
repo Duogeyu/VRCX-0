@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { queryOptions, useQuery } from '@tanstack/react-query';
+import { queryOptions, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect } from 'react';
 
 import { queryKeys } from '@/lib/entityQueryCache';
 import { scopeGrants } from '@/lib/vrccScope';
 import { commands } from '@/platform/tauri/bindings';
 import type { VrccConnectionSnapshot } from '@/platform/tauri/bindings';
+import { tauriClient } from '@/platform/tauri/client';
 
 /**
  * 当前的星遇同频连接。**本地调用**：读的是后端内存里的会话快照，不走网络、
@@ -32,33 +34,92 @@ export function vrccConnectionQueryOptions() {
 }
 
 /**
+ * 后端在令牌被判失效等时机发出的「连接变了」事件，与
+ * `VRCC_CONNECTION_CHANGED_EVENT`（Rust 侧）必须一致。
+ */
+const VRCC_CONNECTION_CHANGED_EVENT = 'vrccConnectionChanged';
+
+/**
+ * 个人数据查询键里的账号标识。
+ *
+ * - 已连接、有星号：`star:<编号>`；
+ * - 已连接、没有星号：`star:none`——官方文档写明没有点亮编号的玩家 `star` 是
+ *   `null`，这时不能和「未连接」共用一个键；
+ * - 未连接（或连接读不到）：`offline`。
+ *
+ * 公开数据不用它。
+ */
+export function vrccAccountKey(
+    connection:
+        | Pick<VrccConnectionSnapshot, 'connected' | 'star'>
+        | null
+        | undefined
+): string {
+    if (!connection?.connected) {
+        return 'offline';
+    }
+    return `star:${connection.star ?? 'none'}`;
+}
+
+/**
  * 星遇同频的个人数据该挂在哪个账号下，以及这个账号有哪些权限。
  *
  * 个人数据（带令牌的地图页、地图状态、玩家视角的社团）的查询键都带上这里的
- * `star`：不同星遇同频账号的数据各占一个键，断开、令牌失效、换连另一个账号时
- * 不会读到上一个账号的那一份，也不需要谁记得去清缓存。
+ * `account`（见 [`vrccAccountKey`]）：不同星遇同频账号的数据各占一个键，断开、
+ * 令牌失效、换连另一个账号时不会读到上一个账号的那一份，也不需要谁记得去清缓存。
  *
  * **只认这次挂载之后读到的那一份**（`isFetchedAfterMount`）：缓存里的旧连接
  * 可能还是上一个账号的，拿它拼键会先把别人的数据显示出来。所以 `ready` 之前
- * `star` 是 `null`、`grants` 是 `undefined`，个人数据的查询要等 `ready`。
+ * `account` 是 `offline`、`grants` 是 `undefined`，个人数据的查询要等 `ready`。
+ *
+ * 面板开着的时候连接也会变：星遇同频页断开或重连时会把新连接写进同一份缓存
+ * （`useVrccController.refreshConnection`），后端判定令牌失效时发
+ * `vrccConnectionChanged`，这里收到就重读。两条路都会让已经挂着的面板换键。
  */
 export function useVrccConnection(): {
     /** 这次挂载之后已经读到了当前连接。 */
     ready: boolean;
-    /** 当前星遇同频账号；没连接（或还没读到）时为 `null`。 */
-    star: number | null;
+    /** 个人数据查询键里的账号标识，见 [`vrccAccountKey`]。 */
+    account: string;
     /**
      * 令牌里有没有某项权限。还没读到时为 `undefined`，读到了才是 `true` /
      * `false`——界面要区分「还不知道」和「确实没有」。
      */
     grants: (scope: string) => boolean | undefined;
 } {
+    const queryClient = useQueryClient();
     const query = useQuery(vrccConnectionQueryOptions());
+
+    useEffect(() => {
+        let disposed = false;
+        let off: (() => void) | null = null;
+        tauriClient.events
+            .subscribe(VRCC_CONNECTION_CHANGED_EVENT, () => {
+                void queryClient.invalidateQueries({
+                    queryKey: queryKeys.vrccConnection()
+                });
+            })
+            .then((unsubscribe) => {
+                if (disposed) {
+                    unsubscribe();
+                    return;
+                }
+                off = unsubscribe;
+            })
+            .catch(() => {
+                // 订阅不上（例如不在桌面壳里）就只靠挂载时重读，不报错。
+            });
+        return () => {
+            disposed = true;
+            off?.();
+        };
+    }, [queryClient]);
+
     const ready = query.isFetchedAfterMount;
     const connection = ready ? (query.data ?? null) : null;
     return {
         ready,
-        star: connection?.connected ? (connection.star ?? null) : null,
+        account: vrccAccountKey(connection),
         grants: (scope) =>
             ready ? scopeGrants(connection?.scope ?? null, scope) : undefined
     };

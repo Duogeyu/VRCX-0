@@ -71,20 +71,21 @@ describe('entityQueryCache', () => {
         expect(queryClient.getQueryData(key)).toBeUndefined();
     });
 
-    it('keys vrcc personal data by star so two vrcc accounts never share an entry', () => {
+    it('keys vrcc personal data by account so two vrcc accounts never share an entry', () => {
         const personal = [
-            (star: number | null) =>
-                queryKeys.worldVrccSignedIn('wrld_a', 'hot', star),
-            (star: number | null) => queryKeys.worldVrccMine('wrld_a', star),
-            (star: number | null) =>
-                queryKeys.groupVrccClubDetail('VRCC.1234', star),
-            (star: number | null) => queryKeys.vrccClubs('mine', 0, 0, star)
+            (account: string) =>
+                queryKeys.worldVrccSignedIn('wrld_a', 'hot', account),
+            (account: string) => queryKeys.worldVrccMine('wrld_a', account),
+            (account: string) =>
+                queryKeys.groupVrccClubDetail('VRCC.1234', account),
+            (account: string) => queryKeys.vrccClubs('mine', 0, 0, account)
         ];
         for (const key of personal) {
-            expect(key(77)).not.toEqual(key(88));
-            expect(key(77)).not.toEqual(key(null));
+            expect(key('star:77')).not.toEqual(key('star:88'));
+            // 已连接但没有星号的账号，不能和「未连接」共用一个键。
+            expect(key('star:none')).not.toEqual(key('offline'));
         }
-        // 公开数据不属于任何账号，键里没有 star。
+        // 公开数据不属于任何账号，键里没有账号。
         expect(queryKeys.worldVrcc('wrld_a')).toEqual([
             'world',
             'wrld_a',

@@ -83,7 +83,7 @@ export function GroupVrccClub({
     const detailQuery = useQuery(
         vrccMyClubQueryOptions(
             code,
-            vrcc.star,
+            vrcc.account,
             // 公开页已答 404 时没必要再问带令牌的；没有 `clubs` 权限也别问。
             vrcc.grants('clubs') === true && Boolean(query.data?.club)
         )

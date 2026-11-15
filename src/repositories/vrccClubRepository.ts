@@ -33,13 +33,13 @@ export function vrccPublicClubQueryOptions(code: string) {
  */
 export function vrccMyClubQueryOptions(
     code: string,
-    star: number | null,
+    account: string,
     enabled: boolean
 ) {
     const trimmed = code.trim();
     return queryOptions({
-        // `star` 进键：这是某一个星遇同频账号的数据，见 `queryKeys.worldVrccSignedIn`。
-        queryKey: queryKeys.groupVrccClubDetail(trimmed, star),
+        // 账号进键：这是某一个星遇同频账号的数据，见 `queryKeys.worldVrccSignedIn`。
+        queryKey: queryKeys.groupVrccClubDetail(trimmed, account),
         queryFn: async () => {
             const { commands } = await import('@/platform/tauri/bindings');
             return commands.appVrccMyClub(trimmed);

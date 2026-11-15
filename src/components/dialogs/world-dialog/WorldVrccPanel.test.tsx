@@ -590,7 +590,7 @@ describe('WorldVrccPanel', () => {
         });
         client.setQueryData(queryKeys.worldVrcc('wrld_test'), mapPage());
         client.setQueryData(
-            queryKeys.worldVrccSignedIn('wrld_test', 'hot', 77),
+            queryKeys.worldVrccSignedIn('wrld_test', 'hot', 'star:77'),
             myMapPage({
                 mine: {
                     rate: { score: 3, text: '上个账号的短评', check: 'ok' }
@@ -639,6 +639,45 @@ describe('WorldVrccPanel', () => {
             (await screen.findAllByText('现在账号的短评')).length
         ).toBeGreaterThan(0);
         expect(screen.queryByText('上个账号的短评')).toBeNull();
+    });
+
+    it('切短评排序时，打分器不被卸掉，没提交的草稿还在', async () => {
+        appVrccMapPage.mockResolvedValue(mapPage());
+        let deliverNew: (page: unknown) => void = () => {};
+        appVrccMyMapPage.mockImplementation((_world: string, sort: string) =>
+            sort === 'new'
+                ? new Promise((resolve) => {
+                      deliverNew = resolve;
+                  })
+                : Promise.resolve(myMapPage())
+        );
+        renderWithClient(<WorldVrccPanel worldId="wrld_test" />);
+
+        const textarea = (await screen.findByPlaceholderText(
+            'dialog.world.vrcc.words_placeholder'
+        )) as HTMLTextAreaElement;
+        fireEvent.change(textarea, { target: { value: '还没提交的草稿' } });
+
+        fireEvent.click(screen.getByText('dialog.world.vrcc.sort_new'));
+        // 新排序那一份还在路上：编辑器还在，草稿也还在。
+        expect(
+            (
+                screen.getByPlaceholderText(
+                    'dialog.world.vrcc.words_placeholder'
+                ) as HTMLTextAreaElement
+            ).value
+        ).toBe('还没提交的草稿');
+
+        await act(async () => {
+            deliverNew(myMapPage({ sort: 'new' }));
+        });
+        expect(
+            (
+                screen.getByPlaceholderText(
+                    'dialog.world.vrcc.words_placeholder'
+                ) as HTMLTextAreaElement
+            ).value
+        ).toBe('还没提交的草稿');
     });
 
     it('我的评分还没到时不给打分器；到了之后只改分数不会删掉原来的短评', async () => {

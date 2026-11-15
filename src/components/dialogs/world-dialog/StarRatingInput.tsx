@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { type KeyboardEvent, useState } from 'react';
+import { type KeyboardEvent, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
@@ -41,14 +41,18 @@ export function StarRatingInput({
 }) {
     const { t } = useTranslation();
     const [focused, setFocused] = useState<number | null>(null);
+    const groupRef = useRef<HTMLDivElement | null>(null);
 
     // 悬停时预览「点下去会是多少」，松手回到当前值。
     const shown = focused ?? value ?? 0;
 
     // 左右方向键逐档移动；跳过半颗星时保留奇偶，让「按一下 = 动半颗」的手感成立。
     //
-    // 焦点留在原来那个按钮上，所以预览值要跟着改：`shown` 优先看 `focused`，
-    // 不改的话按四下右键，值已经是 4，星星和读数却还停在聚焦时的 1。
+    // 键盘焦点要跟着移到新的那一档（radiogroup 的标准做法）。只挪预览不挪
+    // 焦点的话，焦点还停在原来那个按钮上：按四下右键值已经是 4，再按空格 /
+    // 回车却会触发原按钮的 `onClick` 把值改回 1，而读数还显示 4。按钮在 DOM
+    // 里正好按 1…10 排列，第 `next` 个就是新的那一档；聚焦时 `onFocus` 会把
+    // 预览一起挪过去。
     function stepWithArrows(event: KeyboardEvent<HTMLButtonElement>) {
         if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
             return;
@@ -58,10 +62,14 @@ export function StarRatingInput({
         const next = Math.min(max, Math.max(1, (value ?? 0) + step));
         setFocused(next);
         onChange(next);
+        groupRef.current
+            ?.querySelectorAll<HTMLButtonElement>('[role="radio"]')
+            [next - 1]?.focus();
     }
 
     return (
         <div
+            ref={groupRef}
             role="radiogroup"
             aria-label={t('dialog.world.vrcc.rate_input_label')}
             aria-disabled={disabled || undefined}
