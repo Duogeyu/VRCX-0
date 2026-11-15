@@ -55,7 +55,10 @@ export function VrccAnnouncementDialog({
     const { t } = useTranslation();
     const [index, setIndex] = useState(0);
     // 图片是外链，加载失败时收起图片区，别留一块破图占位。
-    const [coverFailed, setCoverFailed] = useState(false);
+    //
+    // 记的是**哪一张**失败了（`coverKey`），而不是一个布尔：翻到下一条公告时
+    // 布尔不会复位，第一张封面 404 之后，后面每一条的封面都不再显示。
+    const [failedCover, setFailedCover] = useState<string | null>(null);
     // 公告里的「在官网查看」和正文里的链接：点下去要有即时反馈，
     // 否则玩家会以为没点上而重复点，连着弹出好几个浏览器窗口。
     const { open: openLink, pending: openLinkPending } = useOpenExternalLink();
@@ -74,8 +77,8 @@ export function VrccAnnouncementDialog({
     const id = post.id ?? 0;
     const cover = (post.cover ?? '').trim();
     const link = (post.link ?? '').trim();
-    const showCover = cover !== '' && !coverFailed;
     const coverKey = `${id}:${cover}`;
+    const showCover = cover !== '' && failedCover !== coverKey;
 
     return (
         <Dialog
@@ -93,7 +96,7 @@ export function VrccAnnouncementDialog({
                             src={cover}
                             alt=""
                             className="aspect-[16/9] w-full shrink-0 rounded-t-xl object-cover"
-                            onError={() => setCoverFailed(true)}
+                            onError={() => setFailedCover(coverKey)}
                         />
                     )}
 

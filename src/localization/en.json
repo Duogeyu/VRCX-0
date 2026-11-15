@@ -945,6 +945,7 @@
             "unavailable": "This needs an extra permission this client does not have",
             "rate_mine": "My rating for them",
             "linked_at": "When you linked",
+            "open_profile": "View profile",
             "presence": {
                 "online": "Online",
                 "friend": "Already friends",

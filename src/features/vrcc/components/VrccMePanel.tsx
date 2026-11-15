@@ -9,6 +9,7 @@ import { Button } from '@/ui/shadcn/button';
 import { Progress } from '@/ui/shadcn/progress';
 import { Spinner } from '@/ui/shadcn/spinner';
 
+import { formatReset } from '../formatReset';
 import { useOpenExternalLink } from '../useOpenExternalLink';
 import type {
     VrccConnection,
@@ -17,22 +18,6 @@ import type {
 } from '../vrccApi';
 
 const SITE = 'https://vrcc.cc';
-
-/**
- * 把服务端给的「还有几秒重置」写成人话。
- *
- * 这个数直接来自 `RateLimit-Reset`，量的就是到北京时间的零点，**不要**拿本地
- * 时区去换算成具体时刻——那会在非 UTC+8 的机器上显示出错误的时间。
- */
-function formatReset(secs: number): string {
-    const total = Math.max(0, Math.floor(secs));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.ceil((total % 3600) / 60);
-    if (hours > 0) {
-        return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-    }
-    return `${Math.max(1, minutes)}m`;
-}
 
 /**
  * 「我的」页：连接状态、设备授权、今日用量。

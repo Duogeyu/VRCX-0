@@ -945,6 +945,7 @@
             "unavailable": "這一項需要額外權限，當前客戶端還沒開通",
             "rate_mine": "我給 TA 的分",
             "linked_at": "連上的時間",
+            "open_profile": "查看資料",
             "presence": {
                 "online": "線上",
                 "friend": "已是好友",
