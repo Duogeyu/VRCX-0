@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { useState } from 'react';
+import { type KeyboardEvent, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
@@ -44,6 +44,21 @@ export function StarRatingInput({
 
     // 悬停时预览「点下去会是多少」，松手回到当前值。
     const shown = focused ?? value ?? 0;
+
+    // 左右方向键逐档移动；跳过半颗星时保留奇偶，让「按一下 = 动半颗」的手感成立。
+    //
+    // 焦点留在原来那个按钮上，所以预览值要跟着改：`shown` 优先看 `focused`，
+    // 不改的话按四下右键，值已经是 4，星星和读数却还停在聚焦时的 1。
+    function stepWithArrows(event: KeyboardEvent<HTMLButtonElement>) {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+            return;
+        }
+        event.preventDefault();
+        const step = event.key === 'ArrowRight' ? 1 : -1;
+        const next = Math.min(max, Math.max(1, (value ?? 0) + step));
+        setFocused(next);
+        onChange(next);
+    }
 
     return (
         <div
@@ -103,24 +118,7 @@ export function StarRatingInput({
                             onClick={() => onChange(left)}
                             onFocus={() => setFocused(left)}
                             onBlur={() => setFocused(null)}
-                            onKeyDown={(event) => {
-                                // 左右方向键逐档移动；跳过半颗星时保留奇偶，
-                                // 让「按一下 = 动半颗」的手感成立。
-                                if (
-                                    event.key !== 'ArrowLeft' &&
-                                    event.key !== 'ArrowRight'
-                                ) {
-                                    return;
-                                }
-                                event.preventDefault();
-                                const step =
-                                    event.key === 'ArrowRight' ? 1 : -1;
-                                const next = Math.min(
-                                    max,
-                                    Math.max(1, (value ?? 0) + step)
-                                );
-                                onChange(next);
-                            }}
+                            onKeyDown={stepWithArrows}
                             className={cn(
                                 'absolute top-0 left-0 h-full w-1/2 cursor-pointer rounded-sm',
                                 'focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none',
@@ -139,22 +137,7 @@ export function StarRatingInput({
                             onClick={() => onChange(right)}
                             onFocus={() => setFocused(right)}
                             onBlur={() => setFocused(null)}
-                            onKeyDown={(event) => {
-                                if (
-                                    event.key !== 'ArrowLeft' &&
-                                    event.key !== 'ArrowRight'
-                                ) {
-                                    return;
-                                }
-                                event.preventDefault();
-                                const step =
-                                    event.key === 'ArrowRight' ? 1 : -1;
-                                const next = Math.min(
-                                    max,
-                                    Math.max(1, (value ?? 0) + step)
-                                );
-                                onChange(next);
-                            }}
+                            onKeyDown={stepWithArrows}
                             className={cn(
                                 'absolute top-0 right-0 h-full w-1/2 cursor-pointer rounded-sm',
                                 'focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none',
