@@ -248,7 +248,12 @@ impl NotificationDispatcher {
         if self.output.policy.paused(&settings) {
             return;
         }
-        let plan = external_notice_plan(&delivery, &settings.preferences);
+        // 站外提醒不看游戏状态，但游戏隔离要照样遵守：用另一个账号玩时，
+        // 浮层和朗读会出现在那个账号的游戏里。
+        let plan = self
+            .output
+            .policy
+            .restrict_for_game_isolation(external_notice_plan(&delivery, &settings.preferences));
         if !plan.has_local_transport() {
             return;
         }
