@@ -20,17 +20,18 @@ const PUBLIC_CLUB = {
 };
 
 describe('fromPublicClubs', () => {
-    it('把公开列表拉平，并保留 total / next', () => {
+    it('把公开列表拉平，保留 total，并给每行编名次', () => {
         const view = fromPublicClubs({
             total: 16,
             next: 20,
-            clubs: [PUBLIC_CLUB]
+            clubs: [PUBLIC_CLUB, PUBLIC_CLUB]
         });
 
         expect(view.source).toBe('public');
         expect(view.total).toBe(16);
-        expect(view.next).toBe(20);
-        expect(view.rows).toHaveLength(1);
+        expect(view.rows).toHaveLength(2);
+        // 名次取服务器顺序。排序是客户端做的，所以这个值不会随显示顺序变。
+        expect(view.rows.map((row) => row.rank)).toEqual([1, 2]);
         expect(view.rows[0]).toMatchObject({
             code: 'KIPFEL.2104',
             name: '中文kipfel厅',
@@ -53,12 +54,11 @@ describe('fromPublicClubs', () => {
         expect(row.event).toBeNull();
     });
 
-    it('老服务器没有 total / next 时保持 null，不拿条数顶替', () => {
+    it('老服务器没有 total 时保持 null，不拿条数顶替', () => {
         const view = fromPublicClubs({ clubs: [PUBLIC_CLUB, PUBLIC_CLUB] });
 
         // 用 `rows.length` 冒充总数，显示出来就是「共 2 个」——而真实总数可能是 16。
         expect(view.total).toBeNull();
-        expect(view.next).toBeNull();
         expect(view.rows).toHaveLength(2);
     });
 
@@ -104,13 +104,12 @@ describe('fromMyClubs', () => {
         });
     });
 
-    it('total / next 恒为 null——这个接口根本没有这两个字段', () => {
+    it('total 恒为 null——这个接口根本没有这个字段', () => {
         const view = fromMyClubs({ clubs: [PUBLIC_CLUB] });
 
         // 这里最容易被写错：拿 `rows.length` 顶上，界面就会断言「一共 N 个」，
         // 而玩家视角看到的是全量但不等于公开社团的总数（还含只给成员看的）。
         expect(view.total).toBeNull();
-        expect(view.next).toBeNull();
     });
 
     it('公共字段与公开列表同形：同一个适配器产出的行', () => {

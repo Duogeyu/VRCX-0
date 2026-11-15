@@ -36,6 +36,14 @@ export type VrccClubRow = {
     name: string | null;
     lede: string | null;
     tags: string[];
+    /**
+     * 服务器顺序里的位置，从 1 开始。这就是热度名次：
+     * 点赞多 → 群组人数多 → 短码。
+     *
+     * 排序是客户端做的。按别的键重排后，这个值**不变**。
+     * 所以换排序时名次仍然是真实名次，不会变成显示位置。
+     */
+    rank: number;
     /** VRChat 群组人数。 */
     members: number | null;
     /** 挂着这个社团的星有几颗（本站用户），不是群组人数。 */
@@ -64,18 +72,17 @@ export type VrccClubRow = {
 export type VrccClubListView = {
     source: VrccClubSource;
     rows: VrccClubRow[];
-    /** 一共有几个公开社团；`null` = 这个接口不给。 */
+    /** 一共几个公开社团；`null` = 这个接口不给。 */
     total: number | null;
-    /** 下一页的 `offset`；`null` = 没有下一页，或这个接口不支持翻页。 */
-    next: number | null;
 };
 
-function fromClub(club: VrccClub): VrccClubRow {
+function fromClub(club: VrccClub, rank: number): VrccClubRow {
     return {
         code: typeof club.code === 'string' ? club.code : '',
         name: club.name ?? null,
         lede: club.lede ?? null,
         tags: Array.isArray(club.tags) ? club.tags.filter(Boolean) : [],
+        rank,
         members: typeof club.members === 'number' ? club.members : null,
         here: typeof club.here === 'number' ? club.here : 0,
         since: typeof club.since === 'number' ? club.since : null,
@@ -94,38 +101,44 @@ function fromClub(club: VrccClub): VrccClubRow {
     };
 }
 
-/** `GET /clubs` → 面板形状。有 `total` / `next`，能翻页。 */
+/**
+ * `GET /clubs` → 面板形状。
+ *
+ * 名次按回答里的顺序编号。服务器顺序就是热度顺序，所以这个编号就是真实名次。
+ */
 export function fromPublicClubs(
     response: VrccClubs | null | undefined
 ): VrccClubListView {
     const clubs = Array.isArray(response?.clubs) ? response.clubs : [];
     return {
         source: 'public',
-        rows: clubs.filter((club) => Boolean(club)).map(fromClub),
+        rows: clubs
+            .filter((club) => Boolean(club))
+            .map((club, index) => fromClub(club, index + 1)),
         // 老服务器没有 `total`：保持 `null`，让面板别编数字。
-        total: typeof response?.total === 'number' ? response.total : null,
-        next: typeof response?.next === 'number' ? response.next : null
+        total: typeof response?.total === 'number' ? response.total : null
     };
 }
 
-/** `GET /me/clubs` → 面板形状。**没有 `total` / `next`**，这两个字段只能是 `null`。 */
+/** `GET /me/clubs` → 面板形状。这个接口不提供 `total`，所以它恒为 `null`。 */
 export function fromMyClubs(
     response: VrccMyClubs | null | undefined
 ): VrccClubListView {
     const clubs = Array.isArray(response?.clubs) ? response.clubs : [];
     return {
         source: 'mine',
-        rows: clubs.filter((club) => Boolean(club)).map(fromMyClub),
-        total: null,
-        next: null
+        rows: clubs
+            .filter((club) => Boolean(club))
+            .map((club, index) => fromMyClub(club, index + 1)),
+        total: null
     };
 }
 
-function fromMyClub(club: VrccMyClub): VrccClubRow {
+function fromMyClub(club: VrccMyClub, rank: number): VrccClubRow {
     return {
         // `VrccMyClub` 由两部分组成：扁平的 `VrccClub` 字段，加上玩家视角字段。
         // 公共字段复用同一个适配器。下面只覆盖新增字段。
-        ...fromClub(club),
+        ...fromClub(club, rank),
         likes: typeof club.likes === 'number' ? club.likes : null,
         followed: typeof club.followed === 'boolean' ? club.followed : null,
         member: typeof club.member === 'boolean' ? club.member : null,

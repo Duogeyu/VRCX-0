@@ -869,8 +869,12 @@
             "grade_3": "First Class",
             "grade_4": "Polaris",
             "grade_unknown": "Not rated",
-            "prev": "Previous",
-            "next": "Next"
+            "sort": {
+                "default": "Popular",
+                "grade": "Grade",
+                "members": "Members",
+                "name": "Name"
+            }
         },
         "current_map": {
             "label": "Your current map",

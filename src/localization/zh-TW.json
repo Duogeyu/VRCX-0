@@ -869,8 +869,12 @@
             "grade_3": "一等星",
             "grade_4": "北極星",
             "grade_unknown": "未分級",
-            "prev": "上一頁",
-            "next": "下一頁"
+            "sort": {
+                "default": "熱度",
+                "grade": "星級",
+                "members": "人數",
+                "name": "名稱"
+            }
         },
         "current_map": {
             "label": "你所在的地圖",

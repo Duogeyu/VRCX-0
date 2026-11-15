@@ -6,7 +6,7 @@ import {
     ChevronsLeft,
     ChevronsRight
 } from 'lucide-react';
-import { useCallback, useState } from 'react';
+import { Fragment, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useTiltGrid } from '@/lib/useTiltGrid';
@@ -14,6 +14,11 @@ import { openGroupDialog } from '@/services/dialogService';
 import { openExternalLink } from '@/services/shellIntegrationService';
 import { Button } from '@/ui/shadcn/button';
 import { Spinner } from '@/ui/shadcn/spinner';
+import {
+    ToggleGroup,
+    ToggleGroupItem,
+    ToggleGroupSeparator
+} from '@/ui/shadcn/toggle-group';
 
 import { buildPageItems } from '../boardPages';
 import type { VrccClubRow } from '../clubRow';
@@ -33,6 +38,70 @@ function groupIdOf(url: string | null): string | null {
 
 /** 一页 24 张。左栏到全宽都能排成网格。 */
 const PAGE_SIZE = 24;
+
+/** 一次取回多少条。接口上限 100，现在线上不到 20 个社团。 */
+const ALL_CLUBS_LIMIT = 100;
+
+/** 没有数据时的空数组。模块级常量，引用不变，`useMemo` 才不会每帧失效。 */
+const EMPTY_ROWS: VrccClubRow[] = [];
+
+/**
+ * 排序键。默认是服务器顺序，也就是热度顺序：点赞 → 群组人数 → 短码。
+ *
+ * 其余三种在客户端排。`/clubs` 没有 `sort` 参数，所以才要一次取全量：
+ * 只排当前一页会让第 2 页里的高值社团错位。
+ */
+export type ClubSort = 'default' | 'grade' | 'members' | 'name';
+
+const SORTS: readonly ClubSort[] = ['default', 'grade', 'members', 'name'];
+
+/** 控件回传的值来自运行时，可能不是这四种之一。 */
+function isClubSort(value: unknown): value is ClubSort {
+    return (
+        typeof value === 'string' &&
+        (SORTS as readonly string[]).includes(value)
+    );
+}
+
+/**
+ * 排序。名次 `rank` 不参与计算，只用来定平手时的先后。
+ *
+ * `grade` 与 `members` 都可能为 `null`。缺值固定排最后，不当作 0。
+ * 当成 0 会让「没评级」混在「三等星」后面，看起来像是最低一档。
+ */
+function sortClubs(
+    rows: VrccClubRow[],
+    sort: ClubSort,
+    collator: Intl.Collator
+): VrccClubRow[] {
+    if (sort === 'default') {
+        // 服务器已经排好，原样返回。名次也就是这个顺序。
+        return rows;
+    }
+    const copy = [...rows];
+    copy.sort((left, right) => {
+        if (sort === 'name') {
+            const diff = collator.compare(
+                left.name?.trim() || left.code,
+                right.name?.trim() || right.code
+            );
+            return diff !== 0 ? diff : left.rank - right.rank;
+        }
+        const a = sort === 'grade' ? left.grade : left.members;
+        const b = sort === 'grade' ? right.grade : right.members;
+        if (a === null && b === null) {
+            return left.rank - right.rank;
+        }
+        if (a === null) {
+            return 1;
+        }
+        if (b === null) {
+            return -1;
+        }
+        return b - a || left.rank - right.rank;
+    });
+    return copy;
+}
 
 /** 评级配色。与群组详情那张卡一致：金(4)、紫(3)、蓝(2)、绿(1)。 */
 const GRADE_STYLE: Record<number, string> = {
@@ -229,26 +298,20 @@ export function VrccClubsPanel({
 }: {
     connection: VrccConnection | null;
 }) {
-    const { t } = useTranslation();
-    /**
-     * 当前页的起点。用 `offset` 而不是页码，因为要兼容两种翻页方式：
-     *
-     * - 已知 `total`：按 24 一页走，`offset` 一定是 24 的整数倍。
-     * - 不知道 `total`：老服务器可能只给 `next`。那时没有页码可算，
-     *   只能按服务器给的 `next` 前进。`trail` 记住走过的位置，用于回退。
-     */
-    const [offset, setOffset] = useState(0);
-    const [trail, setTrail] = useState<number[]>([]);
+    const { t, i18n } = useTranslation();
+    const [page, setPage] = useState(0);
+    const [sort, setSort] = useState<ClubSort>('default');
     // 模型榜的方图卡用 12°，这里用 7°。这张卡更窄，正文在纸片上。
     // `scale: 1.03` 只给一点层次。再大会与相邻卡重叠。
     const tiltRef = useTiltGrid<HTMLUListElement>({
         amplitude: 7,
         scale: 1.03
     });
+    // 一次取全量（接口上限 100）。排序在客户端做，只取一页会导致排序结果失真。
     const { view, isLoading, error, source } = useVrccClubs({
         connection,
-        limit: PAGE_SIZE,
-        offset
+        limit: ALL_CLUBS_LIMIT,
+        offset: 0
     });
     // 点卡片打开群组详情。`group` 缺失时（部分成员专属社团）退回打开社团页。
     // 这样每次点击都有结果。
@@ -266,33 +329,19 @@ export function VrccClubsPanel({
         }
     }, []);
 
-    const rows = view?.rows ?? [];
+    const rows = view?.rows ?? EMPTY_ROWS;
     const total = view?.total ?? null;
-    const next = view?.next ?? null;
-    /** 已知总数时才知道一共几页。未知时 `null`，分页器只画前后翻页。 */
-    const pageCount =
-        total !== null ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : null;
-    const pageIndex = Math.floor(offset / PAGE_SIZE);
-    const canPrev = trail.length > 0 || offset > 0;
-    const canNext =
-        pageCount !== null ? pageIndex + 1 < pageCount : next !== null;
-
-    /** 所有翻页都经这里：记住当前位置，回退才有路。 */
-    const goTo = (target: number) => {
-        if (target === offset) {
-            return;
-        }
-        setTrail((items) => [...items, offset]);
-        setOffset(target);
-    };
-    const goPrev = () => {
-        const previous = trail[trail.length - 1];
-        setTrail((items) => items.slice(0, -1));
-        setOffset(previous ?? Math.max(0, offset - PAGE_SIZE));
-    };
-    const goNext = () => {
-        goTo(next !== null && pageCount === null ? next : offset + PAGE_SIZE);
-    };
+    const sorted = useMemo(
+        // 排序规则由语言决定（中文按拼音），所以语言变了才重算。
+        () => sortClubs(rows, sort, new Intl.Collator(i18n.language)),
+        [rows, sort, i18n.language]
+    );
+    const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+    const safePage = Math.min(page, pageCount - 1);
+    const visible = sorted.slice(
+        safePage * PAGE_SIZE,
+        safePage * PAGE_SIZE + PAGE_SIZE
+    );
 
     if (isLoading && !view) {
         return (
@@ -315,7 +364,29 @@ export function VrccClubsPanel({
         // `h-full` 不能省。页签内容是块级元素，`flex-1` 在块级父元素里无效。
         // 没有 `h-full` 时网格不会撑满，分页器浮在内容下面，沉不到底部。
         <div className="flex h-full min-h-0 flex-col gap-2 p-1">
-            <div className="flex min-w-0 items-center gap-3">
+            <div className="flex min-w-0 shrink-0 items-center gap-2">
+                <ToggleGroup
+                    variant="outline"
+                    size="sm"
+                    value={[sort]}
+                    onValueChange={(next) => {
+                        const value = next[0];
+                        if (isClubSort(value)) {
+                            setSort(value);
+                            // 换排序后回到第一页，否则会停在一个可能不存在的页码上。
+                            setPage(0);
+                        }
+                    }}
+                >
+                    {SORTS.map((value, index) => (
+                        <Fragment key={value}>
+                            {index > 0 ? <ToggleGroupSeparator /> : null}
+                            <ToggleGroupItem value={value} className="text-xs">
+                                {t(`vrcc.clubs.sort.${value}`)}
+                            </ToggleGroupItem>
+                        </Fragment>
+                    ))}
+                </ToggleGroup>
                 {total !== null ? (
                     <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
                         {t('vrcc.clubs.total', { count: total })}
@@ -343,11 +414,11 @@ export function VrccClubsPanel({
                     ref={tiltRef}
                     className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(min(220px,100%),1fr))] gap-2 overflow-x-clip overflow-y-auto px-2.5 pb-1"
                 >
-                    {rows.map((club, index) => (
+                    {visible.map((club, index) => (
                         <ClubCard
-                            key={club.code || `${offset}-${index}`}
+                            key={club.code || `${safePage}-${index}`}
                             club={club}
-                            rank={offset + index + 1}
+                            rank={club.rank}
                             onOpen={openClub}
                         />
                     ))}
@@ -362,12 +433,9 @@ export function VrccClubsPanel({
                     variant="ghost"
                     size="sm"
                     className="size-6 p-0"
-                    disabled={!canPrev}
+                    disabled={safePage === 0}
                     aria-label={t('table.pagination.page_number', { page: 1 })}
-                    onClick={() => {
-                        setTrail([]);
-                        setOffset(0);
-                    }}
+                    onClick={() => setPage(0)}
                 >
                     <ChevronsLeft className="size-3.5" />
                 </Button>
@@ -375,64 +443,50 @@ export function VrccClubsPanel({
                     variant="ghost"
                     size="sm"
                     className="size-6 p-0"
-                    disabled={!canPrev}
+                    disabled={safePage === 0}
                     aria-label={t('table.pagination.previous')}
-                    onClick={goPrev}
+                    onClick={() => setPage(safePage - 1)}
                 >
                     <ChevronLeft className="size-3.5" />
                 </Button>
-                {pageCount !== null ? (
-                    buildPageItems(pageIndex + 1, pageCount).map((item) =>
-                        item.kind === 'gap' ? (
-                            <span
-                                key={`gap-${item.key}`}
-                                aria-hidden="true"
-                                className="text-muted-foreground w-4 text-center text-xs"
-                            >
-                                …
-                            </span>
-                        ) : (
-                            <Button
-                                key={item.page}
-                                variant={
-                                    item.page === pageIndex + 1
-                                        ? 'secondary'
-                                        : 'ghost'
-                                }
-                                size="sm"
-                                className="h-6 min-w-6 px-1 text-xs tabular-nums"
-                                aria-current={
-                                    item.page === pageIndex + 1
-                                        ? 'page'
-                                        : undefined
-                                }
-                                aria-label={t('table.pagination.page_number', {
-                                    page: item.page
-                                })}
-                                onClick={() =>
-                                    goTo((item.page - 1) * PAGE_SIZE)
-                                }
-                            >
-                                {item.page}
-                            </Button>
-                        )
+                {buildPageItems(safePage + 1, pageCount).map((item) =>
+                    item.kind === 'gap' ? (
+                        <span
+                            key={`gap-${item.key}`}
+                            aria-hidden="true"
+                            className="text-muted-foreground w-4 text-center text-xs"
+                        >
+                            …
+                        </span>
+                    ) : (
+                        <Button
+                            key={item.page}
+                            variant={
+                                item.page === safePage + 1
+                                    ? 'secondary'
+                                    : 'ghost'
+                            }
+                            size="sm"
+                            className="h-6 min-w-6 px-1 text-xs tabular-nums"
+                            aria-current={
+                                item.page === safePage + 1 ? 'page' : undefined
+                            }
+                            aria-label={t('table.pagination.page_number', {
+                                page: item.page
+                            })}
+                            onClick={() => setPage(item.page - 1)}
+                        >
+                            {item.page}
+                        </Button>
                     )
-                ) : (
-                    // 服务器没给 `total`：算不出总页数，就只显示当前页。
-                    <span
-                        aria-current="page"
-                        className="text-muted-foreground min-w-6 px-1 text-center text-xs tabular-nums"
-                    >
-                        {pageIndex + 1}
-                    </span>
                 )}
                 <Button
                     variant="ghost"
                     size="sm"
                     className="size-6 p-0"
-                    disabled={!canNext}
+                    disabled={safePage >= pageCount - 1}
                     aria-label={t('table.pagination.next')}
-                    onClick={goNext}
+                    onClick={() => setPage(safePage + 1)}
                 >
                     <ChevronRight className="size-3.5" />
                 </Button>
@@ -440,15 +494,11 @@ export function VrccClubsPanel({
                     variant="ghost"
                     size="sm"
                     className="size-6 p-0"
-                    disabled={pageCount === null || pageIndex + 1 >= pageCount}
+                    disabled={safePage >= pageCount - 1}
                     aria-label={t('table.pagination.page_number', {
-                        page: pageCount ?? 1
+                        page: pageCount
                     })}
-                    onClick={() => {
-                        if (pageCount !== null) {
-                            goTo((pageCount - 1) * PAGE_SIZE);
-                        }
-                    }}
+                    onClick={() => setPage(pageCount - 1)}
                 >
                     <ChevronsRight className="size-3.5" />
                 </Button>
