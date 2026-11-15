@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLinkIcon } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,6 +13,7 @@ import { VrccError } from '@/lib/vrccError';
 import type { VrccMyMapPage } from '@/platform/tauri/bindings';
 import { useVrccConnection } from '@/repositories/vrccConnectionRepository';
 import {
+    dropOtherVrccMyMapPageSorts,
     readVrccMyMap,
     voteVrccMapContent,
     vrccMyMapPageQueryOptions,
@@ -68,6 +69,7 @@ const SCORE_MAX = 10;
  */
 export function WorldVrccPanel({ worldId }: { worldId: string }) {
     const { t } = useTranslation();
+    const queryClient = useQueryClient();
     // 排序是这一页的两个交互状态之一。默认「最热」，与官方一致。
     const [sort, setSort] = useState<'hot' | 'new'>('hot');
     // 配置四宫格默认收起：它是「想深究再看」的信息，不该占住首屏。
@@ -103,17 +105,11 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
 
     // 带令牌的那一半挂在当前账号下，要等这次挂载读到连接再发：
     // 缓存里的旧连接可能是上一个账号的。
+    // 切排序时先沿用另一个排序的「我的评分」，打分器不会被卸掉，见查询选项里的
+    // `placeholderData`。
     const signedIn = useQuery({
         ...vrccMyMapPageQueryOptions(worldId, sort, vrcc.account),
-        enabled: Boolean(worldId) && vrcc.ready,
-        // 切短评排序时，新排序那一份还没到之前先留着上一份：「我的评分」和
-        // 排序无关，而打分器要等它才挂载——不留的话一切排序，编辑器就被卸掉，
-        // 没提交的分数和短评一起丢了。只在同一张图、同一个账号之间沿用。
-        placeholderData: (previous, previousQuery) =>
-            previousQuery?.queryKey[1] === worldId &&
-            previousQuery?.queryKey[5] === vrcc.account
-                ? previous
-                : undefined
+        enabled: Boolean(worldId) && vrcc.ready
     });
 
     // 令牌里有没有 `maps.rate`（打分）。
@@ -453,6 +449,12 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                             currentText={mine?.text ?? null}
                             check={mine?.check ?? null}
                             onDone={() => {
+                                dropOtherVrccMyMapPageSorts(
+                                    queryClient,
+                                    worldId,
+                                    sort,
+                                    vrcc.account
+                                );
                                 void signedIn.refetch();
                             }}
                         />
@@ -489,6 +491,12 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                         {signedIn.isPending
                             ? t('common.loading', '加载中…')
                             : t('dialog.world.vrcc.words_hint')}
+                    </p>
+                ) : signedIn.isPlaceholderData ? (
+                    // 刚切了排序：手上是另一个排序的那一份，短评列表已经拿掉了，
+                    // 等这个排序的到了再显示。不能说「还没有短评」。
+                    <p className="text-muted-foreground text-xs">
+                        {t('common.loading', '加载中…')}
                     </p>
                 ) : rates.length ? (
                     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">

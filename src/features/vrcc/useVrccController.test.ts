@@ -992,6 +992,81 @@ describe('useVrccController', () => {
         expect(mocks.boards).not.toHaveBeenCalled();
     });
 
+    it('断开调用报错、但其实已经断开时，也不留着上个账号的玩家视角', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards?.source).toBe('mine'));
+
+        // 服务器错误时后端会先清本地会话、再把错误抛上来：调用失败了，
+        // 重读到的连接却是「已断开」。公开榜也拉不下来。
+        mocks.disconnect.mockRejectedValue(new Error('503 busy'));
+        mocks.connection.mockResolvedValue({
+            ...connected,
+            connected: false,
+            star: null,
+            vrcName: null,
+            scope: null
+        });
+        mocks.boards.mockRejectedValue(new Error('network down'));
+        await act(async () => {
+            await result.current.disconnect();
+        });
+
+        expect(result.current.connection?.connected).toBe(false);
+        expect(result.current.boards?.source).not.toBe('mine');
+        queryClient.clear();
+    });
+
+    it('断开调用报错、后端刻意留着令牌时，界面照旧显示还连着', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards?.source).toBe('mine'));
+
+        // 可重试的失败（网络不通）：后端留着令牌，重读到的仍是「已连接」。
+        mocks.disconnect.mockRejectedValue(new Error('network down'));
+        await act(async () => {
+            await result.current.disconnect();
+        });
+
+        expect(result.current.connection?.connected).toBe(true);
+        expect(result.current.boards?.source).toBe('mine');
+        queryClient.clear();
+    });
+
+    it('已经被取代的公开榜请求失败了，不弹错误', async () => {
+        mocks.connection.mockResolvedValue(connectedWithoutMaps);
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() =>
+            expect(result.current.boards?.source).toBe('public')
+        );
+
+        let failWeek: (error: unknown) => void = () => {};
+        mocks.boards.mockImplementation(
+            (_limit: number, sort: string | null) =>
+                sort === 'week'
+                    ? new Promise((_resolve, reject) => {
+                          failWeek = reject;
+                      })
+                    : Promise.resolve({
+                          board: 'maps',
+                          sort: sort ?? 'top',
+                          min: 1,
+                          maps: [],
+                          at: 1
+                      })
+        );
+        act(() => result.current.setBoardSort('week'));
+        act(() => result.current.setBoardSort('new'));
+        await waitFor(() => expect(result.current.boardSort).toBe('new'));
+
+        mocks.toastAdd.mockClear();
+        await act(async () => {
+            failWeek(new Error('network down'));
+        });
+
+        expect(mocks.toastAdd).not.toHaveBeenCalled();
+        expect(result.current.error).toBeNull();
+        expect(result.current.boardSort).toBe('new');
+    });
+
     it('断开时公开榜拉不下来，也不留着上个账号的玩家视角', async () => {
         const { result } = renderHook(() => useVrccController());
         await waitFor(() => expect(result.current.boards?.source).toBe('mine'));

@@ -20,11 +20,14 @@ export type {
 
 import { normalizeVrccError } from '@/lib/vrccError';
 import { commands } from '@/platform/tauri/bindings';
+import { refreshVrccConnectionAfterFailure } from '@/repositories/vrccConnectionRepository';
 
 async function call<T>(run: () => Promise<T>): Promise<T> {
     try {
         return await run();
     } catch (error) {
+        // 令牌失效时让世界、群组面板读的那份连接也重读，见该函数的说明。
+        refreshVrccConnectionAfterFailure(error);
         throw await normalizeVrccError(error);
     }
 }

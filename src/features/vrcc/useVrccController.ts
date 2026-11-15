@@ -298,6 +298,35 @@ const initialState: State = {
 };
 
 /**
+ * 断开之后属于上一个账号的那些状态，一律清掉。
+ *
+ * 断开成功时清；断开调用报错、但重读连接发现其实已经断开时也清（服务器错误
+ * 时后端会先清本地会话再报错）。两处共用这一份，免得一处漏掉某个字段。
+ */
+const SIGNED_OUT_STATE: Partial<State> = {
+    // 玩家视角的地图榜（「我打 X 分」「去过 N 次」）是上一个账号的：
+    // 先清掉，再去拉公开榜——公开榜那次请求要是失败，界面也不该
+    // 留着别人的数据。
+    boards: null,
+    deviceAuth: null,
+    recent: null,
+    unread: null,
+    notes: null,
+    // 「所在地图」「互相连上」「星轨相交」都是**上一个账号**的
+    // 个人数据。不清的话，`VrccPage` 只看 `myMap` 是否存在就渲染
+    // 卡片，断开后还会继续显示别人的评分和擦肩记录。
+    myMap: null,
+    mutuals: null,
+    mutualsError: null,
+    crossings: null,
+    crossingCards: null,
+    crossingsLoading: false,
+    crossingsError: null,
+    crossingsNeedsScope: false,
+    crossingsChecked: false
+};
+
+/**
  * 星遇同频页面的控制器。
  *
  * 轮询在未连接时也跑，因为地图榜是开放数据、不需要令牌。个人接口只在
@@ -599,7 +628,19 @@ export function useVrccController() {
                 return;
             }
 
-            const board = await vrccApi.boards(PUBLIC_BOARD_LIMIT, publicSort);
+            const board = await vrccApi
+                .boards(PUBLIC_BOARD_LIMIT, publicSort)
+                .catch((error: unknown) => {
+                    // 和玩家视角那一路一样：已经被取代的请求失败了，说的是
+                    // 旧排序，不弹错误、不写横幅。
+                    if (superseded()) {
+                        return null;
+                    }
+                    throw error;
+                });
+            if (board === null) {
+                return;
+            }
             const view = fromPublicBoard(board);
             if (publicSort !== 'top' && board.sort == null) {
                 // 服务器回的是总榜，不能当本周榜显示。
@@ -1467,28 +1508,7 @@ export function useVrccController() {
         boardRequestSeq.current += 1;
         try {
             await vrccApi.disconnect();
-            patch({
-                // 玩家视角的地图榜（「我打 X 分」「去过 N 次」）是上一个账号的：
-                // 先清掉，再去拉公开榜——公开榜那次请求要是失败，界面也不该
-                // 留着别人的数据。
-                boards: null,
-                deviceAuth: null,
-                recent: null,
-                unread: null,
-                notes: null,
-                // 「所在地图」「互相连上」「星轨相交」都是**上一个账号**的
-                // 个人数据。不清的话，`VrccPage` 只看 `myMap` 是否存在就渲染
-                // 卡片，断开后还会继续显示别人的评分和擦肩记录。
-                myMap: null,
-                mutuals: null,
-                mutualsError: null,
-                crossings: null,
-                crossingCards: null,
-                crossingsLoading: false,
-                crossingsError: null,
-                crossingsNeedsScope: false,
-                crossingsChecked: false
-            });
+            patch(SIGNED_OUT_STATE);
         } catch (error) {
             // 可重试的失败（网络不通、正在退避）**后端会刻意保留令牌**，
             // 等玩家再点一次。这时界面必须如实显示「还连着」，不能骗人。
@@ -1503,6 +1523,10 @@ export function useVrccController() {
             // 真断开了：地图榜还是玩家视角那份，「我打的分」「去过几次」都是
             // 上一个账号的。换回公开榜。
             if (!connection.connected) {
+                // 断开调用报错时上面那次清理没有执行，但后端可能已经断开了
+                // （服务器错误时会先清本地会话再报错）。以重读到的连接为准再清
+                // 一次，清个人数据不依赖吊销调用成功返回。
+                patch(SIGNED_OUT_STATE);
                 void refreshBoards(boardSortRef.current).catch((error) => {
                     reportError(error, 'refreshBoards');
                 });
