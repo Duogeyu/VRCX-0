@@ -915,4 +915,49 @@ describe('useVrccController', () => {
             vi.useRealTimers();
         }
     });
+
+    it('先点的排序后回来，不会盖掉后点的那个', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+
+        // 本周榜卡在后端（例如在排队等限流），新上榜立刻就回。
+        let deliverWeek: (board: unknown) => void = () => {};
+        mocks.myBoard.mockImplementation((sort: string | null) =>
+            sort === 'week'
+                ? new Promise((resolve) => {
+                      deliverWeek = resolve;
+                  })
+                : Promise.resolve({ sort: sort ?? 'top', min: 1, maps: [] })
+        );
+        act(() => result.current.setBoardSort('week'));
+        act(() => result.current.setBoardSort('new'));
+        await waitFor(() => expect(result.current.boardSort).toBe('new'));
+
+        await act(async () => {
+            deliverWeek({ sort: 'week', min: 1, maps: [] });
+        });
+        expect(result.current.boardSort).toBe('new');
+    });
+
+    it('断开后地图榜换回公开榜，不留上个账号的玩家视角', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards?.source).toBe('mine'));
+
+        mocks.disconnect.mockResolvedValue(undefined);
+        mocks.connection.mockResolvedValue({
+            ...connected,
+            connected: false,
+            star: null,
+            vrcName: null,
+            scope: null
+        });
+        await act(async () => {
+            await result.current.disconnect();
+        });
+
+        await waitFor(() =>
+            expect(result.current.boards?.source).toBe('public')
+        );
+        expect(mocks.boards).toHaveBeenCalled();
+    });
 });
