@@ -237,13 +237,24 @@ export const queryKeys = Object.freeze({
     // 条件、以及「未连接时会失败」这个性质都不同，共用一个键会让公开数据
     // 被登录数据顶掉，反之亦然。`sort` 也进键：`hot` 和 `new` 是两份不同的
     // 列表，玩家切了排序不该看到上一份。
+    //
+    // **星遇同频的个人数据，键里都带 `star`**（这里、`worldVrccMine`、
+    // `groupVrccClubDetail`、玩家视角的 `vrccClubs`）：换 VRChat 账号时整份缓存
+    // 会被清掉，但同一个 VRChat 账号里断开、令牌失效或换连另一个星遇同频账号
+    // 不会；不带账号的话，staleTime 内会先显示上一个账号的评分和关注。`star`
+    // 取自 `useVrccConnection`，没连接时是 `null`。
     worldVrccSignedIn: (
         worldId: string,
         sort: 'hot' | 'new' = 'hot',
+        star: number | null = null,
         endpoint: string = ''
-    ) => withEndpoint(['world', worldId, 'vrcc', 'signedIn', sort], endpoint),
-    // 当前令牌是否有某项权限。全局一份，按 scope 名分键。
-    vrccScope: (scope: string) => ['vrcc', 'scope', scope] as const,
+    ) =>
+        withEndpoint(
+            ['world', worldId, 'vrcc', 'signedIn', sort, star],
+            endpoint
+        ),
+    // 当前的星遇同频连接（本地会话快照），见 `useVrccConnection`。
+    vrccConnection: () => ['vrcc', 'connection'] as const,
     // 群组对应的星遇同频社团（`GET /clubs/{code}`）。
     //
     // 按**短码**分键而不是群组 ID：短码本身就是 `shortCode.discriminator`，
@@ -254,17 +265,21 @@ export const queryKeys = Object.freeze({
     //
     // **卡片和房间列表共用这一个键**：两个组件各自建键的话，打开一次群组详情会
     // 把同一个接口问两遍，而它在客户端侧带 30 秒 `min_gap`、还吃每日额度。
-    groupVrccClubDetail: (code: string) =>
-        ['group', 'vrcc-club-detail', code] as const,
+    groupVrccClubDetail: (code: string, star: number | null = null) =>
+        ['group', 'vrcc-club-detail', code, star] as const,
     // 社团列表。**键里带来源**：公开列表按页取、玩家视角是全量，两者形状虽然
     // 归一过，缓存却不能混——混了以后切回来会拿到另一份的行（有人有 `likes`、
     // 有人没有）。
-    vrccClubs: (source: 'public' | 'mine', limit = 0, offset = 0) =>
-        ['vrcc', 'clubs', source, limit, offset] as const,
+    vrccClubs: (
+        source: 'public' | 'mine',
+        limit = 0,
+        offset = 0,
+        star: number | null = null
+    ) => ['vrcc', 'clubs', source, limit, offset, star] as const,
     // 一张地图在榜上的状态（board / pending / off）。只有带令牌的接口能区分
     // 「未收录」和「待审核」，所以独立一个键，不与公开页共用。
-    worldVrccMine: (worldId: string) =>
-        ['world', worldId, 'vrcc', 'mine'] as const,
+    worldVrccMine: (worldId: string, star: number | null = null) =>
+        ['world', worldId, 'vrcc', 'mine', star] as const,
     groupMembers: (params: VrchatGroupMembersInput, endpoint: string = '') =>
         withEndpoint(
             ['group', params.groupId, 'members', stableParams(params)],

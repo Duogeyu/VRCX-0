@@ -4,6 +4,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
+    act,
     cleanup,
     fireEvent,
     render,
@@ -69,6 +70,8 @@ vi.mock('react-i18next', () => ({
         }
     })
 }));
+
+import { queryKeys } from '@/lib/entityQueryCache';
 
 import { WorldVrccPanel } from './WorldVrccPanel';
 
@@ -577,6 +580,65 @@ describe('WorldVrccPanel', () => {
         ).toBeTruthy();
         expect(screen.queryByText('0.0')).toBeNull();
         expect(screen.getByText('dialog.world.vrcc.no_words_yet')).toBeTruthy();
+    });
+
+    it('缓存里是上一个星遇同频账号的地图页时，不拿它给现在的账号看', async () => {
+        // 同一个 VRChat 账号里换连了另一个星遇同频账号：缓存里留着 star 77
+        // 的那一页，连旧的连接快照也还是 77。现在连着的是 88。
+        const client = new QueryClient({
+            defaultOptions: { queries: { retry: false } }
+        });
+        client.setQueryData(queryKeys.worldVrcc('wrld_test'), mapPage());
+        client.setQueryData(
+            queryKeys.worldVrccSignedIn('wrld_test', 'hot', 77),
+            myMapPage({
+                mine: {
+                    rate: { score: 3, text: '上个账号的短评', check: 'ok' }
+                }
+            })
+        );
+        client.setQueryData(queryKeys.vrccConnection(), {
+            connected: true,
+            star: 77,
+            scope: 'profile maps maps.rate'
+        });
+        // 读连接这一步还没回来：这段时间里缓存的旧快照最容易被误用。
+        let deliverConnection: (connection: unknown) => void = () => {};
+        appVrccConnection.mockReturnValue(
+            new Promise((resolve) => {
+                deliverConnection = resolve;
+            })
+        );
+        appVrccMyMapPage.mockResolvedValue(
+            myMapPage({
+                mine: {
+                    rate: { score: 9, text: '现在账号的短评', check: 'ok' }
+                }
+            })
+        );
+        render(
+            <QueryClientProvider client={client}>
+                <WorldVrccPanel worldId="wrld_test" />
+            </QueryClientProvider>
+        );
+
+        // 公开那一半已经在缓存里，面板直接画出来了……
+        expect(await screen.findByText('8.4')).toBeTruthy();
+        // ……但上个账号的短评不能借着旧快照露出来。
+        expect(screen.queryByText('上个账号的短评')).toBeNull();
+        expect(appVrccMyMapPage).not.toHaveBeenCalled();
+
+        await act(async () => {
+            deliverConnection({
+                connected: true,
+                star: 88,
+                scope: 'profile notifications maps mutuals maps.rate maps.write'
+            });
+        });
+        expect(
+            (await screen.findAllByText('现在账号的短评')).length
+        ).toBeGreaterThan(0);
+        expect(screen.queryByText('上个账号的短评')).toBeNull();
     });
 
     it('我的评分还没到时不给打分器；到了之后只改分数不会删掉原来的短评', async () => {
