@@ -110,7 +110,7 @@ Windows の場合は、**Visual Studio Build Tools** をインストールし、
 
 ```bash
 git clone https://github.com/VRChatCN-Kipfel/VRCX-0-Galaxies
-cd VRCX-0
+cd VRCX-0-Galaxies
 
 npm install
 ```

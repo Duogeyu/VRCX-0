@@ -6,11 +6,11 @@ Thanks for your interest in VRCX-0. Please read this before opening a pull reque
 
 - **UI / visual design changes are not accepted.** Restyling, re-layouts, theme tweaks, "I redesigned screen X" — please don't open these. They won't be merged.
 - **Large features are rarely accepted as unsolicited PRs.** VRCX-0 follows its own roadmap. A big PR that wasn't discussed first will almost certainly be declined, no matter how much work went into it.
-- **Got a genuinely good idea? Open an [issue](https://github.com/Map1en/VRCX-0/issues) first** with a detailed proposal — the problem, your approach, and the trade-offs. Get agreement before writing the code.
+- **Got a genuinely good idea? Open an [issue](https://github.com/VRChatCN-Kipfel/VRCX-0-Galaxies/issues) first** with a detailed proposal — the problem, your approach, and the trade-offs. Get agreement before writing the code.
 
 Small, focused fixes (clear bugs, typos, localization, obvious correctness issues) are always welcome and don't need a prior issue.
 
-For localization work, download a DevKit build from the [package-devkit workflow](https://github.com/Map1en/VRCX-0/actions/workflows/package-devkit.yml) and use it to load local translations for review. Please also check the [localization glossary](src/localization/GLOSSARY.md) to keep domain terms consistent.
+For localization work, download a DevKit build from the [Dev Kit workflow](https://github.com/VRChatCN-Kipfel/VRCX-0-Galaxies/actions/workflows/devkit.yml) and use it to load local translations for review. Please also check the [localization glossary](src/localization/GLOSSARY.md) to keep domain terms consistent.
 
 ## Using AI to write your PR
 
