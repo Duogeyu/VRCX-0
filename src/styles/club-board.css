@@ -1,0 +1,52 @@
+/* SPDX-License-Identifier: MPL-2.0 */
+
+/**
+ * 社团卡片的倾斜。分层与 `model-card.css` 相同。
+ *
+ * 结构：
+ *   li.vrcc-club-card   提供透视
+ *     __rotor           承受倾斜。角度由 `useTiltGrid` 写入 CSS 变量
+ *
+ * 倾斜是三个变换的合成：rotateX、rotateY、scale。
+ * 合成必须单独占一层。与边框、底色放同一层会被 `perspective` 拍扁。
+ *
+ * `li` 上禁止 `overflow: hidden`。加了会把 `preserve-3d` 压平。
+ * 裁剪放在纸片自身。
+ * 照片与纸片的构图在组件里。本文件只负责倾斜。
+ */
+@layer components {
+    .vrcc-club-card {
+        position: relative;
+        perspective: 800px;
+    }
+
+    /* 悬停或内部控件获得焦点时，抬到兄弟之上。
+       每张 `li` 因 `perspective` 自成层叠上下文，后画的兄弟会盖住前面的。
+       不抬的话，倾斜后伸出的边角会被右侧卡片盖住。 */
+    .vrcc-club-card:hover,
+    .vrcc-club-card:focus-within {
+        z-index: 2;
+    }
+
+    .vrcc-club-card > .vrcc-club-card__rotor {
+        transform: translate3d(0, 0, 0) rotateX(calc(var(--tilt-x, 0) * 1deg))
+            rotateY(calc(var(--tilt-y, 0) * 1deg)) scale(var(--tilt-scale, 1));
+        transform-style: preserve-3d;
+    }
+
+    /* 减少动态效果。钩子只在挂载时读取一次偏好，之后开关变化不会重来。
+       所以守卫写在这里。透视也要关闭，否则卡片留在 3D 上下文。 */
+    .reduce-effects .vrcc-club-card,
+    .reduce-effects .vrcc-club-card > .vrcc-club-card__rotor {
+        perspective: none;
+        transform: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .vrcc-club-card,
+        .vrcc-club-card > .vrcc-club-card__rotor {
+            perspective: none;
+            transform: none;
+        }
+    }
+}

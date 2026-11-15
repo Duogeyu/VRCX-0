@@ -1,29 +1,22 @@
 // SPDX-License-Identifier: MPL-2.0
 
 /**
- * 社团列表两个数据源的归一化。
+ * 社团列表两个数据源的归一化。面板只认 `VrccClubRow`。
+ * 做法与 `boardRow.ts` 相同。
  *
- * ## 为什么需要这一层
+ * 两个数据源的差别：
  *
- * 和地图榜同一个套路（见 `boardRow.ts`），面板不该知道这次数据是哪个接口来的。
- * 两套接口的差集：
- *
- * | | `/clubs`（公开） | `/me/clubs`（玩家） |
+ * | | `/clubs` 公开 | `/me/clubs` 玩家 |
  * |---|---|---|
- * | 令牌 | 不需要 | 需要 `clubs` |
- * | 条数 | `limit` 1–100 + `offset` | **全量，没有分页参数** |
- * | 总数 | 有 `total` / `next` | **没有** |
- * | 额外 | —— | `likes` / `followed` / `member` / `room` / `event` |
- * | 可见范围 | 只公开社团 | 含只给成员看的 |
+ * | 令牌 | 不需要 | 需要 `clubs` 权限 |
+ * | 条数 | `limit` 1 至 100，加 `offset` | 全量，无分页参数 |
+ * | 总数 | 有 `total` 与 `next` | 没有 |
+ * | 额外字段 | 无 | `likes`、`followed`、`member`、`room`、`event` |
+ * | 可见范围 | 公开社团 | 含成员专属社团 |
  *
- * ## `total` 是这一层最要紧的字段
- *
- * 地图榜是「玩家视角更少」（固定最多 60 条），降级到公开反而更多；社团榜**反过来**
- * ——玩家视角更全，但拿不到总数。所以：
- *
- * - `total: null` 一律表示「这个接口不给」，**绝不能用 `rows.length` 顶上**；
- *   那只是「这次拿到几条」，冒充总数就是撒谎。
- * - 面板看到 `null` 就把「共 N 个」和分页器整条隐藏。
+ * `total` 为 `null` 表示该数据源不提供总数。
+ * 禁止用 `rows.length` 代替。行数只是本次取回的数量。
+ * 面板收到 `null` 时隐藏总数与分页器。
  */
 
 import type { VrccClub, VrccClubs, VrccMyClub, VrccMyClubs } from './vrccApi';
@@ -34,9 +27,9 @@ export type VrccClubSource = 'public' | 'mine';
 /**
  * 归一化之后的一行。
  *
- * **`null` 一律表示「这个接口不给这个字段」**，不表示「值为空」：公开列表里
- * `followed` 永远是 `null`（它不知道你是谁），而玩家视角里真的没关注时是
- * `false`。面板要靠这个区分「显示未关注」和「这一列不显示」。
+ * `null` 表示该数据源不提供这个字段，不表示字段为空。
+ * 公开列表的 `followed` 恒为 `null`。玩家视角中未关注时为 `false`。
+ * 面板据此决定显示「未关注」，还是隐藏该列。
  */
 export type VrccClubRow = {
     code: string;
@@ -51,6 +44,12 @@ export type VrccClubRow = {
     grade: number | null;
     gradeName: string | null;
     icon: string | null;
+    /**
+     * 群组横幅。比例 16:9。来源是公开页那张图。成员专属社团没有横幅。
+     *
+     * 与 `icon` 一样带 `?v=` 版本串。图换后版本串会变，缓存时一并保存。
+     */
+    banner: string | null;
     page: string | null;
     group: string | null;
     /** 点赞数。只有玩家视角给——而榜就是按它排的。 */
@@ -83,6 +82,7 @@ function fromClub(club: VrccClub): VrccClubRow {
         grade: typeof club.grade === 'number' ? club.grade : null,
         gradeName: club.gradeName ?? null,
         icon: club.icon ?? null,
+        banner: club.banner ?? null,
         page: club.page ?? null,
         group: club.group ?? null,
         // 公开接口不给这几项，全部落 `null`——不是 `false`、不是 `0`。
@@ -123,8 +123,8 @@ export function fromMyClubs(
 
 function fromMyClub(club: VrccMyClub): VrccClubRow {
     return {
-        // `VrccMyClub` 是扁平化之后的一份 `VrccClub` 加玩家视角字段，
-        // 所以公共字段直接复用同一个适配器，只在后面覆盖差集。
+        // `VrccMyClub` 由两部分组成：扁平的 `VrccClub` 字段，加上玩家视角字段。
+        // 公共字段复用同一个适配器。下面只覆盖新增字段。
         ...fromClub(club),
         likes: typeof club.likes === 'number' ? club.likes : null,
         followed: typeof club.followed === 'boolean' ? club.followed : null,

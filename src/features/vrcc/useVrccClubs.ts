@@ -11,19 +11,15 @@ import { fromMyClubs, fromPublicClubs, type VrccClubListView } from './clubRow';
 import { vrccApi, type VrccConnection } from './vrccApi';
 
 /**
- * 社团列表：公开列表与玩家视角的切换。
+ * 社团列表的数据源切换。规则与地图榜相同，见 `useVrccController` 的 `refreshBoards`。
  *
- * 照着地图榜那套规矩（见 `useVrccController` 的 `refreshBoards`）：
+ * 1. 已连接且令牌含 `clubs` 权限时用 `/me/clubs`。否则用公开的 `/clubs`。
+ * 2. 玩家视角失败后，本次连接不再尝试。连接发生变化后重置。
+ * 3. 本地限流不触发降级。`throttled` 原样返回给调用方。
+ * 4. 缓存键包含数据源。两个数据源的缓存不混用，见 `queryKeys.vrccClubs`。
  *
- * 1. **能力判定**：连上且令牌带 `clubs` 才走 `/me/clubs`，否则走公开 `/clubs`。
- * 2. **一次性降级记忆**：玩家视角失败（`403 scope`、服务器不认、传输失败）之后
- *    这次连接不再试，免得每次翻页都先撞一次墙。连接变了就重置。
- * 3. **限流不是「用不了」**：`throttled` 原样留给调用方，不降级——否则玩家刷新
- *    一下就会看到列表来源被静默换掉。
- * 4. **键里带来源**：两套接口的缓存不能混（见 `queryKeys.vrccClubs`）。
- *
- * 和地图榜不同的地方：玩家视角**拿不到 `total`**，所以降级方向反过来——公开列表
- * 才有总数和分页。归一层把这件事表达成 `total: null`，面板据此隐藏「共 N 个」。
+ * 与地图榜的差别：玩家视角不提供 `total`。只有公开源有总数与分页。
+ * 归一化层把这种情况表示为 `total: null`。面板据此隐藏总数。
  */
 export function useVrccClubs({
     connection,

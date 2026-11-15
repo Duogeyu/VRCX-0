@@ -1,8 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { useState } from 'react';
+import {
+    ChevronLeft,
+    ChevronRight,
+    ChevronsLeft,
+    ChevronsRight
+} from 'lucide-react';
+import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useTiltGrid } from '@/lib/useTiltGrid';
+import { openGroupDialog } from '@/services/dialogService';
+import { openExternalLink } from '@/services/shellIntegrationService';
+import { Button } from '@/ui/shadcn/button';
 import { Spinner } from '@/ui/shadcn/spinner';
 
 import { buildPageItems } from '../boardPages';
@@ -10,10 +20,21 @@ import type { VrccClubRow } from '../clubRow';
 import { useVrccClubs } from '../useVrccClubs';
 import type { VrccConnection } from '../vrccApi';
 
-/** 一页几张。24 在左栏到全宽之间都能排成整齐的网格。 */
+/**
+ * 从群组链接取出群组 ID：`https://vrchat.com/home/group/grp_xxx` → `grp_xxx`。
+ *
+ * 社团就是 VRChat 群组。`code` 等于群组的 `shortCode.discriminator`。
+ * 点卡片打开群组详情，不新建详情页。群组详情已有公告、房间、活动、成员、相册、原始 JSON。
+ */
+function groupIdOf(url: string | null): string | null {
+    const match = /\b(grp_[0-9a-fA-F-]{36})\b/.exec(url ?? '');
+    return match ? match[1] : null;
+}
+
+/** 一页 24 张。左栏到全宽都能排成网格。 */
 const PAGE_SIZE = 24;
 
-/** 评级配色，和群组详情那张卡保持一致：金(4) → 紫(3) → 蓝(2) → 绿(1)。 */
+/** 评级配色。与群组详情那张卡一致：金(4)、紫(3)、蓝(2)、绿(1)。 */
 const GRADE_STYLE: Record<number, string> = {
     4: 'border-amber-500/50 text-amber-600 dark:text-amber-300',
     3: 'border-violet-500/45 text-violet-600 dark:text-violet-300',
@@ -21,7 +42,24 @@ const GRADE_STYLE: Record<number, string> = {
     1: 'border-emerald-500/45 text-emerald-600 dark:text-emerald-300'
 };
 
-function ClubCard({ club, rank }: { club: VrccClubRow; rank: number }) {
+/**
+ * 社团卡。上方是横幅图。下方是纸片。纸片压住横幅下沿。
+ *
+ * 横幅不画圆角。外层 `overflow-hidden` 把横幅两个上角裁成卡片圆角。
+ * 纸片有上圆角。纸片上移 36px。纸片上圆角外侧露出横幅。
+ *
+ * 横幅固定高 96px，用 `object-cover` 取中段。横幅原图比例 16:9。
+ * 字段 `banner` 为 `null` 时不渲染横幅。此时纸片贴顶，不加负边距。
+ */
+function ClubCard({
+    club,
+    rank,
+    onOpen
+}: {
+    club: VrccClubRow;
+    rank: number;
+    onOpen: (club: VrccClubRow) => void;
+}) {
     const { t } = useTranslation();
     const grade =
         typeof club.grade === 'number' && club.grade >= 1 && club.grade <= 4
@@ -32,90 +70,159 @@ function ClubCard({ club, rank }: { club: VrccClubRow; rank: number }) {
             ? t('vrcc.clubs.grade_unknown')
             : club.gradeName?.trim() || t(`vrcc.clubs.grade_${grade}`);
     const initial = Array.from(club.name ?? club.code)[0] ?? '?';
+    const hasBanner = Boolean(club.banner);
 
     return (
-        <li className="bg-card relative flex min-w-0 flex-col gap-2 rounded-lg border p-3">
-            <div className="flex min-w-0 items-start gap-2">
-                <span className="text-muted-foreground/60 w-5 shrink-0 text-right text-[11px] leading-6 tabular-nums">
-                    {rank}
-                </span>
-                {club.icon ? (
-                    <img
-                        src={club.icon}
-                        alt=""
-                        aria-hidden
-                        loading="lazy"
-                        referrerPolicy="no-referrer"
-                        className="border-border/50 size-6 shrink-0 rounded-md border object-cover"
-                    />
-                ) : (
-                    <span className="border-border/50 bg-muted text-muted-foreground flex size-6 shrink-0 items-center justify-center rounded-md border text-[11px] font-medium">
-                        {initial}
-                    </span>
-                )}
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                    {club.name?.trim() || club.code}
-                </span>
-            </div>
-
-            {club.lede?.trim() ? (
-                <p className="text-muted-foreground line-clamp-2 min-w-0 text-[11px] leading-snug break-words">
-                    {club.lede}
-                </p>
-            ) : null}
-
-            <div className="mt-auto flex min-w-0 flex-wrap items-center gap-1.5 text-[11px]">
-                {grade !== null ? (
-                    <span
-                        className={`inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${GRADE_STYLE[grade]}`}
-                    >
-                        {gradeLabel}
-                    </span>
-                ) : (
-                    <span className="border-border text-muted-foreground inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[10px]">
-                        {t('vrcc.clubs.grade_unknown')}
-                    </span>
-                )}
-                {club.members !== null ? (
-                    <span className="text-muted-foreground/80 shrink-0 tabular-nums">
-                        {t('vrcc.clubs.members', { count: club.members })}
-                    </span>
+        // 高度由内容决定，不让网格拉满。`auto-rows-fr` 会把整块高度平均分给每排，
+        // 卡片就会被拉成一张空纸。所以这里不加 `h-full`。
+        <li className="vrcc-club-card relative flex min-w-0 flex-col" data-tilt>
+            {/* 整张卡是一个按钮。点击打开该社团对应的群组详情。卡内不放外链。 */}
+            <button
+                type="button"
+                onClick={() => onOpen(club)}
+                aria-label={club.name?.trim() || club.code}
+                className="vrcc-club-card__rotor focus-visible:ring-ring/50 flex min-w-0 flex-1 cursor-pointer flex-col rounded-lg text-left focus-visible:ring-2 focus-visible:outline-none"
+            >
+                {hasBanner ? (
+                    // 照片左右各缩进 6px。照片比纸片窄，位于后层。
+                    // 圆角画在图片上。外层不建裁剪层，所以圆角可见。
+                    <div className="px-1.5">
+                        <div className="relative">
+                            <img
+                                src={club.banner ?? undefined}
+                                alt=""
+                                aria-hidden
+                                loading="lazy"
+                                decoding="async"
+                                referrerPolicy="no-referrer"
+                                className="h-24 w-full rounded-lg object-cover"
+                            />
+                            {/* 照片下段压暗。接缝因此不突兀。 */}
+                            <div className="pointer-events-none absolute inset-0 rounded-lg bg-gradient-to-t from-black/45 to-transparent" />
+                            {/* 照片右上角的反光。由柔和镜面光与 1px 顶边光组成。
+                            用纯白，不用前景色。底色是照片，白色表示反光。 */}
+                            <div className="pointer-events-none absolute inset-0 rounded-lg bg-[radial-gradient(62%_52%_at_100%_0%,rgba(255,255,255,0.30),rgba(255,255,255,0.08)_42%,transparent_70%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.20)]" />
+                        </div>
+                    </div>
                 ) : null}
-                {/* 点赞数与关注只有玩家视角给；公开列表这两项是 `null`，整项不渲染。 */}
-                {club.likes !== null ? (
-                    <span className="text-muted-foreground/80 shrink-0 tabular-nums">
-                        {t('vrcc.clubs.likes', { count: club.likes })}
-                    </span>
-                ) : null}
-                {club.followed === true ? (
-                    <span className="text-muted-foreground/80 shrink-0">
-                        {t('vrcc.clubs.followed')}
-                    </span>
-                ) : null}
-            </div>
 
-            {club.page ? (
-                <a
-                    href={club.page}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:text-primary/80 text-[10px] font-medium"
+                <div
+                    className={`bg-card/80 relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border p-3 backdrop-blur-sm ${
+                        hasBanner
+                            ? // 纸片满宽，比照片宽 12px。纸片上移 36px。阴影有两层。
+                              // 第一层是接触阴影。第二层是照片上的压暗。
+                              '-mt-9 shadow-[0_-2px_6px_-2px_rgba(0,0,0,0.7),0_-14px_26px_-12px_rgba(0,0,0,0.85)]'
+                            : ''
+                    }`}
                 >
-                    {t('vrcc.clubs.open')}
-                </a>
-            ) : null}
+                    {/*
+                     * 折射带。玻璃弯折背后的内容，本身不发光。
+                     * 这条 36px 的带子放横幅的放大模糊副本，不放白色图形。
+                     * 副本参数：`scale-105`、`blur-1.2px`、`opacity-55`。
+                     * 副本在接缝处与照片对齐，向下渐变回纸的底色。
+                     */}
+                    {hasBanner ? (
+                        <div
+                            aria-hidden
+                            className="pointer-events-none absolute inset-x-0 top-0 h-9 overflow-hidden"
+                        >
+                            <img
+                                src={club.banner ?? undefined}
+                                alt=""
+                                aria-hidden
+                                // 三个数值必须同时改。照片高 `h-24`（96px），纸片上移
+                                // `-mt-9`（36px）。副本上沿 = -(96 - 36) = -60px，即 `-top-15`。
+                                // 副本高度等于照片高 `h-24`。漏改会让接缝错位。
+                                // `origin-bottom` 让放大时下沿保持不动。
+                                className="absolute inset-x-1.5 -top-15 h-24 w-[calc(100%-12px)] origin-bottom scale-105 object-cover opacity-55 blur-[1.2px]"
+                            />
+                            {/* 向下渐变回纸的底色。色值与纸身相同，都是 `card/80`。
+                            否则这里会出现一条比纸更实的横线。 */}
+                            <div className="to-card/80 absolute inset-0 bg-gradient-to-b from-transparent via-transparent" />
+                        </div>
+                    ) : null}
+                    {/* 斜面高光。上沿一道白线，下沿一道暗线。 */}
+                    <div
+                        aria-hidden
+                        className="pointer-events-none absolute inset-0 rounded-lg shadow-[inset_0_1px_0_rgba(255,255,255,0.16),inset_0_-1px_0_rgba(0,0,0,0.45)]"
+                    />
+                    <div className="relative flex min-w-0 flex-1 flex-col gap-2">
+                        <div className="flex min-w-0 items-start gap-2">
+                            <span className="text-muted-foreground/60 w-5 shrink-0 text-right text-[11px] leading-6 tabular-nums">
+                                {rank}
+                            </span>
+                            {club.icon ? (
+                                <img
+                                    src={club.icon}
+                                    alt=""
+                                    aria-hidden
+                                    loading="lazy"
+                                    referrerPolicy="no-referrer"
+                                    className="border-border/50 size-6 shrink-0 rounded-md border object-cover"
+                                />
+                            ) : (
+                                <span className="border-border/50 bg-muted text-muted-foreground flex size-6 shrink-0 items-center justify-center rounded-md border text-[11px] font-medium">
+                                    {initial}
+                                </span>
+                            )}
+                            <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                                {club.name?.trim() || club.code}
+                            </span>
+                        </div>
+
+                        {/* 简介固定占两行。没有简介时留空，也占两行。
+                            这样不同卡片的纸片一样高，一排的下沿才对齐。 */}
+                        <p className="text-muted-foreground line-clamp-2 min-h-[2.4em] min-w-0 text-[11px] leading-snug break-words">
+                            {club.lede?.trim() ?? ''}
+                        </p>
+
+                        <div className="mt-auto flex min-w-0 flex-wrap items-center gap-1.5 text-[11px]">
+                            {grade !== null ? (
+                                <span
+                                    className={`inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${GRADE_STYLE[grade]}`}
+                                >
+                                    {gradeLabel}
+                                </span>
+                            ) : (
+                                <span className="border-border text-muted-foreground inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[10px]">
+                                    {t('vrcc.clubs.grade_unknown')}
+                                </span>
+                            )}
+                            {club.members !== null ? (
+                                <span className="text-muted-foreground/80 shrink-0 tabular-nums">
+                                    {t('vrcc.clubs.members', {
+                                        count: club.members
+                                    })}
+                                </span>
+                            ) : null}
+                            {/* 点赞数与关注只有玩家视角给；公开列表这两项是 `null`，整项不渲染。 */}
+                            {club.likes !== null ? (
+                                <span className="text-muted-foreground/80 shrink-0 tabular-nums">
+                                    {t('vrcc.clubs.likes', {
+                                        count: club.likes
+                                    })}
+                                </span>
+                            ) : null}
+                            {club.followed === true ? (
+                                <span className="text-muted-foreground/80 shrink-0">
+                                    {t('vrcc.clubs.followed')}
+                                </span>
+                            ) : null}
+                        </div>
+                    </div>
+                </div>
+            </button>
         </li>
     );
 }
 
 /**
- * 社团列表（公开目录）。
+ * 社团列表。
  *
- * 数据来源在两套接口之间切换：连上且令牌带 `clubs` 时用 `/me/clubs`（多了点赞、
- * 关注、只给成员看的社团），否则用公开 `/clubs`。切换逻辑在 `useVrccClubs`。
+ * 数据源有两个。已连接且令牌含 `clubs` 权限时用 `/me/clubs`。
+ * 否则用公开的 `/clubs`。切换逻辑在 `useVrccClubs`。
  *
- * **总数只在公开来源下存在**：玩家视角没有 `total`，这时「共 N 个」和分页器
- * 整条不渲染——拿拿到的条数冒充总数就是撒谎。
+ * 总数只有公开源提供。玩家视角没有 `total`。此时总数与分页器都不渲染。
  */
 export function VrccClubsPanel({
     connection
@@ -123,18 +230,69 @@ export function VrccClubsPanel({
     connection: VrccConnection | null;
 }) {
     const { t } = useTranslation();
-    const [page, setPage] = useState(0);
+    /**
+     * 当前页的起点。用 `offset` 而不是页码，因为要兼容两种翻页方式：
+     *
+     * - 已知 `total`：按 24 一页走，`offset` 一定是 24 的整数倍。
+     * - 不知道 `total`：老服务器可能只给 `next`。那时没有页码可算，
+     *   只能按服务器给的 `next` 前进。`trail` 记住走过的位置，用于回退。
+     */
+    const [offset, setOffset] = useState(0);
+    const [trail, setTrail] = useState<number[]>([]);
+    // 模型榜的方图卡用 12°，这里用 7°。这张卡更窄，正文在纸片上。
+    // `scale: 1.03` 只给一点层次。再大会与相邻卡重叠。
+    const tiltRef = useTiltGrid<HTMLUListElement>({
+        amplitude: 7,
+        scale: 1.03
+    });
     const { view, isLoading, error, source } = useVrccClubs({
         connection,
         limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE
+        offset
     });
+    // 点卡片打开群组详情。`group` 缺失时（部分成员专属社团）退回打开社团页。
+    // 这样每次点击都有结果。
+    const openClub = useCallback((club: VrccClubRow) => {
+        const groupId = groupIdOf(club.group);
+        if (groupId) {
+            openGroupDialog({
+                groupId,
+                title: club.name?.trim() || club.code
+            });
+            return;
+        }
+        if (club.page) {
+            void openExternalLink(club.page);
+        }
+    }, []);
 
     const rows = view?.rows ?? [];
     const total = view?.total ?? null;
+    const next = view?.next ?? null;
+    /** 已知总数时才知道一共几页。未知时 `null`，分页器只画前后翻页。 */
     const pageCount =
-        total !== null ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : 1;
-    const safePage = Math.min(page, pageCount - 1);
+        total !== null ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : null;
+    const pageIndex = Math.floor(offset / PAGE_SIZE);
+    const canPrev = trail.length > 0 || offset > 0;
+    const canNext =
+        pageCount !== null ? pageIndex + 1 < pageCount : next !== null;
+
+    /** 所有翻页都经这里：记住当前位置，回退才有路。 */
+    const goTo = (target: number) => {
+        if (target === offset) {
+            return;
+        }
+        setTrail((items) => [...items, offset]);
+        setOffset(target);
+    };
+    const goPrev = () => {
+        const previous = trail[trail.length - 1];
+        setTrail((items) => items.slice(0, -1));
+        setOffset(previous ?? Math.max(0, offset - PAGE_SIZE));
+    };
+    const goNext = () => {
+        goTo(next !== null && pageCount === null ? next : offset + PAGE_SIZE);
+    };
 
     if (isLoading && !view) {
         return (
@@ -154,7 +312,9 @@ export function VrccClubsPanel({
     }
 
     return (
-        <div className="flex min-h-0 flex-1 flex-col gap-3 p-1">
+        // `h-full` 不能省。页签内容是块级元素，`flex-1` 在块级父元素里无效。
+        // 没有 `h-full` 时网格不会撑满，分页器浮在内容下面，沉不到底部。
+        <div className="flex h-full min-h-0 flex-col gap-2 p-1">
             <div className="flex min-w-0 items-center gap-3">
                 {total !== null ? (
                     <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
@@ -173,60 +333,126 @@ export function VrccClubsPanel({
                     {t('vrcc.clubs.empty')}
                 </p>
             ) : (
-                <ul className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2 overflow-y-auto">
+                // 倾斜会让边缘卡片超出容器。滚动容器只要一个轴是 `auto`，
+                // 另一个轴的 `visible` 会被规范改成 `auto`，因此出现横向滚动条。
+                //
+                // `px-2.5` 留出余量。倾斜后的边角碰不到裁剪线，所以不会被切掉。
+                // `overflow-x-clip` 兜底。`clip` 不创建滚动容器，不产生滚动条。
+                // 纵向滚动照常。
+                <ul
+                    ref={tiltRef}
+                    className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(min(220px,100%),1fr))] gap-2 overflow-x-clip overflow-y-auto px-2.5 pb-1"
+                >
                     {rows.map((club, index) => (
                         <ClubCard
-                            key={club.code || `${safePage}-${index}`}
+                            key={club.code || `${offset}-${index}`}
                             club={club}
-                            rank={safePage * PAGE_SIZE + index + 1}
+                            rank={offset + index + 1}
+                            onOpen={openClub}
                         />
                     ))}
                 </ul>
             )}
 
-            {total !== null && pageCount > 1 ? (
-                <div className="flex shrink-0 items-center gap-1">
-                    <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground rounded px-2 py-1 text-xs disabled:opacity-40"
-                        disabled={safePage <= 0}
-                        onClick={() => setPage(safePage - 1)}
-                    >
-                        {t('vrcc.clubs.prev')}
-                    </button>
-                    {buildPageItems(safePage + 1, pageCount).map((item) =>
+            {/* 分页器一直显示，和其他榜单一致。单页时四个按钮自然全部置灰。
+                不藏起来有两个原因：玩家一眼看出「这里就是全部」；翻到最后一页时
+                数据变短，藏掉整行会让下面的内容往上窜一截。 */}
+            <nav className="flex shrink-0 items-center justify-end gap-0.5 pt-2">
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    className="size-6 p-0"
+                    disabled={!canPrev}
+                    aria-label={t('table.pagination.page_number', { page: 1 })}
+                    onClick={() => {
+                        setTrail([]);
+                        setOffset(0);
+                    }}
+                >
+                    <ChevronsLeft className="size-3.5" />
+                </Button>
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    className="size-6 p-0"
+                    disabled={!canPrev}
+                    aria-label={t('table.pagination.previous')}
+                    onClick={goPrev}
+                >
+                    <ChevronLeft className="size-3.5" />
+                </Button>
+                {pageCount !== null ? (
+                    buildPageItems(pageIndex + 1, pageCount).map((item) =>
                         item.kind === 'gap' ? (
                             <span
                                 key={`gap-${item.key}`}
-                                className="text-muted-foreground/60 px-1 text-xs"
+                                aria-hidden="true"
+                                className="text-muted-foreground w-4 text-center text-xs"
                             >
                                 …
                             </span>
                         ) : (
-                            <button
+                            <Button
                                 key={item.page}
-                                type="button"
-                                className={`min-w-7 rounded px-2 py-1 text-xs tabular-nums ${
-                                    item.page === safePage + 1
-                                        ? 'bg-muted text-foreground'
-                                        : 'text-muted-foreground hover:text-foreground'
-                                }`}
-                                onClick={() => setPage(item.page - 1)}
+                                variant={
+                                    item.page === pageIndex + 1
+                                        ? 'secondary'
+                                        : 'ghost'
+                                }
+                                size="sm"
+                                className="h-6 min-w-6 px-1 text-xs tabular-nums"
+                                aria-current={
+                                    item.page === pageIndex + 1
+                                        ? 'page'
+                                        : undefined
+                                }
+                                aria-label={t('table.pagination.page_number', {
+                                    page: item.page
+                                })}
+                                onClick={() =>
+                                    goTo((item.page - 1) * PAGE_SIZE)
+                                }
                             >
                                 {item.page}
-                            </button>
+                            </Button>
                         )
-                    )}
-                    <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground rounded px-2 py-1 text-xs disabled:opacity-40"
-                        disabled={safePage >= pageCount - 1}
-                        onClick={() => setPage(safePage + 1)}
+                    )
+                ) : (
+                    // 服务器没给 `total`：算不出总页数，就只显示当前页。
+                    <span
+                        aria-current="page"
+                        className="text-muted-foreground min-w-6 px-1 text-center text-xs tabular-nums"
                     >
-                        {t('vrcc.clubs.next')}
-                    </button>
-                </div>
-            ) : null}
+                        {pageIndex + 1}
+                    </span>
+                )}
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    className="size-6 p-0"
+                    disabled={!canNext}
+                    aria-label={t('table.pagination.next')}
+                    onClick={goNext}
+                >
+                    <ChevronRight className="size-3.5" />
+                </Button>
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    className="size-6 p-0"
+                    disabled={pageCount === null || pageIndex + 1 >= pageCount}
+                    aria-label={t('table.pagination.page_number', {
+                        page: pageCount ?? 1
+                    })}
+                    onClick={() => {
+                        if (pageCount !== null) {
+                            goTo((pageCount - 1) * PAGE_SIZE);
+                        }
+                    }}
+                >
+                    <ChevronsRight className="size-3.5" />
+                </Button>
+            </nav>
         </div>
     );
 }
