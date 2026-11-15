@@ -17,7 +17,8 @@
 
 use vrcx_0_vrcc_contracts::{
     VrccAnnouncements, VrccBoard, VrccErrorBody, VrccModelBoard, VrccModelDetail, VrccMutuals,
-    VrccMyMap, VrccNotes, VrccRecentNotifications, VrccToday, VrccTokenResponse, VrccUnread,
+    VrccMyBoard, VrccMyMap, VrccNotes, VrccRecentNotifications, VrccToday, VrccTokenResponse,
+    VrccUnread,
 };
 
 fn parse<T: serde::de::DeserializeOwned>(json: &str) -> T {
@@ -552,4 +553,122 @@ fn model_detail_parses_with_hots() {
     let empty: VrccModelDetail = parse(r#"{}"#);
     assert!(empty.model.is_none());
     assert!(empty.hots.is_empty());
+}
+
+/// `GET /me/board` 的四种排序各给**不同形状**，而且缺字段不是异常是常态。
+///
+/// 这里的样本按 2026-11 真机实测的字段裁剪方式写（值已改写），钉住的是：
+///
+/// - `top` / `new`：有 `rank`，没有 `week`、没有 `mine`；
+/// - `week`：有 `week`，**没有 `rank`**（名次就是列表位置）；
+/// - `went`：有 `mine` / `wentAt` / `ratedAt`，没有 `rank`；
+/// - 带 `q` 搜索：服务器把 `sort` 改写成 `"find"` 并回显 `q`。
+///
+/// 还有一种最容易踩的：**两个接口的 `hot` 同名不同形**。公开榜是
+/// `{text, by, up, went}`，这里是 `{id, text, up, vote, went, mine?}`。
+#[test]
+fn my_board_parses_every_sort_shape() {
+    // --- top：字段最全的一档 ---
+    let top: VrccMyBoard = parse(
+        r#"{"sort":"top","min":1,"dot":{"maps":false,"went":false},"maps":[
+            {"id":"wrld_aaaaaaaa-0000-4000-8000-0000000000a1","world":"wrld_aaaaaaaa-0000-4000-8000-0000000000a1",
+             "name":"星夜茶屋","author":"某位作者","cap":64,"img":"/api/match?xdimg=wrld_a1",
+             "imgUrl":"https://vrcc.cc/api/match?xdimg=wrld_a1","status":"ok","avg":9.6,"adj":9.47,
+             "raters":60,"went":158,"rank":1,"weight":"mid","room":false,"teen":true,"intro":null,
+             "hot":{"id":181,"text":"愿夜色温柔","up":12,"vote":0,"went":true},
+             "hots":[{"id":181,"text":"愿夜色温柔","up":12,"vote":0,"went":true},
+                     {"id":605,"text":"真的孤吗","up":4,"vote":1},
+                     {"id":139,"mine":true,"text":"倒头就睡","up":3,"vote":0,"went":true}]}
+        ]}"#,
+    );
+    assert_eq!(top.sort.as_deref(), Some("top"));
+    assert_eq!(top.q, None);
+    assert!(top.weeks.is_empty());
+    assert_eq!(top.need, None);
+
+    let row = &top.maps[0];
+    assert_eq!(row.rank, Some(1));
+    // 排序用的是 adj 不是 avg，两个数差得不多但确实不同。
+    assert_eq!(row.avg, Some(9.6));
+    assert_eq!(row.adj, Some(9.47));
+    assert_eq!(row.cap, Some(64));
+    assert_eq!(row.went, Some(158));
+    assert_eq!(row.weight.as_deref(), Some("mid"));
+    assert_eq!(row.room, Some(false));
+    assert_eq!(row.teen, Some(true));
+    // top 排序下既没有 week 也没有「我的评分」。
+    assert_eq!(row.week, None);
+    assert_eq!(row.mine, None);
+
+    // 热评：id 是投票要用的定位键，vote 是我投的票。
+    let hot = row.hot.as_ref().expect("hot 应当解析");
+    assert_eq!(hot.id, Some(181));
+    assert_eq!(hot.vote, Some(0));
+    assert_eq!(hot.mine, None);
+    assert_eq!(row.hots.len(), 3);
+    // 只有自己写的那条才带 mine。
+    assert_eq!(row.hots[2].mine, Some(true));
+    assert_eq!(row.hots[0].mine, None);
+    // `history` 里没有 `by` 就没有——不能拿公开榜的出处来填。
+    assert_eq!(row.hots[0].text.as_deref(), Some("愿夜色温柔"));
+
+    // --- week：有 week，没有 rank，顶层多 weeks ---
+    let week: VrccMyBoard = parse(
+        r#"{"sort":"week","min":1,"dot":{"maps":false,"went":false},
+            "weeks":[{"from":1793548800000,"w":2965},{"from":1792944000000,"w":2964}],
+            "maps":[{"id":"wrld_c3cf550b-b987-45ef-8b96-cc61fa6c2fde","world":"wrld_c3cf550b-b987-45ef-8b96-cc61fa6c2fde",
+                     "name":"时间之阶","avg":9.9,"adj":9.29,"raters":14,"weight":null,"room":false,"week":2}]}"#,
+    );
+    assert_eq!(week.weeks.len(), 2);
+    assert_eq!(week.weeks[0].w, Some(2965));
+    assert_eq!(week.maps[0].week, Some(2));
+    // 本周榜下没有 rank：调用方必须自己用列表位置。
+    assert_eq!(week.maps[0].rank, None);
+    // weight 可以是 null，不能当成「轻」。
+    assert_eq!(week.maps[0].weight, None);
+
+    // --- went：带我的评分与时间戳，顶层多 need ---
+    let went: VrccMyBoard = parse(
+        r#"{"sort":"went","min":1,"need":"go","dot":{"maps":false,"went":false},
+            "maps":[{"id":"wrld_79827485-71a5-4699-b04f-cb7b257edaa5","world":"wrld_79827485-71a5-4699-b04f-cb7b257edaa5",
+                     "name":"天井","avg":9.9,"adj":9.02,"raters":9,"went":16,"mine":9,
+                     "wentAt":1794335213188,"ratedAt":1794335213000,"weight":"light","room":false}]}"#,
+    );
+    assert_eq!(went.need.as_deref(), Some("go"));
+    assert_eq!(went.maps[0].mine, Some(9));
+    assert_eq!(went.maps[0].went_at, Some(1_794_335_213_188));
+    assert_eq!(went.maps[0].rated_at, Some(1_794_335_213_000));
+
+    // 没打过分就没有 ratedAt（实测 6 张里只有 1 张有）。
+    let unrated: VrccMyBoard =
+        parse(r#"{"sort":"went","maps":[{"world":"wrld_a","mine":8,"wentAt":1794335213188}]}"#);
+    assert_eq!(unrated.maps[0].rated_at, None);
+
+    // --- 搜索：sort 变成 "find"，q 回显 ---
+    let found: VrccMyBoard =
+        parse(r#"{"sort":"find","q":"孤","min":1,"maps":[{"world":"wrld_a"}]}"#);
+    assert_eq!(found.sort.as_deref(), Some("find"));
+    assert_eq!(found.q.as_deref(), Some("孤"));
+
+    // --- 老服务器 / 最小答复：只有 world 也能解析 ---
+    let minimal: VrccMyBoard = parse(r#"{"maps":[{"world":"wrld_a"}]}"#);
+    assert_eq!(minimal.maps.len(), 1);
+    assert_eq!(minimal.maps[0].name, None);
+    assert_eq!(minimal.maps[0].hots.len(), 0);
+    assert!(minimal.maps[0].hot.is_none());
+    assert!(minimal.weeks.is_empty());
+}
+
+/// `me/board` 的 60 行上限不影响解析，但**`limit` 不生效**要靠调用方记住。
+///
+/// 这条测试守的是「别哪天有人看到 `maps.len() == 60` 就以为数据丢了」：
+/// 服务器对 `top` / `new` 固定给 60 行，翻页参数一律忽略。
+#[test]
+fn my_board_rows_are_capped_at_sixty_by_the_server() {
+    let rows: Vec<String> = (0..60)
+        .map(|index| format!(r#"{{"world":"wrld_{index:02}"}}"#))
+        .collect();
+    let payload = format!(r#"{{"sort":"top","maps":[{}]}}"#, rows.join(","));
+    let board: VrccMyBoard = parse(&payload);
+    assert_eq!(board.maps.len(), 60);
 }

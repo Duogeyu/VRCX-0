@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { scopeGrants } from '@/lib/vrccScope';
 import { tauriClient } from '@/platform/tauri/client';
 import { copyTextToClipboard } from '@/services/clipboardService';
 import {
@@ -16,6 +17,12 @@ import { useRuntimeStore } from '@/state/runtimeStore';
 import { useVrccUnreadStore } from '@/state/vrccUnreadStore';
 import { useVrcNotificationStore } from '@/state/vrcNotificationStore';
 
+import {
+    fromMyBoard,
+    fromPublicBoard,
+    type VrccBoardView,
+    type VrccBoardViewSort
+} from './boardRow';
 import { resetModelCoverCache } from './useModelCoverCache';
 import { resetModelDetailCache } from './useModelDetail';
 import { loadAnnouncements } from './vrccAnnouncementLoader';
@@ -23,7 +30,6 @@ import {
     vrccApi,
     VrccError,
     type VrccAnnouncements,
-    type VrccBoard,
     type VrccBoardSort,
     type VrccConnection,
     type VrccCrossingCards,
@@ -59,6 +65,14 @@ const VRCC_CONNECTION_CHANGED_EVENT = 'vrccConnectionChanged';
  * 60 秒再问会等着）。切回刚看过的排序直接用手上的，不让玩家干等。
  */
 const BOARD_REUSE_MS = 60_000;
+
+/**
+ * 公开榜一次取满的条数（接口上限）。
+ *
+ * 玩家视角（`/me/board`）**没有 limit 参数**，服务器固定最多给 60 条，
+ * 所以切过去会比公开榜少 40 条。这是既定代价，不是 bug。
+ */
+const PUBLIC_BOARD_LIMIT = 100;
 
 /**
  * 两次「申请连接码」之间至少隔多久（秒）。
@@ -136,9 +150,18 @@ type State = {
     tab: VrccTab;
     connection: VrccConnection | null;
     usage: VrccUsage | null;
-    boards: VrccBoard | null;
-    /** 正在看的地图榜排序。 */
-    boardSort: VrccBoardSort;
+    /** 地图榜（已归一化：不区分这次是哪个接口给的）。 */
+    boards: VrccBoardView | null;
+    /** 正在看的地图榜排序。`went` 只有玩家视角支持。 */
+    boardSort: VrccBoardViewSort;
+    /**
+     * 已生效的搜索词；空串表示不搜索。
+     *
+     * 和输入框里的文字分开：搜索走 `/me/board?q=`，**每个新词在限流器里都是
+     * 一个新槽**，所以边敲边搜等于把所有请求全放出去。这里只在玩家按下回车
+     * 或点搜索时才更新。
+     */
+    boardQuery: string;
     /**
      * 服务器认不认 `sort`（1.13.0 起）。要了本周榜却拿回没有 `sort` 的总榜时
      * 为 false，界面藏起切换。
@@ -241,6 +264,7 @@ const initialState: State = {
     usage: null,
     boards: null,
     boardSort: 'top',
+    boardQuery: '',
     boardSortSupported: true,
     models: null,
     modelSort: 'top',
@@ -282,18 +306,52 @@ export function useVrccController() {
     const mounted = useRef(true);
     /** 设备码冷却的倒计时句柄。 */
     const cooldownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-    /** 各种排序最近拿到的地图榜，切回来时直接用。 */
+    /**
+     * 各种排序 / 搜索词最近拿到的地图榜，切回来时直接用。
+     *
+     * 键里带**数据源**（`mine` / `public`）：连接状态一变，同一份排序在两个
+     * 接口下的内容完全不同，不区分就会把公开榜当成玩家视角继续显示。
+     */
     const boardCache = useRef<
-        Partial<Record<VrccBoardSort, { board: VrccBoard; at: number }>>
-    >({});
+        Map<
+            string,
+            {
+                view: VrccBoardView;
+                sort: VrccBoardViewSort;
+                sortSupported: boolean;
+                at: number;
+            }
+        >
+    >(new Map());
     /** 正在看的排序；重新加载时照它拉，而不是跳回总榜。 */
-    const boardSortRef = useRef<VrccBoardSort>('top');
+    const boardSortRef = useRef<VrccBoardViewSort>('top');
     /** 各种排序最近拿到的模型榜，切回来时直接用。 */
     const modelCache = useRef<
         Partial<Record<VrccBoardSort, { board: VrccModelBoard; at: number }>>
     >({});
     /** 正在看的模型榜排序。 */
     const modelSortRef = useRef<VrccBoardSort>('top');
+    /** 已生效的搜索词；和 `state.boardQuery` 同步，供回调里同步读取。 */
+    const boardQueryRef = useRef('');
+    /**
+     * 最近一次连接状态。
+     *
+     * 地图榜要不要切到玩家视角**取决于连接状态**，但 `refreshBoards` 必须
+     * 保持空依赖（它是 `load` 的依赖，而 `load` 靠「所有依赖都稳定」只跑
+     * 一次）。把连接状态放进依赖会让 `load` 每次连接变化都重跑一遍整页加载，
+     * 所以这里用 ref 读取。
+     */
+    const connectionRef = useRef<VrccConnection | null>(null);
+    /**
+     * `/me/board` 试过、但这次连接下用不了。
+     *
+     * 三种情况都会置位：令牌缺 `maps`（`403 scope`，`dev-` 标识下的常态）、
+     * 服务器不认这个接口、传输失败。置位后**这次连接内不再重试**——否则每次
+     * 刷新榜单都要先撞一次 403，白白多花一次请求。
+     *
+     * 每次拿到新的连接状态就清掉，让玩家重新授权后能自然恢复。
+     */
+    const myBoardUnavailable = useRef(false);
     /**
      * 个人数据（所在地图、互相连上）的请求代次。
      *
@@ -367,37 +425,159 @@ export function useVrccController() {
             vrccApi.connection(),
             vrccApi.usage()
         ]);
+        // 连接状态变了，地图榜的数据源可能跟着变：清掉「玩家视角用不了」的
+        // 记忆，也顺手丢掉上一份缓存——新的一份可能完全不一样。
+        connectionRef.current = connection;
+        myBoardUnavailable.current = false;
+        boardCache.current.clear();
         patch({ connection, usage });
         return connection;
     }, [patch]);
 
     /**
-     * 地图榜：官方说明服务器最多 5 分钟更新一次，问再勤也是同一份。
+     * 落一份榜单到界面，并记住当前排序。
      *
-     * `sort` 是本周榜或新上榜、回来的却没有 `sort` 时，服务器还不认这个参数，
-     * 回的是总榜：照总榜显示，并藏起切换。
+     * 单拎出来是因为「缓存命中」和「刚拉回来」两条路都要做同一件事。
      */
-    const refreshBoards = useCallback(
-        async (sort: VrccBoardSort = 'top', reuse = false) => {
-            const cached = boardCache.current[sort];
-            if (reuse && cached && Date.now() - cached.at < BOARD_REUSE_MS) {
-                boardSortRef.current = sort;
-                patch({ boards: cached.board, boardSort: sort });
-                return;
-            }
-            // 100 是接口允许的上限。一次取满，面板在本地分页——翻页不再发请求。
-            const boards = await vrccApi.boards(100, sort);
-            if (sort !== 'top' && boards.sort == null) {
-                boardCache.current.top = { board: boards, at: Date.now() };
-                boardSortRef.current = 'top';
-                patch({ boards, boardSort: 'top', boardSortSupported: false });
-                return;
-            }
-            boardCache.current[sort] = { board: boards, at: Date.now() };
+    const applyBoard = useCallback(
+        (
+            view: VrccBoardView,
+            sort: VrccBoardViewSort,
+            sortSupported: boolean
+        ) => {
             boardSortRef.current = sort;
-            patch({ boards, boardSort: sort });
+            patch({
+                boards: view,
+                boardSort: sort,
+                boardSortSupported: sortSupported
+            });
         },
         [patch]
+    );
+
+    /**
+     * 地图榜：官方说明服务器最多 5 分钟更新一次，问再勤也是同一份。
+     *
+     * ## 两个数据源
+     *
+     * 连上且令牌带 `maps` 时走 `/me/board`（玩家视角：去过几次、开房角标、
+     * 人数上限、热评、我的评分、搜索）；否则走公开榜 `/boards/maps`。
+     *
+     * **宁可降级也不报错**：缺权限（`403 scope`，`dev-` 标识下是常态）、
+     * 服务器不认这个接口、传输失败，三种都落到公开榜。玩家要看的是榜单，
+     * 不是一份「为什么看不到玩家视角」的报错。
+     *
+     * ## 条数
+     *
+     * 公开榜一次 100 条（接口上限）；玩家视角**一次最多 60 条，而且
+     * `limit` / `offset` / `page` 全被服务器静默忽略**。切过去会少 40 条，
+     * 这是既定代价。
+     *
+     * ## 老服务器
+     *
+     * 要了本周榜或新上榜、回来的却没有 `sort`，说明服务器还不认这个参数，
+     * 它回的是总榜：照总榜显示，并藏起切换。
+     */
+    const refreshBoards = useCallback(
+        async (sort: VrccBoardViewSort = 'top', reuse = false) => {
+            const connection = connectionRef.current;
+            const wantsMine =
+                connection?.connected === true &&
+                scopeGrants(connection.scope, 'maps') &&
+                !myBoardUnavailable.current;
+            // 「我去过的」和搜索都只有玩家视角有。降级时退回总榜并丢掉搜索词，
+            // 而不是发一个必然 403 的请求、再给玩家弹一条错误。
+            const wanted: VrccBoardViewSort = wantsMine
+                ? sort
+                : sort === 'went'
+                  ? 'top'
+                  : sort;
+            const query = wantsMine ? boardQueryRef.current.trim() : '';
+            const cacheKey = `${wantsMine ? 'mine' : 'public'}|${wanted}|${query}`;
+
+            const remember = (
+                key: string,
+                view: VrccBoardView,
+                actualSort: VrccBoardViewSort,
+                sortSupported: boolean
+            ) => {
+                boardCache.current.set(key, {
+                    view,
+                    sort: actualSort,
+                    sortSupported,
+                    at: Date.now()
+                });
+                applyBoard(view, actualSort, sortSupported);
+            };
+
+            const cached = boardCache.current.get(cacheKey);
+            if (reuse && cached && Date.now() - cached.at < BOARD_REUSE_MS) {
+                applyBoard(cached.view, cached.sort, cached.sortSupported);
+                return;
+            }
+
+            if (wantsMine) {
+                try {
+                    const board = await vrccApi.myBoard(wanted, query || null);
+                    remember(cacheKey, fromMyBoard(board), wanted, true);
+                    return;
+                } catch (error) {
+                    // **本地限流不是「用不了」**。
+                    //
+                    // 同一个排序（同一个 `q` 也算同一份）60 秒内问第二次时，
+                    // 后端会在本地就把请求挡下来。那是「等一下再来」，不是
+                    // 「这次连接下看不了玩家视角」。早先这里一律当成后者，
+                    // 结果玩家清空搜索框回车的瞬间，搜索框和「我去过的」
+                    // 一起消失了——因为界面被静默降级成了公开榜。
+                    //
+                    // 原样抛给调用方：它照常上报一条「太频繁」，而界面保持
+                    // 不动（这次没有走到 `applyBoard`）。
+                    if (
+                        error instanceof VrccError &&
+                        error.kind === 'throttled'
+                    ) {
+                        throw error;
+                    }
+                    // 缺权限（`403 scope`）、服务器不认这个接口、传输失败：
+                    // 这次连接下玩家视角就别再试了，免得每次刷新都先撞一次。
+                    myBoardUnavailable.current = true;
+                    console.info(
+                        '[vrcc] my board unavailable, using the public board:',
+                        error
+                    );
+                }
+            }
+
+            const publicSort: VrccBoardSort =
+                wanted === 'went' ? 'top' : wanted;
+            // **键要重算**：上面那个是按「打算走玩家视角」算的。用同一个键
+            // 缓存公开榜的结果，会让下一次（这时已经不再试玩家视角了）建的
+            // 键对不上，于是同一份榜单被重复请求一遍。
+            const publicKey = `public|${publicSort}|`;
+            const reusePublic = boardCache.current.get(publicKey);
+            if (
+                reuse &&
+                reusePublic &&
+                Date.now() - reusePublic.at < BOARD_REUSE_MS
+            ) {
+                applyBoard(
+                    reusePublic.view,
+                    reusePublic.sort,
+                    reusePublic.sortSupported
+                );
+                return;
+            }
+
+            const board = await vrccApi.boards(PUBLIC_BOARD_LIMIT, publicSort);
+            const view = fromPublicBoard(board);
+            if (publicSort !== 'top' && board.sort == null) {
+                // 服务器回的是总榜，不能当本周榜显示。
+                remember(publicKey, view, 'top', false);
+                return;
+            }
+            remember(publicKey, view, publicSort, true);
+        },
+        [applyBoard]
     );
 
     /**
@@ -896,9 +1076,21 @@ export function useVrccController() {
         });
         subscribe(VRCC_CONNECTION_CHANGED_EVENT, () => {
             console.info('[vrcc] connection changed event received');
-            refreshConnection().catch((error) => {
-                if (!disposed) reportError(error, 'refreshConnection');
-            });
+            refreshConnection()
+                .then(() => {
+                    // 连接状态一变，地图榜的数据源可能跟着换（公开榜 ↔ 玩家
+                    // 视角）。不重拉的话，刚连上的玩家还得自己再点一次刷新
+                    // 才看得到「我去过的」。
+                    if (disposed) return;
+                    return refreshBoards(boardSortRef.current).catch(
+                        (error: unknown) => {
+                            if (!disposed) reportError(error, 'refreshBoards');
+                        }
+                    );
+                })
+                .catch((error) => {
+                    if (!disposed) reportError(error, 'refreshConnection');
+                });
         });
 
         return () => {
@@ -908,6 +1100,7 @@ export function useVrccController() {
         };
     }, [
         state.connection?.connected,
+        refreshBoards,
         refreshConnection,
         refreshRecent,
         refreshUnread,
@@ -1034,7 +1227,7 @@ export function useVrccController() {
 
     /** 切换地图榜的排序。刚看过的直接用手上的，不再请求。 */
     const setBoardSort = useCallback(
-        (sort: VrccBoardSort) => {
+        (sort: VrccBoardViewSort) => {
             refreshBoards(sort, true).catch((error) => {
                 reportError(error, 'refreshBoards');
             });
@@ -1050,6 +1243,33 @@ export function useVrccController() {
             void refreshModels(sort, true);
         },
         [refreshModels]
+    );
+
+    /**
+     * 提交一个搜索词；空串表示退出搜索。
+     *
+     * ## 为什么不做实时搜索
+     *
+     * 搜索走 `/me/board?q=`，而限流器把 `q` 当成资源身份的一部分（换一个词
+     * 就是另一份列表，这是对的）。于是**每个新词都是一个新的限流槽**，
+     * 边敲边搜等于把请求全部放出去，本地那 60 秒的间隔一次也挡不住。
+     * 所以只在玩家按下回车、点搜索时才真正发请求。
+     *
+     * ## 清空搜索优先用手上的
+     *
+     * 退出搜索是「回到刚才那份列表」，那份就在缓存里。**必须走缓存**
+     * （`reuse=true`）：这个排序的限流槽可能几十秒前刚用过，直连请求会很
+     * 大概率被本地 60 秒间隔挡住，玩家看到的是「清空搜索以后什么都没变」。
+     */
+    const setBoardQuery = useCallback(
+        (query: string) => {
+            boardQueryRef.current = query;
+            patch({ boardQuery: query });
+            refreshBoards(boardSortRef.current, true).catch((error) => {
+                reportError(error, 'refreshBoards');
+            });
+        },
+        [patch, refreshBoards, reportError]
     );
 
     /**
@@ -1282,6 +1502,7 @@ export function useVrccController() {
         setBoardSort,
         refreshModels: () => refreshModels(modelSortRef.current),
         setModelSort,
+        setBoardQuery,
         setNotificationsView,
         refreshMyMap,
         refreshMutuals,

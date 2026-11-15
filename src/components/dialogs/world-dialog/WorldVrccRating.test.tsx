@@ -8,10 +8,14 @@ import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 
 const appVrccMapPage = vi.fn();
+const appVrccMyMapPage = vi.fn();
+const appVrccConnection = vi.fn();
 
 vi.mock('@/platform/tauri/bindings', () => ({
     commands: {
-        appVrccMapPage: (...args: unknown[]) => appVrccMapPage(...args)
+        appVrccMapPage: (...args: unknown[]) => appVrccMapPage(...args),
+        appVrccMyMapPage: (...args: unknown[]) => appVrccMyMapPage(...args),
+        appVrccConnection: (...args: unknown[]) => appVrccConnection(...args)
     }
 }));
 
@@ -65,6 +69,12 @@ function mapPage(overrides: Record<string, unknown> = {}) {
 describe('WorldVrccRating', () => {
     beforeEach(() => {
         appVrccMapPage.mockReset();
+        appVrccMyMapPage.mockReset();
+        appVrccConnection.mockReset();
+        // 默认**没连上**：带令牌的那条请求不该发出去。要测介绍时由用例自己
+        // 把 `scope` 换成带 `maps` 的串。
+        appVrccConnection.mockResolvedValue({ scope: 'profile' });
+        appVrccMyMapPage.mockResolvedValue(null);
     });
 
     afterEach(() => {
@@ -156,6 +166,68 @@ describe('WorldVrccRating', () => {
         renderWithClient(<WorldVrccRating worldId="wrld_test" />);
 
         expect(await screen.findByText('1 人打分')).toBeTruthy();
+    });
+
+    it('连上且带 maps 权限时，标题下显示地图介绍', async () => {
+        appVrccMapPage.mockResolvedValue(mapPage());
+        appVrccConnection.mockResolvedValue({ scope: 'profile maps' });
+        appVrccMyMapPage.mockResolvedValue({
+            intro: { id: 1, text: '夜色温柔的老地方，适合一个人待着' }
+        });
+        renderWithClient(<WorldVrccRating worldId="wrld_test" />);
+
+        expect(
+            await screen.findByText('夜色温柔的老地方，适合一个人待着')
+        ).toBeTruthy();
+    });
+
+    it('没连上时不发带令牌的请求，也不显示介绍', async () => {
+        // 公开的 `/maps/{world}` 与 `/maps/{world}/page` 都不返回 `intro`，
+        // 只有 `/me/maps/{world}/page` 有。没连上就别白撞一次 403。
+        appVrccMapPage.mockResolvedValue(mapPage());
+        renderWithClient(<WorldVrccRating worldId="wrld_test" />);
+
+        await screen.findByText('8.4');
+        // 先确认那条判断权限的查询确实跑过了，否则「没发请求」是因为还没轮到。
+        expect(appVrccConnection).toHaveBeenCalled();
+        expect(appVrccMyMapPage).not.toHaveBeenCalled();
+    });
+
+    it('介绍封在三行半的高度里，不把卡片撑成一面墙', async () => {
+        appVrccMapPage.mockResolvedValue(mapPage());
+        appVrccConnection.mockResolvedValue({ scope: 'profile maps' });
+        appVrccMyMapPage.mockResolvedValue({
+            intro: { id: 1, text: '很长的介绍' }
+        });
+        renderWithClient(<WorldVrccRating worldId="wrld_test" />);
+
+        const intro = await screen.findByText('很长的介绍');
+        // 服务器给的是**完整介绍**，不像榜单那条已经截成第一行。
+        expect(intro.className).toContain('max-h-[3.5lh]');
+        expect(intro.className).toContain('overflow-hidden');
+    });
+
+    it('介绍在标题之下、星级之上', async () => {
+        appVrccMapPage.mockResolvedValue(mapPage());
+        appVrccConnection.mockResolvedValue({ scope: 'profile maps' });
+        appVrccMyMapPage.mockResolvedValue({
+            intro: { id: 1, text: '夜色温柔的老地方' }
+        });
+        renderWithClient(<WorldVrccRating worldId="wrld_test" />);
+
+        const intro = await screen.findByText('夜色温柔的老地方');
+        await screen.findByText('8.4');
+        const title = screen.getByText('dialog.world.vrcc.rating');
+        const stars = screen.getByRole('img');
+
+        expect(
+            title.compareDocumentPosition(intro) &
+                Node.DOCUMENT_POSITION_FOLLOWING
+        ).toBeTruthy();
+        expect(
+            intro.compareDocumentPosition(stars) &
+                Node.DOCUMENT_POSITION_FOLLOWING
+        ).toBeTruthy();
     });
 });
 

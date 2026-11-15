@@ -114,6 +114,17 @@ const connected = {
     nextPollAt: null
 };
 
+/**
+ * 令牌里没有 `maps`：`/me/board` 一定 403，地图榜只能走公开榜。
+ *
+ * 这不是异常状态——`dev-` 标识下的敏感权限被拒、玩家自己取消授权，都会
+ * 落到这里，界面要做的是静默降级而不是报错。
+ */
+const connectedWithoutMaps = {
+    ...connected,
+    scope: 'profile notifications'
+};
+
 const usage = {
     personalUsedToday: 7,
     personalDailyLimit: 1000,
@@ -142,6 +153,11 @@ beforeEach(() => {
             maps: [],
             at: 1
         })
+    );
+    // 默认连接就带 `maps` 权限，所以地图榜默认走玩家视角 `/me/board`。
+    // 要测公开榜那条路，把 `connection` 换成 `connectedWithoutMaps`。
+    mocks.myBoard.mockImplementation((sort: string | null) =>
+        Promise.resolve({ sort: sort ?? 'top', min: 1, maps: [] })
     );
     mocks.status.mockResolvedValue({ at: 1, state: 'ok' });
     // 模型榜：默认给一个空榜。它和地图榜是**两条独立调用**，只设 `boards`
@@ -662,25 +678,95 @@ describe('useVrccController', () => {
         await waitFor(() => expect(result.current.notesSupported).toBe(true));
     });
 
-    it('切换地图榜排序', async () => {
+    it('连上且带 maps 权限时，地图榜走玩家视角', async () => {
+        // 默认连接（`scope: 'profile maps'`）就该切到 `/me/board`。
         const { result } = renderHook(() => useVrccController());
         await waitFor(() => expect(result.current.boards).not.toBeNull());
-        expect(mocks.boards).toHaveBeenCalledWith(100, 'top');
+
+        expect(mocks.myBoard).toHaveBeenCalledWith('top', null);
+        expect(mocks.boards).not.toHaveBeenCalled();
+        expect(result.current.boards?.source).toBe('mine');
+    });
+
+    it('切换地图榜排序（玩家视角）', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+        expect(mocks.myBoard).toHaveBeenCalledWith('top', null);
 
         act(() => result.current.setBoardSort('week'));
         await waitFor(() => expect(result.current.boardSort).toBe('week'));
-        expect(mocks.boards).toHaveBeenCalledWith(100, 'week');
+        expect(mocks.myBoard).toHaveBeenCalledWith('week', null);
         expect(result.current.boardSortSupported).toBe(true);
 
         // 一分钟内切回总榜，直接用手上的，不再请求。
-        mocks.boards.mockClear();
+        mocks.myBoard.mockClear();
         act(() => result.current.setBoardSort('top'));
         await waitFor(() => expect(result.current.boardSort).toBe('top'));
-        expect(mocks.boards).not.toHaveBeenCalled();
+        expect(mocks.myBoard).not.toHaveBeenCalled();
+    });
+
+    it('令牌缺 maps 时静默走公开榜，不弹错误', async () => {
+        mocks.connection.mockResolvedValue(connectedWithoutMaps);
+
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+
+        // 缺权限是预期状态（`dev-` 标识、玩家取消授权都会落到这里），
+        // 所以**连试都不试** `/me/board`，也不把 403 摆到界面上。
+        expect(mocks.myBoard).not.toHaveBeenCalled();
+        expect(mocks.boards).toHaveBeenCalledWith(100, 'top');
+        expect(result.current.boards?.source).toBe('public');
+        expect(result.current.error).toBeNull();
+    });
+
+    it('玩家视角请求失败时退回公开榜，且同一次连接内不再重试', async () => {
+        mocks.myBoard.mockRejectedValue(new Error('403 scope'));
+
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+        expect(result.current.boards?.source).toBe('public');
+
+        // 已经知道这次连接下用不了，再刷新不应该又去撞一次 403。
+        const attemptsAfterFirstLoad = mocks.myBoard.mock.calls.length;
+        const boardsBefore = mocks.boards.mock.calls.length;
+        await act(async () => {
+            result.current.refreshBoards();
+        });
+        await waitFor(() =>
+            expect(mocks.boards.mock.calls.length).toBeGreaterThan(boardsBefore)
+        );
+        expect(mocks.myBoard.mock.calls.length).toBe(attemptsAfterFirstLoad);
+        expect(result.current.error).toBeNull();
+    });
+
+    it('「我去过的」在没有玩家视角时退回总榜，不把 went 发到公开榜', async () => {
+        mocks.connection.mockResolvedValue(connectedWithoutMaps);
+
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+
+        act(() => result.current.setBoardSort('went'));
+        await waitFor(() => expect(result.current.boardSort).toBe('top'));
+        // `/boards/maps` 没有 `went`，发出去只会拿到总榜。
+        expect(mocks.boards).toHaveBeenCalledWith(100, 'top');
+    });
+
+    it('搜索只在玩家视角下发出 q，公开榜不带', async () => {
+        const { result } = renderHook(() => useVrccController());
+        await waitFor(() => expect(result.current.boards).not.toBeNull());
+
+        act(() => result.current.setBoardQuery('  孤 '));
+        await waitFor(() => expect(result.current.boardQuery).toBe('  孤 '));
+        // 前后空白要清掉，否则服务器会拿带空格的关键词去匹配。
+        await waitFor(() =>
+            expect(mocks.myBoard).toHaveBeenCalledWith('top', '孤')
+        );
     });
 
     it('服务器不认 sort 时退回总榜并藏起切换', async () => {
-        // 旧服务器：不管要什么都回总榜，回答里没有 sort。
+        // 旧服务器 + 令牌没有 maps：走公开榜那条路。
+        mocks.connection.mockResolvedValue(connectedWithoutMaps);
+        // 不管要什么都回总榜，回答里没有 sort。
         mocks.boards.mockResolvedValue({
             board: 'maps',
             min: 1,
@@ -752,6 +838,9 @@ describe('useVrccController', () => {
         const consoleSpy = vi
             .spyOn(console, 'error')
             .mockImplementation(() => {});
+        // 两条路都挂掉才算「加载失败」：只有玩家视角失败时会静默退回公开榜，
+        // 那是降级不是错误（那条有单独的用例）。
+        mocks.myBoard.mockRejectedValue(new Error('boom'));
         mocks.boards.mockRejectedValue(new Error('boom'));
 
         const { result } = renderHook(() => useVrccController());

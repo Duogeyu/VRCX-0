@@ -90,6 +90,7 @@ export function VrccPage() {
         modelSort,
         modelSortSupported,
         modelsAvailable,
+        boardQuery,
         recent,
         unread,
         notificationsView,
@@ -116,6 +117,7 @@ export function VrccPage() {
         setBoardSort,
         refreshModels,
         setModelSort,
+        setBoardQuery,
         setNotificationsView,
         beginDeviceAuth,
         disconnect,
@@ -449,7 +451,9 @@ export function VrccPage() {
                                 boards={boards}
                                 sort={boardSort}
                                 sortSupported={boardSortSupported}
+                                query={boardQuery}
                                 onSortChange={setBoardSort}
+                                onQueryChange={setBoardQuery}
                                 onRefresh={() => void refreshBoards()}
                                 onOpenWorld={openWorld}
                             />

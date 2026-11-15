@@ -814,9 +814,19 @@
             "sort": {
                 "top": "总榜",
                 "week": "本週",
-                "new": "新上榜"
+                "new": "新上榜",
+                "went": "我去過的"
             },
-            "week_count": "本週 {count}"
+            "week_count": "本週 {count}",
+            "search": "搜尋地圖名稱或作者",
+            "search_clear": "清除搜尋",
+            "search_empty": "找不到「{query}」",
+            "player_hint": "連接 vrcc.cc 後可看「我去過的」和我的評分",
+            "room": "開房",
+            "mine": "我打 {score} 分",
+            "went_count": "去過 {count} 次",
+            "cap": "上限 {count}",
+            "teen": "青少年可進"
         },
         "models": {
             "hint": "每個模型每天一票",

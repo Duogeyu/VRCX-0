@@ -441,7 +441,11 @@ impl VrccRemote for FakeRemote {
             Ok(VrccVoteResult::default())
         })
     }
-    fn my_board<'a>(&'a self, _sort: VrccMyBoardSort) -> VrccFuture<'a, VrccMyBoard> {
+    fn my_board<'a>(
+        &'a self,
+        _sort: VrccMyBoardSort,
+        _q: Option<&'a str>,
+    ) -> VrccFuture<'a, VrccMyBoard> {
         Box::pin(async move {
             if let Some(error) = self.take_error() {
                 return Err(error);
@@ -1719,7 +1723,10 @@ async fn personal_map_lists_refuse_before_sending_when_disconnected() {
     let error = service.my_maps().await.unwrap_err();
     assert_eq!(error.layer, ErrorLayer::Session);
 
-    let error = service.my_board(VrccMyBoardSort::Went).await.unwrap_err();
+    let error = service
+        .my_board(VrccMyBoardSort::Went, None)
+        .await
+        .unwrap_err();
     assert_eq!(error.layer, ErrorLayer::Session);
 }
 
@@ -1738,7 +1745,10 @@ async fn personal_map_lists_work_once_connected() {
     assert_eq!(error.layer, ErrorLayer::Server);
 
     remote.set_error(http(403, "scope"));
-    let error = service.my_board(VrccMyBoardSort::Top).await.unwrap_err();
+    let error = service
+        .my_board(VrccMyBoardSort::Top, None)
+        .await
+        .unwrap_err();
     assert_eq!(error.layer, ErrorLayer::Server);
 }
 

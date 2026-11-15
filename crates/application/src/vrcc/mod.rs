@@ -159,7 +159,11 @@ pub trait VrccRemote: Send + Sync {
     fn notifications<'a>(&'a self, since: Option<i64>) -> VrccFuture<'a, VrccNotifications>;
     fn my_map<'a>(&'a self, world: &'a str) -> VrccFuture<'a, VrccMyMap>;
     fn my_maps<'a>(&'a self) -> VrccFuture<'a, VrccRatedMaps>;
-    fn my_board<'a>(&'a self, sort: VrccMyBoardSort) -> VrccFuture<'a, VrccMyBoard>;
+    fn my_board<'a>(
+        &'a self,
+        sort: VrccMyBoardSort,
+        q: Option<&'a str>,
+    ) -> VrccFuture<'a, VrccMyBoard>;
     fn unread<'a>(&'a self) -> VrccFuture<'a, VrccUnread>;
     fn notes<'a>(&'a self) -> VrccFuture<'a, VrccNotes>;
     fn today<'a>(&'a self) -> VrccFuture<'a, VrccToday>;
@@ -1538,13 +1542,17 @@ impl VrccService {
     }
 
     /// 玩家视角地图榜（需要 `maps` 普通权限）。
+    ///
+    /// `q` 非空时走搜索。搜索时服务器把回答里的 `sort` 改写成 `"find"`，
+    /// 所以**不要拿回答去回填界面上的排序状态**——用请求时自己那份。
     pub async fn my_board(
         &self,
         sort: VrccMyBoardSort,
+        q: Option<&str>,
     ) -> std::result::Result<VrccMyBoard, VrccError> {
         self.ensure_connected()?;
         self.remote
-            .my_board(sort)
+            .my_board(sort, q)
             .await
             .map_err(|error| self.settle(error))
     }

@@ -123,8 +123,12 @@ impl VrccRemote for VrccRemoteAdapter {
         Box::pin(async move { self.client().vote_map_content(kind, id, vote).await })
     }
 
-    fn my_board<'a>(&'a self, sort: VrccMyBoardSort) -> VrccFuture<'a, VrccMyBoard> {
-        Box::pin(async move { self.client().my_board(sort).await })
+    fn my_board<'a>(
+        &'a self,
+        sort: VrccMyBoardSort,
+        q: Option<&'a str>,
+    ) -> VrccFuture<'a, VrccMyBoard> {
+        Box::pin(async move { self.client().my_board(sort, q).await })
     }
 
     fn device_code<'a>(&'a self, scope: Option<&'a str>) -> VrccFuture<'a, VrccDeviceCode> {

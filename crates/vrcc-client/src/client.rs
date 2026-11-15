@@ -1520,12 +1520,32 @@ impl VrccClient {
     ///
     /// 比公开榜多出「我的视角」：去过几次、热评、名次、介绍首行。
     /// `sort` 走 `top` / `week` / `new` / `went`——比公开榜多一个 `went`。
-    pub async fn my_board(&self, sort: VrccMyBoardSort) -> Result<VrccMyBoard, VrccError> {
+    ///
+    /// `q` 非空时走搜索（地图名或作者）。**搜索会覆盖排序**：服务器此时把回答
+    /// 里的 `sort` 改写成 `"find"`，请求带的 `sort` 只影响限流分组，不影响结果
+    /// 顺序。所以调用方不要拿回答里的 `sort` 回填界面状态。
+    ///
+    /// # 限流键里保留 `q`
+    ///
+    /// 按 [`limiter_key`] 的既定规则，只有**不改变资源身份**的参数（`mark` /
+    /// `limit`）才剥掉。`q` 换一个词就是另一份列表，属于改身份，所以留在键里
+    /// 意味着**每个新的搜索词都是新的槽**——本地不会因为上一个词刚查过就把这次
+    /// 拦下来。
+    ///
+    /// 代价是「搜索不受本地 60 秒间隔保护」。这是有意的：把 `q` 剥掉会让玩家
+    /// 改一个词就撞上假的「请求太频繁」，那比多发一次请求糟得多。防重复请求
+    /// 交给界面侧的输入防抖，不在这里做。
+    pub async fn my_board(
+        &self,
+        sort: VrccMyBoardSort,
+        q: Option<&str>,
+    ) -> Result<VrccMyBoard, VrccError> {
+        let path = my_board_path(sort, q);
         // `top` / `week` / `new` / `went` 是四份不同的列表；限流器按「接口 +
         // 路径」分组，切排序不会撞上上一份的间隔。
         self.request(Call {
             method: "GET",
-            path: &format!("me/board?sort={}", sort.as_query()),
+            path: &path,
             body: None,
             authed: true,
             key: "my_board",
@@ -1835,6 +1855,25 @@ fn encode_query_value(value: &str) -> String {
     out
 }
 
+/// `GET /me/board` 的路径。
+///
+/// `q` 先 trim 再判空：界面上把输入框清空后传进来的可能是 `""` 或 `"   "`，
+/// 两者都该走「不搜索」，而不是发一个 `q=` 让服务器去找空字符串。
+///
+/// 中文、空格、`&`、`=` 全部按 UTF-8 逐字节百分号编码——地图名里带 `&`
+/// 并不罕见，不编码会被下游当成参数分隔符，查出来是另一个词。
+fn my_board_path(sort: VrccMyBoardSort, q: Option<&str>) -> String {
+    let trimmed = q.map(str::trim).filter(|value| !value.is_empty());
+    match trimmed {
+        Some(q) => format!(
+            "me/board?sort={}&q={}",
+            sort.as_query(),
+            encode_query_value(q)
+        ),
+        None => format!("me/board?sort={}", sort.as_query()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2048,7 +2087,7 @@ mod tests {
         let client = client_at(base);
 
         let error = client
-            .my_board(VrccMyBoardSort::Top)
+            .my_board(VrccMyBoardSort::Top, None)
             .await
             .expect_err("服务器回的是 429");
         // 这是**服务端**说的「这一份今天没了」，不是本机拦下的。
@@ -2901,6 +2940,56 @@ mod tests {
         assert_eq!(path.matches(',').count(), MAX_BATCH_WORLDS - 1);
         assert!(path.contains("wrld_19"));
         assert!(!path.contains("wrld_20"));
+    }
+
+    /// `me/board` 的路径与搜索词编码。
+    ///
+    /// 中文必须按 UTF-8 逐字节编码：地图名和作者名大量是中文，直接拼进去会
+    /// 让 `reqwest` 拒发或让服务器查成另一个词。
+    #[test]
+    fn my_board_path_encodes_the_search_term() {
+        // 不搜索：只有排序。
+        assert_eq!(
+            my_board_path(VrccMyBoardSort::Top, None),
+            "me/board?sort=top"
+        );
+        assert_eq!(
+            my_board_path(VrccMyBoardSort::Went, None),
+            "me/board?sort=went"
+        );
+
+        // 空串和纯空白都当「不搜索」。界面清空输入框后传的就是这两种。
+        assert_eq!(
+            my_board_path(VrccMyBoardSort::Top, Some("")),
+            "me/board?sort=top"
+        );
+        assert_eq!(
+            my_board_path(VrccMyBoardSort::Top, Some("   ")),
+            "me/board?sort=top"
+        );
+
+        // 前后空白要 trim，否则服务器会拿 "  孤 " 去匹配。
+        assert_eq!(
+            my_board_path(VrccMyBoardSort::Top, Some("  孤 ")),
+            "me/board?sort=top&q=%E5%AD%A4"
+        );
+
+        // `&` 和 `=` 不编码会被下游当成参数分隔符/键值对。
+        assert_eq!(
+            my_board_path(VrccMyBoardSort::New, Some("a&b=c")),
+            "me/board?sort=new&q=a%26b%3Dc"
+        );
+
+        // 搜索词留在限流键里：换一个词就是另一份列表，不该被上一个词挡住。
+        assert_ne!(
+            limiter_key("my_board", &my_board_path(VrccMyBoardSort::Top, Some("孤"))),
+            limiter_key("my_board", &my_board_path(VrccMyBoardSort::Top, Some("天")))
+        );
+        // 带不带搜索也是两条不同的路径。
+        assert_ne!(
+            limiter_key("my_board", &my_board_path(VrccMyBoardSort::Top, None)),
+            limiter_key("my_board", &my_board_path(VrccMyBoardSort::Top, Some("孤")))
+        );
     }
 
     /// 北京时间零点换算。

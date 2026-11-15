@@ -6,13 +6,17 @@ import {
     ChevronsLeft,
     ChevronsRight,
     ExternalLink,
-    RefreshCw
+    RefreshCw,
+    Search,
+    Sprout,
+    X
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { VrccStars } from '@/components/vrcc/VrccStars';
 import { Button } from '@/ui/shadcn/button';
+import { Input } from '@/ui/shadcn/input';
 import { Spinner } from '@/ui/shadcn/spinner';
 import {
     ToggleGroup,
@@ -21,45 +25,61 @@ import {
 } from '@/ui/shadcn/toggle-group';
 
 import { buildPageItems } from '../boardPages';
+import {
+    hotTextFor,
+    type VrccBoardView,
+    type VrccBoardViewSort
+} from '../boardRow';
 import { useOpenExternalLink } from '../useOpenExternalLink';
 import { useVrccRowVisibility } from '../useVrccRowVisibility';
 import { useVrccWorldCovers } from '../useVrccWorldCovers';
-import type { VrccBoard, VrccBoardSort } from '../vrccApi';
 import { vrccCoverUrl } from '../vrccCover';
 import { VrccCover } from './VrccCover';
 
-const SORTS: readonly VrccBoardSort[] = ['top', 'week', 'new'];
+/** 公开榜能用的三种排序。 */
+const PUBLIC_SORTS: readonly VrccBoardViewSort[] = ['top', 'week', 'new'];
 
-/** 一页多少行。榜单一次取 100 条（接口上限），本地按这个数切页。 */
+/** 一页多少行。公开榜一次取 100 条，玩家视角一次最多 60 条，本地按这个数切页。 */
 const PAGE_SIZE = 20;
 
-function isBoardSort(value: unknown): value is VrccBoardSort {
-    return SORTS.includes(value as VrccBoardSort);
+function isBoardSort(value: unknown): value is VrccBoardViewSort {
+    return (
+        value === 'top' ||
+        value === 'week' ||
+        value === 'new' ||
+        value === 'went'
+    );
 }
 
 const SITE = 'https://vrcc.cc';
 
 /**
- * 地图榜。开放数据，不需要连接。
+ * 地图榜。
+ *
+ * 数据可以来自两个接口，面板**不关心是哪个**——`boards` 已经是归一化后的
+ * [`VrccBoardView`]。唯一的例外是排序按钮与搜索框：`went`（我去过的）和
+ * 搜索都是玩家视角独有的，公开榜下不显示，而不是显示了点了必然失败。
  *
  * 密度取向：一行一张图，名次 + 名字 + 作者 + 均分 + 评分人数，全部单行，
  * 靠右对齐数字；悬停才出现外链，静止时不留视觉噪声。
- *
- * 排序（1.13.0 起）：总榜、本周、新上榜，和网页地图榜一样。服务器还不认
- * `sort` 时（`sortSupported` 为 false）不显示切换。
  */
 export function VrccMapsPanel({
     boards,
     sort,
     sortSupported,
+    query,
     onSortChange,
+    onQueryChange,
     onRefresh,
     onOpenWorld
 }: {
-    boards: VrccBoard | null;
-    sort: VrccBoardSort;
+    boards: VrccBoardView | null;
+    sort: VrccBoardViewSort;
     sortSupported: boolean;
-    onSortChange: (sort: VrccBoardSort) => void;
+    /** 已生效的搜索词，空串表示不搜索。 */
+    query: string;
+    onSortChange: (sort: VrccBoardViewSort) => void;
+    onQueryChange: (query: string) => void;
     onRefresh: () => void;
     /** 点一行时打开 VRCX-0 自己的世界详情窗，不跳网页。 */
     onOpenWorld: (worldId: string) => void;
@@ -68,26 +88,55 @@ export function VrccMapsPanel({
     // 榜单每行右侧那个「去网页看」：点下去要有即时反馈，否则玩家会重复点。
     const { open: openLink, pending: openLinkPending } = useOpenExternalLink();
     const maps = boards?.maps ?? [];
+    const isPlayerView = boards?.source === 'mine';
+
+    // 「我去过的」只有玩家视角有。公开榜下不显示这个按钮——摆一个点了必然
+    // 退回总榜的按键，比没有它更让人困惑。
+    const sorts = useMemo(
+        () =>
+            isPlayerView
+                ? ([...PUBLIC_SORTS, 'went'] as VrccBoardViewSort[])
+                : PUBLIC_SORTS,
+        [isPlayerView]
+    );
 
     /**
-     * 一次取满 100 条、本地分页。
+     * 搜索框里的**草稿**。和已生效的 `query` 分开：搜索走 `/me/board?q=`，
+     * 每个新词在限流器里都是新槽，边敲边搜等于把请求全放出去。所以草稿只在
+     * 玩家按下回车时才提交。
+     */
+    const [draft, setDraft] = useState(query);
+    useEffect(() => {
+        setDraft(query);
+    }, [query]);
+
+    /**
+     * 搜索框展开着没有（聚焦，或里面有字）。
      *
-     * `/boards/maps` 的 `limit` 上限就是 100，翻页不再发请求；将来切到
-     * `/me/board`（没有 limit，一次给全量）时这套切片原样可用。
+     * 展开时排序胶囊整组收起：搜索走 `?q=`，服务器此时**忽略 `sort`**，
+     * 留着那一排按钮既点不出效果、又占地方。
+     */
+    const [searchFocused, setSearchFocused] = useState(false);
+    const searchExpanded =
+        isPlayerView && (searchFocused || draft.trim().length > 0);
+
+    /**
+     * 一次取满、本地分页。
+     *
+     * 公开榜 `limit` 上限 100；玩家视角没有 limit（服务器固定最多 60）。
+     * 两种都是「一次拿完」，翻页不再发请求。
      */
     const [page, setPage] = useState(0);
     const pageCount = Math.max(1, Math.ceil(maps.length / PAGE_SIZE));
-    // 换排序后整个列表换掉了，页码可能越界；夹一次比在每个排序回调里
-    // 各自重置更省心，也覆盖「服务器这次回的条数比上次少」这种情况。
+    // 换排序/换搜索词后整个列表换掉了，页码可能越界；夹一次比在每个回调里
+    // 各自重置更省心，也覆盖「这次回的条数比上次少」这种情况。
     const safePage = Math.min(page, pageCount - 1);
 
-    // 换排序就是换了一份列表，页码要回到第 1 页——夹紧只覆盖「页码越界」，
-    // 覆盖不了「本周榜也有 5 页、于是停在第 3 页」这种跨排序沿用。
-    // `sort` 是 props，跟着它走而不是在每个排序回调里各写一遍 setPage(0)：
-    // 调用方将来从别处改排序时也不会漏。
+    // 换排序或换搜索词就是换了一份列表，页码要回到第 1 页——夹紧只覆盖
+    // 「页码越界」，覆盖不了「本周榜也有 5 页、于是停在第 3 页」这种跨列表沿用。
     useEffect(() => {
         setPage(0);
-    }, [sort]);
+    }, [sort, query]);
     const pageRows = maps.slice(
         safePage * PAGE_SIZE,
         (safePage + 1) * PAGE_SIZE
@@ -105,46 +154,122 @@ export function VrccMapsPanel({
     const { visible, observe } = useVrccRowVisibility();
     const covers = useVrccWorldCovers(worldIds, visible);
 
+    const submitSearch = () => {
+        const next = draft.trim();
+        if (next === query) return;
+        onQueryChange(next);
+    };
+
     return (
         <div className="flex h-full min-h-0 flex-col">
-            <div
-                data-tour="vrcc-maps-sorts"
-                className="text-muted-foreground flex shrink-0 items-center gap-2 px-1 pb-2 text-xs"
-            >
-                {sortSupported && (
-                    <ToggleGroup
-                        variant="outline"
-                        size="sm"
-                        value={[sort]}
-                        onValueChange={(next) => {
-                            const value = next[0];
-                            if (isBoardSort(value)) onSortChange(value);
-                        }}
+            <div className="text-muted-foreground flex shrink-0 items-center gap-2 px-1 pb-2 text-xs">
+                {/*
+                 * 排序胶囊。搜索展开时整组收起（宽度和透明度一起走，看起来像被
+                 * 吸进左边），因为搜索时服务器**忽略 `sort`**：留着那一排按钮
+                 * 点下去只有高亮会变，列表纹丝不动。
+                 */}
+                <div
+                    data-tour="vrcc-maps-sorts"
+                    className={`flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ${
+                        searchExpanded
+                            ? 'pointer-events-none max-w-0 opacity-0'
+                            : 'max-w-[26rem] opacity-100'
+                    }`}
+                >
+                    {sortSupported && (
+                        <ToggleGroup
+                            variant="outline"
+                            size="sm"
+                            value={[sort]}
+                            onValueChange={(next) => {
+                                const value = next[0];
+                                if (isBoardSort(value)) onSortChange(value);
+                            }}
+                        >
+                            {sorts.map((value, index) => (
+                                <Fragment key={value}>
+                                    {index > 0 ? (
+                                        <ToggleGroupSeparator />
+                                    ) : null}
+                                    <ToggleGroupItem
+                                        value={value}
+                                        className="text-xs"
+                                    >
+                                        {t(`vrcc.maps.sort.${value}`)}
+                                    </ToggleGroupItem>
+                                </Fragment>
+                            ))}
+                        </ToggleGroup>
+                    )}
+                </div>
+                {/*
+                 * `min` 只在榜单拉到之后才有值。加载中、拉失败、或旧服务器没给
+                 * 这个字段时都不该渲染——否则会显示成「满  人评分才进总榜」。
+                 * 搜索时也不显示：那时候列表已经不是榜单了。
+                 *
+                 * 这一格是 `flex-1`：它的存在把右边那组（搜索框 + 刷新）推到
+                 * 行尾，也让搜索框的百分比宽度是相对**整行**算的。
+                 */}
+                <span className="min-w-0 flex-1 truncate">
+                    {min != null && !searchExpanded
+                        ? t('vrcc.maps.hint', { min })
+                        : ''}
+                </span>
+                {/*
+                 * 搜索只有玩家视角有（`/boards/maps` 没有 `q` 参数）。
+                 *
+                 * 平时收成一窄条待在右边，聚焦或有内容时向左展开。展开宽度
+                 * 封在 45%：窗口再窄也不会越过中线去压左边的文字。
+                 */}
+                {isPlayerView && (
+                    <div
+                        className={`shrink-0 transition-[width] duration-200 ${
+                            searchExpanded
+                                ? 'w-[36rem] max-w-[45%]'
+                                : 'w-64 max-w-[45%]'
+                        }`}
                     >
-                        {SORTS.map((value, index) => (
-                            <Fragment key={value}>
-                                {index > 0 ? <ToggleGroupSeparator /> : null}
-                                <ToggleGroupItem
-                                    value={value}
-                                    className="text-xs"
+                        <div className="relative">
+                            <Search className="pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2" />
+                            <Input
+                                value={draft}
+                                onChange={(event) =>
+                                    setDraft(event.target.value)
+                                }
+                                onFocus={() => setSearchFocused(true)}
+                                onBlur={() => setSearchFocused(false)}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Enter') submitSearch();
+                                    if (event.key === 'Escape') {
+                                        setDraft('');
+                                        onQueryChange('');
+                                    }
+                                }}
+                                placeholder={t('vrcc.maps.search')}
+                                aria-label={t('vrcc.maps.search')}
+                                className="h-7 pr-7 pl-7 text-xs"
+                            />
+                            {draft.length > 0 && (
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="absolute top-1/2 right-0.5 size-6 -translate-y-1/2"
+                                    aria-label={t('vrcc.maps.search_clear')}
+                                    onClick={() => {
+                                        setDraft('');
+                                        onQueryChange('');
+                                    }}
                                 >
-                                    {t(`vrcc.maps.sort.${value}`)}
-                                </ToggleGroupItem>
-                            </Fragment>
-                        ))}
-                    </ToggleGroup>
-                )}
-                {/* `min` 只在榜单拉到之后才有值。加载中、拉失败、或旧服务器
-                    没给这个字段时都不该渲染——否则会显示成「满  人评分才进总榜」。 */}
-                {min != null && (
-                    <span className="min-w-0 truncate">
-                        {t('vrcc.maps.hint', { min })}
-                    </span>
+                                    <X className="size-3" />
+                                </Button>
+                            )}
+                        </div>
+                    </div>
                 )}
                 <Button
                     variant="ghost"
                     size="icon"
-                    className="ml-auto size-6"
+                    className="size-6 shrink-0"
                     onClick={onRefresh}
                     aria-label={t('common.actions.refresh')}
                 >
@@ -152,10 +277,20 @@ export function VrccMapsPanel({
                 </Button>
             </div>
 
+            {/* 公开榜时说明一下玩家视角能多看到什么。已经连上却缺权限时这句
+                也成立——那时点了重新授权就能拿到。 */}
+            {boards != null && !isPlayerView && (
+                <p className="text-muted-foreground shrink-0 px-1 pb-2 text-xs">
+                    {t('vrcc.maps.player_hint')}
+                </p>
+            )}
+
             {maps.length === 0 ? (
                 <div className="text-muted-foreground flex h-32 items-center justify-center gap-2 text-sm">
                     <Spinner className="size-3" />
-                    {t('vrcc.maps.empty')}
+                    {query
+                        ? t('vrcc.maps.search_empty', { query })
+                        : t('vrcc.maps.empty')}
                 </div>
             ) : (
                 <div
@@ -184,11 +319,38 @@ export function VrccMapsPanel({
                     <ul className="divide-y">
                         {pageRows.map((map, index) => {
                             // 本周榜只按本周的打分排，`rank` 却还是总榜名次：
-                            // 本周的名次就是在列表里的位置，和网页「本周」一样。
+                            // 本周的名次就是在列表里的位置。玩家视角的本周榜
+                            // **根本没有 `rank`**，所以两条路都走这个兜底。
                             const place =
                                 sort === 'week'
                                     ? safePage * PAGE_SIZE + index + 1
                                     : map.rank;
+                            // 副标题下面的小标记，按有用程度排序，最多三个——
+                            // 再多会把这一行挤满，而它们都是可选信息。
+                            const badges: string[] = [];
+                            if (map.room === true) {
+                                badges.push(t('vrcc.maps.room'));
+                            }
+                            if (map.mine != null) {
+                                badges.push(
+                                    t('vrcc.maps.mine', { score: map.mine })
+                                );
+                            }
+                            if (map.went != null) {
+                                badges.push(
+                                    t('vrcc.maps.went_count', {
+                                        count: map.went
+                                    })
+                                );
+                            }
+                            if (map.cap != null) {
+                                badges.push(
+                                    t('vrcc.maps.cap', { count: map.cap })
+                                );
+                            }
+                            // 多条短评时按世界 ID 挑一条（见 `hotTextFor`）：
+                            // 各张图不一样，但同一张图永远同一条，不会跳。
+                            const hotText = hotTextFor(map);
                             return (
                                 <li
                                     key={map.world}
@@ -246,20 +408,77 @@ export function VrccMapsPanel({
                                             className="size-8 shrink-0 rounded object-cover"
                                         />
                                         <div className="min-w-0 flex-1">
-                                            <div className="truncate text-sm font-medium">
-                                                {map.name ?? map.world}
+                                            {/* 第一行：地图名 +（青少年可进标记紧随其后）
+                                            + 定宽的介绍首行，靠右贴着星级。
+                                            介绍比作者名有信息量，又不该占掉整行，
+                                            所以给它一个固定长度，放不下自己省略。 */}
+                                            <div className="flex min-w-0 items-center gap-2">
+                                                <span className="flex min-w-0 flex-1 items-center gap-1">
+                                                    <span className="min-w-0 truncate text-sm font-medium">
+                                                        {map.name ?? map.world}
+                                                    </span>
+                                                    {/*
+                                                     * 「青少年可进」的绿色小苗。
+                                                     *
+                                                     * `teen` 已被官方弃用，**2026-12-26 起
+                                                     * 服务器不再返回**。到期后 `map.teen`
+                                                     * 变成 `null`，这里就不再渲染——不需要
+                                                     * 改代码。
+                                                     *
+                                                     * 所以**别给它加兜底**：拿不到就是拿不到，
+                                                     * 补一个占位或默认值只会让一个本来就要
+                                                     * 下线的标记在界面上留得更久。
+                                                     */}
+                                                    {map.teen === true && (
+                                                        <Sprout
+                                                            className="size-3 shrink-0 text-emerald-500 opacity-40"
+                                                            aria-label={t(
+                                                                'vrcc.maps.teen'
+                                                            )}
+                                                        />
+                                                    )}
+                                                </span>
+                                                {map.intro != null && (
+                                                    <span className="text-muted-foreground w-80 max-w-[40%] shrink-0 truncate text-right text-xs">
+                                                        {map.intro}
+                                                    </span>
+                                                )}
                                             </div>
-                                            {/* 有口碑短评就显示短评，没有才显示作者。
-                                            短评是官方数据里唯一一句「这图好在哪」，
-                                            对玩家比作者名有用，但只有一行位置。 */}
-                                            <div className="text-muted-foreground truncate text-xs">
-                                                {map.hot?.text
-                                                    ? `「${map.hot.text}」${
-                                                          map.hot.by
-                                                              ? ` · ${map.hot.by}`
-                                                              : ''
-                                                      }`
-                                                    : (map.author ?? '—')}
+                                            {/* 第二行：短评 / 作者 + 可选标记。
+                                            `hotBy`（出处）只有公开榜有：玩家视角
+                                            那个 `hot` 是另一个形状，没有出处字段。
+
+                                            多条短评时随机挑一条，但同一份榜单内固定，
+                                            不会边滚边跳。 */}
+                                            <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs">
+                                                <span className="min-w-0 truncate">
+                                                    {hotText
+                                                        ? `「${hotText}」${
+                                                              map.hotBy
+                                                                  ? ` · ${map.hotBy}`
+                                                                  : ''
+                                                          }`
+                                                        : (map.author ?? '—')}
+                                                </span>
+                                                {badges
+                                                    .slice(0, 3)
+                                                    .map(
+                                                        (badge, badgeIndex) => (
+                                                            <span
+                                                                key={badge}
+                                                                className={
+                                                                    badgeIndex ===
+                                                                        0 &&
+                                                                    map.room ===
+                                                                        true
+                                                                        ? 'text-primary shrink-0'
+                                                                        : 'shrink-0'
+                                                                }
+                                                            >
+                                                                · {badge}
+                                                            </span>
+                                                        )
+                                                    )}
                                             </div>
                                         </div>
                                         {/* 星级在上、分数在下，右侧一列。
@@ -295,7 +514,9 @@ export function VrccMapsPanel({
                                         </div>
                                     </button>
                                     {/* 外链单独留一个：想去网页看详情时用，
-                                    和「在 VRCX 里看」是两件事。 */}
+                                    和「在 VRCX 里看」是两件事。玩家视角不给
+                                    `page`，用 world 自己拼——和公开榜给的地址
+                                    是同一条路径。 */}
                                     <button
                                         type="button"
                                         disabled={openLinkPending}

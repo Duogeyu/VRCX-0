@@ -37,6 +37,7 @@ vi.mock('../useMutualPresence', () => ({
     })
 }));
 
+import { fromMyBoard, fromPublicBoard } from '../boardRow';
 import type { VrccCrossingStar, VrccStarCard } from '../vrccApi';
 import { VrccCrossingsPanel } from './VrccCrossingsPanel';
 import { VrccMapsPanel } from './VrccMapsPanel';
@@ -335,23 +336,29 @@ describe('toAbsolute', () => {
 });
 
 describe('VrccMapsPanel', () => {
-    const board = {
-        board: 'maps',
-        min: 1,
-        at: 1,
-        maps: [
-            { world: 'wrld_a', name: 'A', rank: 7, week: 5 },
-            { world: 'wrld_b', name: 'B', rank: 1, week: 2 }
-        ]
-    };
+    const rows = [
+        { world: 'wrld_a', name: 'A', rank: 7, week: 5 },
+        { world: 'wrld_b', name: 'B', rank: 1, week: 2 }
+    ];
 
-    function renderMaps(sort: 'top' | 'week') {
+    function renderMaps(
+        sort: 'top' | 'week',
+        maps: Array<Record<string, unknown>> = rows
+    ) {
         render(
             <VrccMapsPanel
-                boards={{ ...board, sort }}
+                boards={fromPublicBoard({
+                    board: 'maps',
+                    min: 1,
+                    at: 1,
+                    sort,
+                    maps: maps as never
+                })}
                 sort={sort}
                 sortSupported
+                query=""
                 onSortChange={() => {}}
+                onQueryChange={() => {}}
                 onRefresh={() => {}}
                 onOpenWorld={() => {}}
             />
@@ -361,21 +368,26 @@ describe('VrccMapsPanel', () => {
     it('换排序后回到第 1 页，不沿用上一份列表的页码', () => {
         // 25 条 = 2 页。两个排序用的是同一批数据，所以「沿用页码」不会
         // 因为页数不够而被夹紧掩盖掉——这正是这个 bug 藏起来的方式。
-        const many = {
-            ...board,
-            maps: Array.from({ length: 25 }, (_, index) => ({
-                world: `wrld_${index}`,
-                name: `M${index}`,
-                rank: index + 1,
-                week: 1
-            }))
-        };
+        const many = Array.from({ length: 25 }, (_, index) => ({
+            world: `wrld_${index}`,
+            name: `M${index}`,
+            rank: index + 1,
+            week: 1
+        }));
         const panel = (sort: 'top' | 'week') => (
             <VrccMapsPanel
-                boards={{ ...many, sort }}
+                boards={fromPublicBoard({
+                    board: 'maps',
+                    min: 1,
+                    at: 1,
+                    sort,
+                    maps: many as never
+                })}
                 sort={sort}
                 sortSupported
+                query=""
                 onSortChange={() => {}}
+                onQueryChange={() => {}}
                 onRefresh={() => {}}
                 onOpenWorld={() => {}}
             />
@@ -405,6 +417,224 @@ describe('VrccMapsPanel', () => {
     it('总榜显示服务器给的名次', () => {
         renderMaps('top');
         expect(screen.getByText('7')).toBeTruthy();
+    });
+
+    it('公开榜不显示「我去过的」按钮，也不显示搜索框', () => {
+        // `/boards/maps` 既没有 `went` 排序也没有 `q`。摆一个点了必然失败的
+        // 按钮，比不摆更让人困惑。
+        renderMaps('top');
+
+        expect(screen.queryByText('vrcc.maps.sort.went')).toBeNull();
+        expect(screen.queryByLabelText('vrcc.maps.search')).toBeNull();
+        // 反过来要说明玩家视角能多看到什么。
+        expect(screen.getByText('vrcc.maps.player_hint')).toBeTruthy();
+    });
+
+    it('玩家视角显示「我去过的」与搜索框，并去掉连接提示', () => {
+        render(
+            <VrccMapsPanel
+                boards={fromMyBoard({
+                    min: 1,
+                    sort: 'top',
+                    maps: [{ world: 'wrld_a', name: 'A', rank: 1 }]
+                })}
+                sort="top"
+                sortSupported
+                query=""
+                onSortChange={() => {}}
+                onQueryChange={() => {}}
+                onRefresh={() => {}}
+                onOpenWorld={() => {}}
+            />
+        );
+
+        expect(screen.getByText('vrcc.maps.sort.went')).toBeTruthy();
+        expect(screen.getByLabelText('vrcc.maps.search')).toBeTruthy();
+        expect(screen.queryByText('vrcc.maps.player_hint')).toBeNull();
+    });
+
+    it('玩家视角不显示短评出处，公开榜显示', () => {
+        // 两个接口的 `hot` 同名不同形：公开榜有 `by`，玩家视角没有。
+        // 归一化后前者落到 hotBy、后者恒为 null。
+        renderMaps('top', [
+            {
+                world: 'wrld_a',
+                name: 'A',
+                rank: 1,
+                hot: { text: '光影很舒服', by: '某位彩蛋猎人', up: 3 }
+            }
+        ]);
+        expect(screen.getByText(/某位彩蛋猎人/)).toBeTruthy();
+
+        cleanup();
+        render(
+            <VrccMapsPanel
+                boards={fromMyBoard({
+                    min: 1,
+                    maps: [
+                        {
+                            world: 'wrld_a',
+                            name: 'A',
+                            rank: 1,
+                            hot: { id: 1, text: '光影很舒服', up: 3, vote: 0 }
+                        }
+                    ]
+                })}
+                sort="top"
+                sortSupported
+                query=""
+                onSortChange={() => {}}
+                onQueryChange={() => {}}
+                onRefresh={() => {}}
+                onOpenWorld={() => {}}
+            />
+        );
+        expect(screen.getByText(/光影很舒服/)).toBeTruthy();
+        expect(screen.queryByText(/某位彩蛋猎人/)).toBeNull();
+    });
+
+    it('玩家视角把去过次数与我的评分标在行里', () => {
+        render(
+            <VrccMapsPanel
+                boards={fromMyBoard({
+                    min: 1,
+                    maps: [
+                        {
+                            world: 'wrld_a',
+                            name: 'A',
+                            went: 16,
+                            mine: 9,
+                            room: true
+                        }
+                    ]
+                })}
+                sort="went"
+                sortSupported
+                query=""
+                onSortChange={() => {}}
+                onQueryChange={() => {}}
+                onRefresh={() => {}}
+                onOpenWorld={() => {}}
+            />
+        );
+
+        expect(screen.getByText(/vrcc\.maps\.room/)).toBeTruthy();
+        expect(screen.getByText(/vrcc\.maps\.mine/)).toBeTruthy();
+        expect(screen.getByText(/vrcc\.maps\.went_count/)).toBeTruthy();
+    });
+
+    it('搜索无结果时给出与「暂无数据」不同的空态', () => {
+        // 「一条都没有」和「这个词没搜到」是两回事，用同一句话会让玩家以为
+        // 服务器挂了。
+        render(
+            <VrccMapsPanel
+                boards={fromMyBoard({ min: 1, maps: [] })}
+                sort="top"
+                sortSupported
+                query="孤"
+                onSortChange={() => {}}
+                onQueryChange={() => {}}
+                onRefresh={() => {}}
+                onOpenWorld={() => {}}
+            />
+        );
+
+        expect(screen.getByText('vrcc.maps.search_empty')).toBeTruthy();
+    });
+
+    it('搜索框聚焦时排序胶囊收起，不再占着位置', () => {
+        // 搜索时服务器忽略 `sort`，留着那排按钮只有高亮会变、列表纹丝不动。
+        // 这里钉的是「收起」这个动作本身：收起后宽度归零、不再接收点击。
+        const { container } = render(
+            <VrccMapsPanel
+                boards={fromMyBoard({
+                    min: 1,
+                    maps: [{ world: 'wrld_a', name: 'A' }]
+                })}
+                sort="top"
+                sortSupported
+                query=""
+                onSortChange={() => {}}
+                onQueryChange={() => {}}
+                onRefresh={() => {}}
+                onOpenWorld={() => {}}
+            />
+        );
+
+        const sorts = container.querySelector('[data-tour="vrcc-maps-sorts"]');
+        expect(sorts?.className).not.toContain('max-w-0');
+
+        fireEvent.focus(screen.getByLabelText('vrcc.maps.search'));
+        expect(sorts?.className).toContain('max-w-0');
+    });
+
+    it('玩家视角显示介绍首行与「青少年可进」标记', () => {
+        const { container } = render(
+            <VrccMapsPanel
+                boards={fromMyBoard({
+                    min: 1,
+                    maps: [
+                        {
+                            world: 'wrld_a',
+                            name: '孤',
+                            teen: true,
+                            intro: '赞最多的那段介绍的第一行'
+                        }
+                    ]
+                })}
+                sort="top"
+                sortSupported
+                query=""
+                onSortChange={() => {}}
+                onQueryChange={() => {}}
+                onRefresh={() => {}}
+                onOpenWorld={() => {}}
+            />
+        );
+
+        expect(screen.getByText('赞最多的那段介绍的第一行')).toBeTruthy();
+        expect(screen.getByLabelText('vrcc.maps.teen')).toBeTruthy();
+        // 介绍和地图名同一行：定宽靠右，放不下自己省略。
+        const intro = screen.getByText('赞最多的那段介绍的第一行');
+        expect(intro.className).toContain('w-80');
+        expect(container).toBeTruthy();
+    });
+
+    it('teen 被服务器停掉以后不渲染标记、也不崩', () => {
+        // `teen` 已被官方弃用，2026-12-26 起不再返回。这条钉住那一天的行为：
+        // 字段缺席 → 归一化成 null → 绿色小苗不渲染，其余照常。
+        render(
+            <VrccMapsPanel
+                boards={fromMyBoard({
+                    min: 1,
+                    maps: [
+                        {
+                            world: 'wrld_a',
+                            name: '孤',
+                            // 服务器不再给 `teen`
+                            intro: '介绍还在'
+                        }
+                    ]
+                })}
+                sort="top"
+                sortSupported
+                query=""
+                onSortChange={() => {}}
+                onQueryChange={() => {}}
+                onRefresh={() => {}}
+                onOpenWorld={() => {}}
+            />
+        );
+
+        expect(screen.queryByLabelText('vrcc.maps.teen')).toBeNull();
+        // 同一行的其它东西不受影响。
+        expect(screen.getByText('孤')).toBeTruthy();
+        expect(screen.getByText('介绍还在')).toBeTruthy();
+    });
+
+    it('公开榜不渲染「青少年可进」标记（那个字段只有玩家视角给）', () => {
+        renderMaps('top');
+        expect(screen.queryByLabelText('vrcc.maps.teen')).toBeNull();
     });
 });
 

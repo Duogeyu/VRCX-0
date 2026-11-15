@@ -1757,6 +1757,18 @@ pub struct VrccRatedMaps {
 /// 比公开榜单多了「我自己的视角」：去过几次、我有没有打过分、热评、名次、
 /// 介绍首行。**不复用 [`VrccBoardMap`]**：那边没有这些字段，硬塞会让
 /// 调用方分不清「没有」和「不适用」。
+///
+/// # 哪些字段只在某些排序下出现（2026-11 实测）
+///
+/// `/me/board` 的行**不是固定形状**，服务器按排序裁剪：
+///
+/// | 字段 | `top` / `new` | `week` | `went` |
+/// |---|:--:|:--:|:--:|
+/// | `rank` | ✅ | ❌ 用列表位置 | ❌ |
+/// | `week` | ❌ | ✅ | ❌ |
+/// | `mine` / `wentAt` / `ratedAt` | ❌ | ❌ | ✅ |
+///
+/// 所以这些都是 `Option`，**调用方不能假设某个排序下一定拿得到**。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VrccMyBoardMap {
@@ -1772,52 +1784,179 @@ pub struct VrccMyBoardMap {
     /// 房间人数上限。
     #[serde(default)]
     pub cap: Option<i64>,
-    /// 封面**相对路径**。
+    /// 封面**相对路径**（形如 `/api/match?xdimg=…`）。
+    ///
+    /// 和公开榜不同：公开榜的 `img` 已经是完整网址，这里是相对的。要拼站点
+    /// 根才能用，所以同时给了 [`Self::img_url`]。
     #[serde(default)]
     pub img: Option<String>,
     /// 同一张封面的完整网址（1.11.0 起）。
     #[serde(default)]
     pub img_url: Option<String>,
-    /// 榜单状态。
+    /// 榜单状态（`ok` / …）。
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
     pub avg: Option<f64>,
+    /// 排序真正用的分数：按评分人数向均值收缩后的加权分。
+    ///
+    /// 实测同一张图 `avg` 9.6、`adj` 9.47——**名次是按 `adj` 排的**，
+    /// 直接拿 `avg` 排会和服务器给的 `rank` 对不上。
+    #[serde(default)]
+    pub adj: Option<f64>,
     #[serde(default)]
     pub raters: Option<i64>,
     /// 去过的人数。
     #[serde(default)]
     pub went: Option<i64>,
     /// 总榜或本周榜上的名次；有人打分的才有。筛选不改名次。
+    ///
+    /// **本周榜下没有**：那时名次就是列表里的位置。
     #[serde(default)]
     pub rank: Option<i64>,
+    /// 本周几人打分，**只在 `sort=week` 下有**。和公开榜的同名字段语义一致。
+    #[serde(default)]
+    pub week: Option<i64>,
+    /// 轻重：`light` / `mid` / `heavy`，多小咕没测过是 `null`。
+    ///
+    /// 实测 60 行里只有 14 行有值——**大部分图是没测过的**，不能把 `None`
+    /// 当成「轻」。
+    #[serde(default)]
+    pub weight: Option<String>,
+    /// 此刻有人在开房。
+    #[serde(default)]
+    pub room: Option<bool>,
+    /// 青少年可进（16–17 岁星池）。
+    ///
+    /// # 已弃用：2026-12-26 起服务器不再返回（1.14.0 起弃用）
+    ///
+    /// 官方弃用表里写明这个字段「网页不显示，是内部的标记」，和 [`Self::adj`]
+    /// 一起在 **2026-12-26** 到期。到期后服务器直接不给这个键，这里的
+    /// `Option` 变成 `None`——界面那边「地图名后面那个绿色小苗」会自然不再
+    /// 渲染，不需要改代码，也不会崩。
+    ///
+    /// 保留这个字段而不提前删掉，是因为**到期前它还是真的**：删了就等于白白
+    /// 少一个多月的「青少年可进」提示。等官方真的停了再删。
+    #[serde(default)]
+    pub teen: Option<bool>,
     /// 赞最多的那段介绍的第一行。
     #[serde(default)]
     pub intro: Option<String>,
-    /// 最热的一条短评。
+    /// 我给这张图打的分（1–10）。**只在 `sort=went` 下有**。
+    ///
+    /// 有它就不必再为每一行去问 `me/maps/{world}`。
     #[serde(default)]
-    pub hot: Option<VrccMapHot>,
+    pub mine: Option<i64>,
+    /// 我上次去的时刻（毫秒）。**只在 `sort=went` 下有**。
+    #[serde(default)]
+    pub went_at: Option<i64>,
+    /// 我上次打分的时刻（毫秒）。**只在 `sort=went` 下有**，没打过分就没有。
+    #[serde(default)]
+    pub rated_at: Option<i64>,
+    /// 最热的一条短评。
+    ///
+    /// **和公开榜的同名字段不是同一个形状**，见 [`VrccMyBoardHot`]。
+    #[serde(default)]
+    pub hot: Option<VrccMyBoardHot>,
     /// 最多 3 条短评。
     #[serde(default)]
-    pub hots: Vec<VrccMapHot>,
+    pub hots: Vec<VrccMyBoardHot>,
+}
+
+/// `/me/board` 行上的短评。
+///
+/// # 为什么不能复用 [`VrccMapHot`]
+///
+/// 两个接口把**同一个字段名**给了**两个不同的形状**（2026-11 实测）：
+///
+/// ```text
+/// 公开榜   hot: { text, by, up, went }                 ← 有出处 by，没有 id / vote
+/// me/board hot: { id, text, up, vote, went, mine? }    ← 没有出处 by
+/// ```
+///
+/// 硬塞进一个结构体会让调用方分不清「服务器没给」和「这个接口不提供」——
+/// 同一个理由，[`VrccMyBoardMap`] 才没有复用 [`VrccBoardMap`]。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccMyBoardHot {
+    /// 短评编号。
+    ///
+    /// 投票（`maps.write`）要靠它定位是哪一条——没有 id 就没法投。
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// 赞数。
+    #[serde(default)]
+    pub up: Option<i64>,
+    /// 我投的票：`1` 赞、`-1` 踩、`0` 没投。
+    ///
+    /// 实测公开榜没有这个字段，只有带令牌的 `me/board` 才有。
+    #[serde(default)]
+    pub vote: Option<i64>,
+    /// 写的人去过这张图。
+    #[serde(default)]
+    pub went: Option<bool>,
+    /// 这条是我写的。**只有是自己的那条才会出现这个字段**（实测 131 条里
+    /// 1 条带它），所以 `None` 和 `Some(false)` 要当成同一件事：不是我写的。
+    #[serde(default)]
+    pub mine: Option<bool>,
 }
 
 /// `GET /me/board`：玩家看到的地图榜。
 ///
 /// 需要 `maps` 普通权限。和网页「榜单」一样，带玩家自己的评分、去过、热评。
 /// `dot` 是「有新内容」的提示，`min` 是进榜需要几人评分。
+///
+/// # 一次最多 60 行（2026-11 实测）
+///
+/// **没有分页参数**：`limit` / `offset` / `page` / `size` / `skip` 全部被服务器
+/// 静默忽略（`limit=100` 返回的字节数和默认请求完全一致）。实测 `top` / `new`
+/// 各 60 行、`week` 43 行、`went` 视去过几张而定。
+///
+/// 对比：公开的 [`VrccBoard`]（`boards/maps`）`limit` 上限 100。**切到这个接口
+/// 是用 40 行换 8 类字段**，这是有意接受的代价。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VrccMyBoard {
+    /// 服务器实际用的排序。
+    ///
+    /// 注意**带 `q` 搜索时这里会变成 `"find"`**，不再回显请求的 `sort`。
+    /// 所以不要拿它回填界面状态。
     #[serde(default)]
     pub sort: Option<String>,
+    /// 搜索词原样回显，只有带 `q` 时才有。
+    #[serde(default)]
+    pub q: Option<String>,
     #[serde(default)]
     pub min: Option<i64>,
     /// 有新内容的提示。
     #[serde(default)]
     pub dot: Option<VrccBoardDot>,
+    /// 最近几周（`from` 是那一周的毫秒时间戳，`w` 是周号）。
+    ///
+    /// **只在 `sort=week` 下有**，实测给最近 3 周。
+    #[serde(default)]
+    pub weeks: Vec<VrccBoardWeek>,
+    /// `sort=went` 的附加提示，实测值是 `"go"`。
+    ///
+    /// 官方文档没有解释这个字段；先原样留着，**不要据此做业务判断**。
+    #[serde(default)]
+    pub need: Option<String>,
     #[serde(default)]
     pub maps: Vec<VrccMyBoardMap>,
+}
+
+/// `GET /me/board?sort=week` 顶层的 `weeks` 条目。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccBoardWeek {
+    /// 那一周的起点（毫秒时间戳）。
+    #[serde(default)]
+    pub from: Option<i64>,
+    /// 周号，实测形如 `2965`。
+    #[serde(default)]
+    pub w: Option<i64>,
 }
 
 /// `GET /me/board` 的 `dot`：哪一块有新内容。

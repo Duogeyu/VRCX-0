@@ -814,9 +814,19 @@
             "sort": {
                 "top": "All time",
                 "week": "This week",
-                "new": "New"
+                "new": "New",
+                "went": "Visited"
             },
-            "week_count": "This week {count}"
+            "week_count": "This week {count}",
+            "search": "Search map name or author",
+            "search_clear": "Clear search",
+            "search_empty": "No maps match \"{query}\"",
+            "player_hint": "Connect to vrcc.cc to see the maps you have visited and your ratings",
+            "room": "Open",
+            "mine": "You rated {score}",
+            "went_count": "Visited {count}×",
+            "cap": "Up to {count}",
+            "teen": "Teen friendly"
         },
         "models": {
             "hint": "One vote a day per model",

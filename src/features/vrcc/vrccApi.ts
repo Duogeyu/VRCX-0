@@ -152,9 +152,15 @@ export const vrccApi = {
      * 玩家视角地图榜：比公开榜多「我去过几次、热评、名次、介绍首行」。
      *
      * 需要 `maps` 普通权限。`sort` 多一个 `went`（我去过的）。
+     *
+     * `q` 非空时走搜索（地图名或作者）。搜索时服务器**忽略 `sort`**，并把
+     * 回答里的 `sort` 改写成 `"find"`——所以别拿回答回填界面上的排序状态。
+     *
+     * 这个接口**一次最多 60 行，没有分页参数**（`limit`/`offset`/`page` 都会
+     * 被静默忽略），比公开榜的 100 行少。这是切到玩家视角的既定代价。
      */
-    myBoard: (sort: VrccMyBoardSort = 'top') =>
-        call(() => commands.appVrccMyBoard(sort)),
+    myBoard: (sort: VrccMyBoardSort = 'top', q: string | null = null) =>
+        call(() => commands.appVrccMyBoard(sort, q)),
 
     /**
      * 第一步设备授权：拿码。

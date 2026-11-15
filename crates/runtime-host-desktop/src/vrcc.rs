@@ -490,9 +490,13 @@ impl DesktopVrccRuntime {
     }
 
     /// 玩家视角地图榜。需要 `maps` 普通权限。
-    pub async fn my_board(&self, sort: VrccMyBoardSort) -> Result<VrccMyBoard, VrccFailure> {
+    pub async fn my_board(
+        &self,
+        sort: VrccMyBoardSort,
+        q: Option<&str>,
+    ) -> Result<VrccMyBoard, VrccFailure> {
         self.service
-            .my_board(sort)
+            .my_board(sort, q)
             .await
             .map_err(|error| VrccFailure::from_error(&error))
     }

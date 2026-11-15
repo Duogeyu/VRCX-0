@@ -317,16 +317,19 @@ pub async fn app__vrcc_my_map_page(
 }
 
 /// 玩家视角地图榜。需要 `maps` 普通权限。
+///
+/// `q` 非空时走搜索（地图名或作者），此时服务器会忽略 `sort`。
 #[tauri::command]
 #[specta::specta]
 pub async fn app__vrcc_my_board(
     state: State<'_, AppState>,
     sort: Option<VrccMyBoardSort>,
+    q: Option<String>,
 ) -> Result<VrccMyBoard, AppError> {
     state
         .runtime_host()
         .vrcc()
-        .my_board(sort.unwrap_or_default())
+        .my_board(sort.unwrap_or_default(), q.as_deref())
         .await
         .map_err(|failure| AppError::Vrcc { failure })
 }
