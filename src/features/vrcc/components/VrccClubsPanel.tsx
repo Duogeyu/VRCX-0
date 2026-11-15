@@ -42,9 +42,6 @@ const PAGE_SIZE = 24;
 /** 一次取回多少条。接口上限 100，现在线上不到 20 个社团。 */
 const ALL_CLUBS_LIMIT = 100;
 
-/** 没有数据时的空数组。模块级常量，引用不变，`useMemo` 才不会每帧失效。 */
-const EMPTY_ROWS: VrccClubRow[] = [];
-
 /**
  * 排序键。默认是服务器顺序，也就是热度顺序：点赞 → 群组人数 → 短码。
  *
@@ -329,12 +326,13 @@ export function VrccClubsPanel({
         }
     }, []);
 
-    const rows = view?.rows ?? EMPTY_ROWS;
     const total = view?.total ?? null;
     const sorted = useMemo(
-        // 排序规则由语言决定（中文按拼音），所以语言变了才重算。
-        () => sortClubs(rows, sort, new Intl.Collator(i18n.language)),
-        [rows, sort, i18n.language]
+        // 依赖整份 `view`，不是它里面的数组：排序的输入就是「这一份数据」。
+        // 排序规则由语言决定（中文按拼音），所以语言变了也要重算。
+        () =>
+            sortClubs(view?.rows ?? [], sort, new Intl.Collator(i18n.language)),
+        [view, sort, i18n.language]
     );
     const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
     const safePage = Math.min(page, pageCount - 1);
@@ -399,7 +397,7 @@ export function VrccClubsPanel({
                 </span>
             </div>
 
-            {rows.length === 0 ? (
+            {sorted.length === 0 ? (
                 <p className="text-muted-foreground p-4 text-sm">
                     {t('vrcc.clubs.empty')}
                 </p>
