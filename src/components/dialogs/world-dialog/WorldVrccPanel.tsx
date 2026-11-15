@@ -432,9 +432,18 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                     {/* 我自己的分：现在可以改。
                         写操作需要 maps.rate，所以只有连上之后才给控件；
                         未连接时连输入框都不出现——摆一个点不动的打分器
-                        比没有更糟。 */}
-                    {canRate ? (
+                        比没有更糟。
+
+                        还要等「我的评分」（`signedIn`）到手再挂：编辑器的草稿
+                        只在挂载时取一次。权限查询是本地调用、几乎立刻就回，
+                        早先它一到就挂上编辑器，草稿是空的；等我的评分到了，
+                        短评框仍是空的，玩家只改一下分数提交，就会被判成
+                        「清空短评」，把原来那条删掉。`key` 绑住服务器上的
+                        分数和短评：别处改过、或提交后重新拉到新值时，草稿
+                        跟着重新取。 */}
+                    {canRate && signedIn.data ? (
                         <VrccRatingEditor
+                            key={`${worldId}:${mine?.score ?? ''}:${mine?.text ?? ''}`}
                             worldId={worldId}
                             currentScore={
                                 mine && typeof mine.score === 'number'
