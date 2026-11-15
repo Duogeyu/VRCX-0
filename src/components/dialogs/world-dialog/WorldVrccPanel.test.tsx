@@ -579,6 +579,47 @@ describe('WorldVrccPanel', () => {
         expect(screen.getByText('dialog.world.vrcc.no_words_yet')).toBeTruthy();
     });
 
+    it('我的评分还没到时不给打分器；到了之后只改分数不会删掉原来的短评', async () => {
+        appVrccMapPage.mockResolvedValue(mapPage());
+        // 权限查询几乎立刻就回，带令牌的那一页要慢一些：这是真实的先后顺序。
+        let deliverMine: (page: unknown) => void = () => {};
+        appVrccMyMapPage.mockReturnValue(
+            new Promise((resolve) => {
+                deliverMine = resolve;
+            })
+        );
+        appVrccRateMap.mockResolvedValue(null);
+        renderWithClient(<WorldVrccPanel worldId="wrld_test" />);
+
+        await screen.findByText('8.4');
+        await waitFor(() => expect(appVrccConnection).toHaveBeenCalled());
+        expect(
+            screen.queryByPlaceholderText('dialog.world.vrcc.words_placeholder')
+        ).toBeNull();
+
+        deliverMine(myMapPage());
+        const textarea = (await screen.findByPlaceholderText(
+            'dialog.world.vrcc.words_placeholder'
+        )) as HTMLTextAreaElement;
+        expect(textarea.value).toBe('我写的这条');
+
+        // 只把 7 分改成 9 分：短评没动，必须是 keep。
+        const scores = screen.getAllByRole('radio', {
+            name: 'dialog.world.vrcc.rate_value'
+        });
+        fireEvent.click(scores[8]);
+        fireEvent.click(screen.getByText('dialog.world.vrcc.rate_submit'));
+
+        await waitFor(() =>
+            expect(appVrccRateMap).toHaveBeenCalledWith(
+                'wrld_test',
+                9,
+                'keep',
+                null
+            )
+        );
+    });
+
     it('连上了但令牌缺 maps.rate 时，提示重连而不是给个点不动的打分器', async () => {
         appVrccMapPage.mockResolvedValue(mapPage());
         appVrccMyMapPage.mockResolvedValue(
