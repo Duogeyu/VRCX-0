@@ -110,7 +110,7 @@ Windows에서는 **Visual Studio Build Tools**를 설치하고 **"C++를 사용�
 
 ```bash
 git clone https://github.com/VRChatCN-Kipfel/VRCX-0-Galaxies
-cd VRCX-0
+cd VRCX-0-Galaxies
 
 npm install
 ```

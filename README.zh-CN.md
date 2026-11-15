@@ -109,7 +109,7 @@ Windows 用户还需安装 **Visual Studio Build Tools**，并勾选 **"使用 C
 
 ```bash
 git clone https://github.com/VRChatCN-Kipfel/VRCX-0-Galaxies
-cd VRCX-0
+cd VRCX-0-Galaxies
 
 npm install
 ```
