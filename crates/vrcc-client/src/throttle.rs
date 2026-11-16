@@ -185,6 +185,12 @@ impl RateLimiter {
         self.last_at.remove(key);
     }
 
+    /// 忘掉所有槽的上次放行时间（会话换了令牌时用，见
+    /// `VrccClient::forget_session_state`）。窗口里的记录不动，每分钟的总数照算。
+    pub fn forget_gaps(&mut self) {
+        self.last_at.clear();
+    }
+
     /// 当前窗口内已用次数。
     pub fn window_used(&self, now: Instant) -> usize {
         self.stamps

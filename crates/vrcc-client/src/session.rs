@@ -145,9 +145,9 @@ impl VrccSession {
         state.last_poll_at = None;
         state.generation = state.generation.wrapping_add(1);
         drop(state);
-        // 上一个令牌的个人数据缓存不再属于任何人。按令牌分键本来就读不到，
-        // 这里是顺手把内存还回去。
-        self.client.forget_personal_replies();
+        // 上一个令牌的回答和它占着的间隔都不再属于任何人，见
+        // `VrccClient::forget_session_state`。
+        self.client.forget_session_state();
     }
 
     /// 断开：只清本地状态。服务器侧吊销由 `client.disconnect()` 负责。
@@ -158,7 +158,7 @@ impl VrccSession {
             ..default_state()
         };
         drop(state);
-        self.client.forget_personal_replies();
+        self.client.forget_session_state();
     }
 
     /// 令牌被服务器判了失效（`404 gone`）：清掉本地状态，并记下是这个原因。
@@ -179,7 +179,7 @@ impl VrccSession {
             ..default_state()
         };
         drop(state);
-        self.client.forget_personal_replies();
+        self.client.forget_session_state();
         true
     }
 
@@ -208,6 +208,12 @@ impl VrccSession {
             state.poll_every_secs = every.max(25);
         }
         true
+    }
+
+    /// 把会话的客户端指到本地测试服务器上。测试用。
+    #[cfg(test)]
+    pub(crate) fn point_client_at(&mut self, base: String) {
+        self.client.set_base(base);
     }
 
     /// 这个会话的客户端。每次返回的都是**同一个**客户端的克隆，限流、退避、

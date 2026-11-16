@@ -745,6 +745,16 @@ impl VrccClient {
         Ok(())
     }
 
+    /// 现在是不是有东西挡着重试：全局退避还没结束，或者这一份额度已经用完。
+    fn retries_held_back(&self, bucket: Option<QuotaBucket>) -> bool {
+        let now = Instant::now();
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        !state.backoff_remaining(now).is_zero()
+            || bucket
+                .and_then(|bucket| state.live_quota(bucket, now))
+                .is_some_and(|quota| quota.remaining <= 0)
+    }
+
     /// 旧服务器的 429 没有 `Retry-After`：按指数退避猜。
     fn note_rate_limited(&self) -> Duration {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -911,18 +921,30 @@ impl VrccClient {
         }
     }
 
+    /// 把客户端指到本地测试服务器上。测试用。
+    #[cfg(test)]
+    pub(crate) fn set_base(&mut self, base: String) {
+        self.base = base;
+    }
+
     /// 两个句柄是不是同一个客户端（共享限流、额度与缓存）。测试用。
     #[cfg(test)]
     pub(crate) fn shares_state_with(&self, other: &VrccClient) -> bool {
         Arc::ptr_eq(&self.state, &other.state)
     }
 
-    /// 丢掉所有带令牌的回答。会话换了令牌（连上、断开、失效）时调用。
+    /// 会话换了令牌（连上、断开、失效）：丢掉所有带令牌的回答，并忘掉各接口的
+    /// 间隔记录。
     ///
-    /// 按令牌指纹分键，换了账号本来就读不到；这里是把内存及时还回去。
-    pub fn forget_personal_replies(&self) {
+    /// - 回答按令牌指纹分键，换了账号本来就读不到；清掉是把内存及时还回去。
+    /// - 间隔记录**必须一起清**：槽名不带令牌，上一个令牌占着的槽留着的话，新令牌在
+    ///   间隔内的第一次读手上没有回答（刚清掉），只能拿到本机的「太频繁」——断开后
+    ///   一分钟内重连、换一个也连了星遇同频的号，都会碰上。每分钟的窗口不动；提醒轮询
+    ///   的 25 秒是按授权算的，换了令牌就是另一份授权。
+    pub fn forget_session_state(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.replies.retain(|key, _| key.scope == 0);
+        state.limiter.forget_gaps();
     }
 
     /// 这个读请求的排队号。
@@ -1352,6 +1374,12 @@ impl VrccClient {
             // 结束后不该再被本地间隔挡着）。
             if code == 429 {
                 self.record_too_many(&error, rate, call.bucket);
+                // 只有退避或额度闸门真的挡着重试时才还槽。`Retry-After` 很长、接口又
+                // 不属于任何一份额度时，`record_too_many` 什么都不记，这时槽就是唯一
+                // 挡着连发的东西，留着。
+                if !self.retries_held_back(call.bucket) {
+                    release.keep();
+                }
             }
             Err(VrccError::new(
                 ErrorLayer::Server,
@@ -4423,7 +4451,7 @@ mod tests {
     /// 间隔是一小时，不还槽的话，玩家要等一小时才能再试。
     #[tokio::test]
     async fn after_a_429_backoff_the_read_is_not_held_by_its_gap() {
-        let too_many = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+        let too_many = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
             .to_string();
         let stickers = serde_json::to_string(&VrccStickers::default()).expect("序列化");
         let (base, seen) = serve_script(vec![too_many, ok_with("", &stickers)]).await;
@@ -4442,8 +4470,46 @@ mod tests {
             ),
             "{held:?}"
         );
-        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        tokio::time::sleep(Duration::from_millis(2_200)).await;
         client.stickers().await.expect("退避过了：真的去问");
         assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// 换了令牌（断开后重连、换号）：上一个令牌的回答清掉了，它占着的间隔也不能
+    /// 留着。不然新令牌在间隔内的第一次读手上没有回答，只能拿到本机的「太频繁」。
+    #[tokio::test]
+    async fn a_new_token_is_not_held_by_the_old_tokens_gaps() {
+        let (base, seen) = serve_script(vec![ok_with("", "{}"), ok_with("", "{}")]).await;
+        let mut session = crate::session::VrccSession::new("dev-test");
+        session.point_client_at(base);
+
+        session.connect("tok-a".into(), None, None, None);
+        session.client().mutuals().await.expect("账号 A");
+        session.connect("tok-b".into(), None, None, None);
+        session
+            .client()
+            .mutuals()
+            .await
+            .expect("账号 B 的第一次读：真的去问，不被 A 的间隔挡下");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// 429 的 `Retry-After` 很长、接口又不属于任何一份额度时，没有退避也没有额度
+    /// 闸门挡着重试：这时槽留着，不能让紧接着的重试直接发出去。
+    #[tokio::test]
+    async fn a_429_with_nothing_else_holding_retries_keeps_the_gap() {
+        let too_many = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7200\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+            .to_string();
+        let stickers = serde_json::to_string(&VrccStickers::default()).expect("序列化");
+        let (base, seen) = serve_script(vec![too_many, ok_with("", &stickers)]).await;
+        let client = client_at(base);
+
+        client.stickers().await.expect_err("第一次 429");
+        let held = client.stickers().await.expect_err("紧接着重试：被本地挡下");
+        assert!(
+            matches!(held.detail, ErrorDetail::ThrottledLocally { .. }),
+            "{held:?}"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 }
