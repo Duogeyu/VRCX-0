@@ -1183,6 +1183,10 @@ impl VrccClient {
             match self.lookup_reply(key) {
                 Cached::Fresh(text) if call.marks_read() => fallback = Some(text),
                 Cached::Fresh(text) => return decode(&text),
+                // 标已读的读不发条件请求：服务器要是回 `304`，可能就不执行「标已读」
+                // 这个副作用了。眼下服务器不给校验值，碰不到；上游已经在讨论加 `ETag`
+                // （vrcc-cc/xingyu-tongpin-api#3），加上之后这里就会碰到。
+                Cached::Stale { .. } if call.marks_read() => {}
                 Cached::Stale {
                     text,
                     validators,
@@ -1225,6 +1229,15 @@ impl VrccClient {
                     if matches!(error.detail, ErrorDetail::ThrottledLocally { .. }) {
                         return decode(&text);
                     }
+                }
+                if call.reusable() && error.is_local_gap() {
+                    // 可复用的读被本地间隔挡下、手上又没有回答可给：调用方只能拿到
+                    // 「太频繁」。复用回答的设计就是为了不出现这种情况，碰到了多半是
+                    // 哪条路径漏了（例如同一个接口用了两种 `limit`），留个线索。
+                    tracing::warn!(
+                        key = call.key,
+                        "vrcc: a read was turned away by the local gap with no reply to reuse"
+                    );
                 }
                 return Err(error);
             }
@@ -4211,5 +4224,28 @@ mod tests {
                 "{request}"
             );
         }
+    }
+
+    /// 标已读的读不发条件请求：服务器回 `304` 的话可能就不执行「标已读」了。
+    #[tokio::test]
+    async fn a_mark_read_never_sends_a_conditional_request() {
+        let (base, seen) = serve_script(vec![
+            // `no-cache` 让这份回答立刻需要验证（否则要等 30 秒间隔过去）。
+            ok_with("Cache-Control: no-cache\r\nETag: \"v1\"\r\n", "{}"),
+            ok_with("Cache-Control: no-cache\r\nETag: \"v1\"\r\n", "{}"),
+        ])
+        .await;
+        let client = client_at(base);
+
+        client.crossings(true).await.expect("第一次标已读");
+        client.crossings(true).await.expect("再标一次");
+
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            !requests[1].to_ascii_lowercase().contains("if-none-match"),
+            "标已读的读不能带校验值：{}",
+            requests[1]
+        );
     }
 }
