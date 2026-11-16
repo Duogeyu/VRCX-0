@@ -8,8 +8,6 @@ import { normalizeVrccError } from '@/lib/vrccError';
 import { commands } from '@/platform/tauri/bindings';
 import type { VrccMyMap } from '@/platform/tauri/bindings';
 
-import { callVrcc } from './vrccConnectionRepository';
-
 /**
  * 星遇同频地图榜上的公开信息。
  *
@@ -77,7 +75,7 @@ export function vrccMyMapPageQueryOptions(
         queryKey: queryKeys.worldVrccSignedIn(worldId, sort, account),
         queryFn: async () =>
             worldId.startsWith('wrld_')
-                ? callVrcc(() => commands.appVrccMyMapPage(worldId, sort))
+                ? commands.appVrccMyMapPage(worldId, sort)
                 : null,
         // 切短评排序时，新排序那一份到之前先沿用另一个排序的那一份：「我的评分」
         // 和排序无关，而打分器要等它才挂载——不沿用的话一切排序，编辑器就被卸掉，
@@ -157,14 +155,12 @@ export async function rateVrccMap(
     textMode: 'keep' | 'clear' | 'write',
     text: string | null
 ) {
-    return await callVrcc(() =>
-        commands.appVrccRateMap(worldId, score, textMode, text)
-    );
+    return await commands.appVrccRateMap(worldId, score, textMode, text);
 }
 
 /** 删掉自己给这张图的评分。写操作，语义同上。 */
 export async function deleteVrccMapRating(worldId: string) {
-    return await callVrcc(() => commands.appVrccDeleteMapRating(worldId));
+    return await commands.appVrccDeleteMapRating(worldId);
 }
 
 /**
@@ -204,7 +200,7 @@ export async function readVrccMyMap(
         return null;
     }
     try {
-        return await callVrcc(() => commands.appVrccMyMap(worldId));
+        return await commands.appVrccMyMap(worldId);
     } catch (error) {
         // **必须归一化再抛出**：直接抛原始 `AppError` 的话，调用方拿到的是
         // 一坨没有分类的对象，只能笼统说「出错了」——而这里的失败要分好几种：
@@ -227,9 +223,7 @@ export async function voteVrccMapContent(
     id: number,
     vote: 'none' | 'up' | 'down'
 ) {
-    return await callVrcc(() =>
-        commands.appVrccVoteMapContent('rate', id, vote)
-    );
+    return await commands.appVrccVoteMapContent('rate', id, vote);
 }
 
 /**

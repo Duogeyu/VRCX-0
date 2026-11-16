@@ -4,8 +4,6 @@ import { queryOptions, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 
 import { queryKeys } from '@/lib/entityQueryCache';
-import { queryClient } from '@/lib/queryClient';
-import { vrccErrorKind } from '@/lib/vrccError';
 import { scopeGrants } from '@/lib/vrccScope';
 import { commands } from '@/platform/tauri/bindings';
 import type { VrccConnectionSnapshot } from '@/platform/tauri/bindings';
@@ -74,12 +72,12 @@ export function vrccAccountKey(
  * 可能还是上一个账号的，拿它拼键会先把别人的数据显示出来。所以 `ready` 之前
  * `account` 是 `offline`、`grants` 是 `undefined`，个人数据的查询要等 `ready`。
  *
- * 面板开着的时候连接也会变，三条路都会让已经挂着的面板换键：
+ * 面板开着的时候连接也会变，两条路都会让已经挂着的面板换键：
  *
  * - 星遇同频页断开或重连时，把新连接写进同一份缓存
  *   （`useVrccController.refreshConnection`）；
- * - 后台轮询发现令牌失效时，后端发 `vrccConnectionChanged`，这里收到就重读；
- * - 前台调用撞上令牌失效时，[`refreshVrccConnectionAfterFailure`] 让它重读。
+ * - 令牌被判失效时（后台轮询或前台命令撞上的都算），后端发
+ *   `vrccConnectionChanged`，这里收到就重读。
  */
 export function useVrccConnection(): {
     /** 这次挂载之后已经读到了当前连接。 */
@@ -128,36 +126,4 @@ export function useVrccConnection(): {
         grants: (scope) =>
             ready ? scopeGrants(connection?.scope ?? null, scope) : undefined
     };
-}
-
-/**
- * 一次星遇同频调用失败后调用：令牌失效时让连接查询重读。
- *
- * 令牌被服务器判失效时，后端当场就把它清掉了（`VrccService::settle`），但只有
- * 后台轮询发现时才发 `vrccConnectionChanged`。前台调用撞上的（例如在世界详情里
- * 提交评分收到 `404 gone`）不发，已经挂着的世界、群组面板就会一直拿着旧账号的
- * 键和权限，直到重新打开。所以星遇同频调用的失败都过一遍这里。
- *
- * 只认 `needsReauth`：缺权限（`missingScope`）时令牌还在，连接没变。
- */
-export function refreshVrccConnectionAfterFailure(error: unknown): void {
-    if (vrccErrorKind(error) !== 'needsReauth') {
-        return;
-    }
-    void queryClient.invalidateQueries({
-        queryKey: queryKeys.vrccConnection()
-    });
-}
-
-/**
- * 调一次星遇同频命令。失败时先过 [`refreshVrccConnectionAfterFailure`]，再把
- * 错误原样抛出（要不要归一化由调用方决定）。
- */
-export async function callVrcc<T>(run: () => Promise<T>): Promise<T> {
-    try {
-        return await run();
-    } catch (error) {
-        refreshVrccConnectionAfterFailure(error);
-        throw error;
-    }
 }
