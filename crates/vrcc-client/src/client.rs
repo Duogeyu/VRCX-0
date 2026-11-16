@@ -501,7 +501,13 @@ impl Call<'_> {
 }
 
 /// 同一个读请求的「排队号」：同时发起的同一个读，后来的等前面那个的回答。
-type Flight = Arc<tokio::sync::Mutex<()>>;
+///
+/// 锁里放的是前面那个分给排队者的回答（见 [`VrccClient::share_with_queued`]）：
+/// 拿到号以后看到有，就直接用它，不再发第二次。
+type Flight = Arc<FlightTurn>;
+
+/// 排队号里那把锁：锁着前面那个分给排队者的回答。
+type FlightTurn = tokio::sync::Mutex<Option<String>>;
 
 /// 一个可克隆的客户端句柄。
 #[derive(Clone)]
@@ -512,7 +518,7 @@ pub struct VrccClient {
     token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     state: Arc<std::sync::Mutex<VrccClientState>>,
     /// 正在路上的读请求，按 [`ReplyKey`] 排队，见 [`Self::flight`]。
-    flights: Arc<std::sync::Mutex<HashMap<ReplyKey, Weak<tokio::sync::Mutex<()>>>>>,
+    flights: Arc<std::sync::Mutex<HashMap<ReplyKey, Weak<FlightTurn>>>>,
 }
 
 impl VrccClient {
@@ -919,9 +925,23 @@ impl VrccClient {
     /// 限流挡住或排队，界面要么报「太频繁」，要么等几秒才看到自己刚改的内容。
     /// 间隔本来是「这段时间里不会有新东西」的礼貌值，写了之后这个前提不成立了，
     /// 所以一起放开。每分钟 120 次的窗口不动。
+    ///
+    /// 还在路上的同一个读也一样：它的排队号从表里摘掉（之后的重拉拿新号，不会排在
+    /// 写之前就发出去的那个读后面、拿到它分来的旧回答，见 [`Self::share_with_queued`]），
+    /// 槽也放开（不用等它的间隔）。
     fn forget_replies(&self, affected: impl Fn(&str, &str) -> bool) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut slots = Vec::new();
+        {
+            let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+            flights.retain(|key, _| {
+                let hit = affected(key.key, &key.path);
+                if hit {
+                    slots.push(limiter_key(key.key, &key.path));
+                }
+                !hit
+            });
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.replies.retain(|key, _| {
             let hit = affected(key.key, &key.path);
             if hit {
@@ -954,7 +974,12 @@ impl VrccClient {
     ///   间隔内的第一次读手上没有回答（刚清掉），只能拿到本机的「太频繁」——断开后
     ///   一分钟内重连、换一个也连了星遇同频的号，都会碰上。每分钟的窗口不动；提醒轮询
     ///   的 25 秒是按授权算的，换了令牌就是另一份授权。
+    /// - 带令牌的读的排队号也摘掉：之后来的拿新号，不会排在旧令牌的那个读后面。
     pub fn forget_session_state(&self) {
+        {
+            let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+            flights.retain(|key, _| key.scope == 0);
+        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.replies.retain(|key, _| key.scope == 0);
         state.limiter.forget_gaps();
@@ -964,7 +989,8 @@ impl VrccClient {
     ///
     /// 客户端共享以后，同一个读两处同时发起（两个组件一起挂载）时，两个都没在缓存
     /// 里找到，第二个就会撞上第一个刚占住的间隔，报「太频繁」。排队以后，后来的
-    /// 等前面那个做完，再去缓存里拿它的回答。
+    /// 等前面那个做完：前面那个把回答分过来了（[`Self::share_with_queued`]）就直接
+    /// 用，没有再去缓存里找。
     fn flight(&self, key: &ReplyKey) -> Flight {
         let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(flight) = flights.get(key).and_then(Weak::upgrade) {
@@ -972,9 +998,38 @@ impl VrccClient {
         }
         // 顺手清掉已经没人排的键，免得表随逛过的世界一直长。
         flights.retain(|_, flight| flight.strong_count() > 0);
-        let flight = Arc::new(tokio::sync::Mutex::new(()));
+        let flight = Arc::new(tokio::sync::Mutex::new(None));
         flights.insert(key.clone(), Arc::downgrade(&flight));
         flight
+    }
+
+    /// 把这次成功的回答分给正排在同一个读后面的调用方，并把这个排队号从表里摘掉。
+    ///
+    /// 服务器给个人接口的回答都带 `no-store`，存不下：只靠排队的话，两个组件一起
+    /// 挂载时后来的那个拿到号、缓存里没有，还得再发一次。分给它就只花一次。
+    ///
+    /// 只分给「请求在路上时就已经拿了号」的调用方：号一摘，之后来的拿到的是新号，
+    /// 看不到这份，照样自己发；手里攥着旧号的都走了，这份回答也就跟着没了，不为
+    /// 以后的请求存。所以和 `no-store` 不冲突；`no-cache` 的也照分——排队者是在这次
+    /// 请求发出之后才来的，拿到的不会比它自己发一次旧。
+    ///
+    /// 调用方保证：只在正文已经解出来之后调用；标已读的读（`mark=1`）不调用——
+    /// 那种读带着写，各自真的发出去。
+    fn share_with_queued(
+        &self,
+        key: &ReplyKey,
+        flight: &Flight,
+        turn: &mut Option<String>,
+        text: &str,
+    ) {
+        *turn = Some(text.to_string());
+        let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        if flights
+            .get(key)
+            .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), Arc::as_ptr(flight)))
+        {
+            flights.remove(key);
+        }
     }
 
     /// 记下服务器在 `RateLimit-*` 里说的一份额度。
@@ -1215,13 +1270,16 @@ impl VrccClient {
                 None
             };
         let reply_key = self.reply_key(&call, token.as_deref());
-        // 同一个读同时只有一个在路上；后来的拿到号以后再查缓存，前面那个的回答
-        // 这时已经在里面了。
+        // 同一个读同时只有一个在路上；后来的拿到号以后，先看前面那个有没有把回答
+        // 分过来（见 `share_with_queued`），再查缓存。
         let flight = reply_key.as_ref().map(|key| self.flight(key));
-        let _turn = match &flight {
+        let mut turn = match &flight {
             Some(flight) => Some(flight.lock().await),
             None => None,
         };
+        if let Some(text) = turn.as_ref().and_then(|turn| turn.as_ref()) {
+            return decode(text);
+        }
         // 间隔内的同一个读请求：先看有没有能复用的回答。放在扣额度之前——
         // 复用不发请求，不该占服务器的次数。
         //
@@ -1325,6 +1383,11 @@ impl VrccClient {
                 // 校验值就换上，没给就沿用原来的。
                 self.note_success();
                 let value = decode(text)?;
+                if let (Some(flight), Some(turn), false) =
+                    (flight.as_ref(), turn.as_mut(), call.marks_read())
+                {
+                    self.share_with_queued(key, flight, turn, text);
+                }
                 let renewed = Validators {
                     etag: cache
                         .validators
@@ -1355,6 +1418,15 @@ impl VrccClient {
         if status.is_success() {
             self.note_success();
             let value = decode(&text)?;
+            // 排在后面的同一个读直接拿这份，不再发第二次（标已读的读除外）。
+            if let (Some(key), Some(flight), Some(turn), false) = (
+                reply_key.as_ref(),
+                flight.as_ref(),
+                turn.as_mut(),
+                call.marks_read(),
+            ) {
+                self.share_with_queued(key, flight, turn, &text);
+            }
             let policy = ReplyPolicy {
                 ttl: reply_ttl(call.min_gap, call.authed, &cache),
                 validators: cache.validators.clone(),
@@ -4146,6 +4218,190 @@ mod tests {
             Ok(()),
             "没发出去的那次不该还占着槽"
         );
+    }
+
+    /// 每个连接都回答 `response`，但第一个连接收下请求后先通知 `received`，等 `go`
+    /// 才回答：测试借这段时间让第二个调用方排到同一个读后面。连接各自处理，第一个
+    /// 卡着时后面的照样能连上、拿到回答。
+    async fn serve_gated(
+        response: String,
+    ) -> (
+        String,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let received = Arc::new(tokio::sync::Notify::new());
+        let go = Arc::new(tokio::sync::Notify::new());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (notify, gate, counter) = (Arc::clone(&received), Arc::clone(&go), Arc::clone(&seen));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+                let (notify, gate, response) =
+                    (Arc::clone(&notify), Arc::clone(&gate), response.clone());
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    if first {
+                        notify.notify_one();
+                        gate.notified().await;
+                    }
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        (format!("http://{addr}/"), received, go, seen)
+    }
+
+    /// 两个组件一起挂载：同一个读，第二个在第一个还在路上时就排上了。回答是
+    /// `no-store`，存不下，以前第二个拿到号以后还得再发一次；现在直接拿第一个的。
+    /// 之后再来的不在路上的那一批里，照样自己发——这份回答不为以后的请求留着。
+    #[tokio::test]
+    async fn a_read_queued_behind_the_same_read_in_flight_takes_its_reply() {
+        use std::sync::atomic::Ordering;
+        let (base, received, go, seen) = serve_gated(ok_with(
+            "Cache-Control: no-store\r\n",
+            r#"{"at":1,"state":"ok"}"#,
+        ))
+        .await;
+        let client = client_at(base);
+        let queued = Arc::new(tokio::sync::Notify::new());
+
+        let first = client.status();
+        let second = async {
+            received.notified().await;
+            queued.notify_one();
+            client.status().await
+        };
+        let open_the_gate = async {
+            queued.notified().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            go.notify_one();
+        };
+        let (first, second, ()) = tokio::join!(first, second, open_the_gate);
+        assert_eq!(first.expect("第一个").state.as_deref(), Some("ok"));
+        assert_eq!(second.expect("第二个").state.as_deref(), Some("ok"));
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "排在后面的那个不该再发一次");
+
+        client.status().await.expect("回答到了以后才来的");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "回答到了以后才来的照样自己发：no-store 的回答不留给以后"
+        );
+    }
+
+    /// 打分前就发出去的地图页还在路上，打完分紧接着重拉：重拉不能排在它后面、拿它
+    /// 分来的打分前的那一份。写操作把这个读的排队号摘掉了，重拉拿新号，自己发。
+    #[tokio::test]
+    async fn a_refetch_after_a_write_does_not_take_a_reply_requested_before_it() {
+        use std::sync::atomic::Ordering;
+        let (base, received, go, seen) =
+            serve_gated(ok_with("Cache-Control: no-store\r\n", "{}")).await;
+        let client = client_at(base);
+        let queued = Arc::new(tokio::sync::Notify::new());
+
+        let before = client.my_map_page(WORLD, Some("hot"));
+        let write_then_refetch = async {
+            received.notified().await;
+            client
+                .rate_map(WORLD, 8, &VrccRatingText::Keep)
+                .await
+                .expect("打分");
+            queued.notify_one();
+            client.my_map_page(WORLD, Some("hot")).await
+        };
+        let open_the_gate = async {
+            queued.notified().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            go.notify_one();
+        };
+        let (before, after, ()) = tokio::join!(before, write_then_refetch, open_the_gate);
+        before.expect("打分前的那次");
+        after.expect("打分后重拉");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            3,
+            "打分前的读、打分、打分后的重拉，三次都要到服务器"
+        );
+    }
+
+    /// 分完回答，排队号就从表里摘掉：之后来的拿到的是新号，里面什么都没有，
+    /// 看不到上一批的回答。
+    #[tokio::test]
+    async fn sharing_a_reply_retires_the_flight() {
+        let client = client();
+        let key = ReplyKey {
+            scope: 0,
+            key: "status",
+            path: "status".to_string(),
+        };
+        let flight = client.flight(&key);
+        let mut turn = flight.lock().await;
+        client.share_with_queued(&key, &flight, &mut turn, "{}");
+
+        let later = client.flight(&key);
+        assert!(!Arc::ptr_eq(&flight, &later), "之后来的要拿新号");
+        assert!(later.lock().await.is_none(), "新号里没有上一批的回答");
+    }
+
+    /// 会话换了令牌：带令牌的读的排队号摘掉，开放数据的留着。
+    #[tokio::test]
+    async fn a_session_change_retires_the_flights_of_personal_reads() {
+        let client = client();
+        let personal = ReplyKey {
+            scope: 7,
+            key: "mutuals",
+            path: "me/mutuals".to_string(),
+        };
+        let open = ReplyKey {
+            scope: 0,
+            key: "status",
+            path: "status".to_string(),
+        };
+        let (personal_flight, open_flight) = (client.flight(&personal), client.flight(&open));
+
+        client.forget_session_state();
+
+        assert!(!Arc::ptr_eq(&personal_flight, &client.flight(&personal)));
+        assert!(Arc::ptr_eq(&open_flight, &client.flight(&open)));
+    }
+
+    /// 标已读的读带着写，不合并：两次都真的发出去。
+    #[tokio::test]
+    async fn reads_that_mark_as_read_are_not_shared() {
+        use std::sync::atomic::Ordering;
+        let (base, received, go, seen) =
+            serve_gated(ok_with("Cache-Control: no-store\r\n", "{}")).await;
+        let client = client_at(base);
+        let queued = Arc::new(tokio::sync::Notify::new());
+
+        let first = client.recent_notifications(true);
+        let second = async {
+            received.notified().await;
+            queued.notify_one();
+            client.recent_notifications(true).await
+        };
+        let open_the_gate = async {
+            queued.notified().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            go.notify_one();
+        };
+        let (first, second, ()) = tokio::join!(first, second, open_the_gate);
+        first.expect("第一次标已读");
+        second.expect("第二次标已读");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "标已读的两次都要真的发出去");
     }
 
     // -- 服务器的缓存头 ----------------------------------------------------
