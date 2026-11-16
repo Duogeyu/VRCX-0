@@ -818,13 +818,14 @@ impl VrccClient {
         }
     }
 
-    /// 按服务器的缓存头存一份成功回答（或者不存），返回存了没有。
+    /// 按服务器的缓存头存一份成功回答（或者不存）。返回**间隔内能不能直接给出**：
+    /// 存了、而且不需要先验证才算。
     ///
     /// - `no-store`：不存，并删掉这个键下的旧回答；
     /// - `no-cache`：只有带校验值才存，而且每次复用前都要先验证；没有校验值就和
-    ///   `no-store` 一样处理（存了也没法验证）；
-    /// - 这两种情况都把限流槽还回去：间隔内没有能直接给出的回答，槽还占着的话，下一次
-    ///   读只能报「太频繁」。本地间隔只在「间隔内有回答可给」时才有意义。
+    ///   `no-store` 一样处理（存了也没法验证）。
+    ///
+    /// 返回 `false` 时，限流槽由 [`SlotRelease`] 还回去，见那里的说明。
     fn keep_reply(
         &self,
         call: &Call<'_>,
@@ -833,10 +834,6 @@ impl VrccClient {
         policy: ReplyPolicy,
     ) -> bool {
         let unusable = policy.no_store || (policy.must_revalidate && policy.validators.is_empty());
-        if policy.must_revalidate || unusable {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.limiter.forget(&slot_of(call));
-        }
         if unusable {
             tracing::debug!(
                 key = call.key,
@@ -847,6 +844,7 @@ impl VrccClient {
             state.replies.remove(&key);
             return false;
         }
+        let reusable_now = !policy.must_revalidate;
         self.remember_reply(
             key,
             policy.ttl,
@@ -854,7 +852,7 @@ impl VrccClient {
             policy.validators,
             policy.must_revalidate,
         );
-        true
+        reusable_now
     }
 
     /// 记下一份成功回答，供之后复用或发条件请求。
@@ -1234,8 +1232,8 @@ impl VrccClient {
                 }
                 if call.reusable() && error.is_local_gap() {
                     // 可复用的读被本地间隔挡下、手上又没有回答可给：调用方只能拿到
-                    // 「太频繁」。复用回答的设计就是为了不出现这种情况，碰到了多半是
-                    // 哪条路径漏了（例如同一个接口用了两种 `limit`），留个线索。
+                    // 「太频繁」。复用回答和 `SlotRelease` 就是为了不出现这种情况，
+                    // 碰到了多半是哪条路径漏了，留个线索。
                     tracing::warn!(
                         key = call.key,
                         "vrcc: a read was turned away by the local gap with no reply to reuse"
@@ -1243,6 +1241,13 @@ impl VrccClient {
                 }
                 return Err(error);
             }
+        };
+        // 从这里起拿到了响应。可复用的读要是最后没存下能直接给出的回答（正文解不
+        // 出来、读到一半断了、服务器回错误、`no-store` / `no-cache`），守卫在函数
+        // 返回时把槽还回去；只有存下了才 `keep`。
+        let mut release = SlotRelease {
+            client: self,
+            slot: call.reusable().then(|| slot_of(&call)),
         };
         let status = response.status();
         let rate = RateHeaders::from_headers(response.headers());
@@ -1294,7 +1299,9 @@ impl VrccClient {
                     must_revalidate: cache.no_cache || (!cache.has_control && *was_no_cache),
                     no_store: cache.no_store,
                 };
-                self.keep_reply(&call, key.clone(), text.clone(), policy);
+                if self.keep_reply(&call, key.clone(), text.clone(), policy) {
+                    release.keep();
+                }
                 return Ok(value);
             }
         }
@@ -1326,7 +1333,9 @@ impl VrccClient {
                 }
             }
             if let Some(key) = reply_key {
-                self.keep_reply(&call, key, text, policy);
+                if self.keep_reply(&call, key, text, policy) {
+                    release.keep();
+                }
             }
             Ok(value)
         } else {
@@ -1339,17 +1348,10 @@ impl VrccClient {
             // 429 的记账（停用哪一份额度、退避多久）在这一步做完。**错误本身
             // 只记录 HTTP 事实**：哪些码要退避、退避多久由 `VrccClientState`
             // 承担，不是错误对象的职责。
+            // 错误不进缓存，槽由 `release` 还回去（429 也是：退避照旧挡着重试，退避
+            // 结束后不该再被本地间隔挡着）。
             if code == 429 {
                 self.record_too_many(&error, rate, call.bucket);
-            } else if call.reusable() {
-                // 其它错误不进缓存。槽要是还占着，间隔内再问一次，调用方看到的就
-                // 不是服务器的回答，而是本机的「太频繁」——例如 `dev-` 标识每次打开
-                // 「连上」都拿到 `403 scope`（预期内，界面会安静地说明原因），第二次
-                // 却变成一条报错提示。客户端共享之前限流从不生效，两次都是服务器的
-                // 回答，这里保持那样。只放开可复用的读：设备授权、提醒轮询这些
-                // 有官方间隔的不动。
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                state.limiter.forget(&slot_of(&call));
             }
             Err(VrccError::new(
                 ErrorLayer::Server,
@@ -2392,6 +2394,37 @@ fn decode<T: DeserializeOwned>(text: &str) -> Result<T, VrccError> {
             ErrorDetail::Decode(error.to_string()),
         )
     })
+}
+
+/// 可复用的读拿到响应以后的还槽守卫。
+///
+/// 本地间隔只在「间隔内有回答可给」时才有意义：槽占着、手上却没有能直接给出的回答，
+/// 下一次读只能拿到本机的「太频繁」，而重构前（客户端每次新建、间隔从不生效）它会
+/// 真的去问。所以一条规则：**这次没存下能直接复用的回答，就把槽还回去**——正文解不
+/// 出来、读到一半断了、服务器回错误（包括 429，退避照旧挡着重试）、`no-store`、
+/// `no-cache`，都在这一条里，不再各自记得还。
+///
+/// 只管可复用的读。写操作、提醒轮询、设备授权有自己的（官方）间隔，不动。请求没
+/// 发出去的情况在 `send_request` 里还。
+struct SlotRelease<'a> {
+    client: &'a VrccClient,
+    slot: Option<String>,
+}
+
+impl SlotRelease<'_> {
+    /// 存下了能直接给出的回答：槽留着，间隔内的下一次读拿这份回答。
+    fn keep(&mut self) {
+        self.slot = None;
+    }
+}
+
+impl Drop for SlotRelease<'_> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            let mut state = self.client.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.limiter.forget(&slot);
+        }
+    }
 }
 
 /// 这次请求占哪个限流槽：调用方给了显式的 `limiter` 就用它，否则按资源算
@@ -4351,5 +4384,66 @@ mod tests {
         reused_twice!(VrccCrossings, crossings_probe());
         reused_twice!(VrccCrossingCards, crossing_cards(false));
         reused_twice!(VrccCrossingCards, crossing_cards(true));
+    }
+
+    // -- 拿到了响应、却没存下回答：槽不能占着 ------------------------------
+
+    /// 2xx 但正文解不出来（门户页、代理改写）：这次没有能复用的回答，间隔内重试
+    /// 要真的再问一次，而不是拿到本机的「太频繁」。
+    #[tokio::test]
+    async fn an_undecodable_reply_does_not_hold_the_gap() {
+        let (base, seen) = serve_script(vec![
+            ok_with("", "<html>captive portal</html>"),
+            ok_with("", r#"{"at":1,"state":"ok"}"#),
+        ])
+        .await;
+        let client = client_at(base);
+
+        let first = client.status().await.expect_err("第一次解不出来");
+        assert!(matches!(first.detail, ErrorDetail::Decode(_)), "{first:?}");
+        client.status().await.expect("间隔内重试：真的去问");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// 响应头到了、正文读到一半连接断了：同上。
+    #[tokio::test]
+    async fn a_reply_cut_off_mid_body_does_not_hold_the_gap() {
+        let cut = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"at\":"
+            .to_string();
+        let (base, seen) = serve_script(vec![cut, ok_with("", r#"{"at":1,"state":"ok"}"#)]).await;
+        let client = client_at(base);
+
+        let first = client.status().await.expect_err("第一次正文断了");
+        assert_eq!(first.layer, ErrorLayer::Transport, "{first:?}");
+        client.status().await.expect("间隔内重试：真的去问");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// 429：退避照旧（`Retry-After`），但退避结束后不该再被本地间隔挡着——贴纸的
+    /// 间隔是一小时，不还槽的话，玩家要等一小时才能再试。
+    #[tokio::test]
+    async fn after_a_429_backoff_the_read_is_not_held_by_its_gap() {
+        let too_many = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+            .to_string();
+        let stickers = serde_json::to_string(&VrccStickers::default()).expect("序列化");
+        let (base, seen) = serve_script(vec![too_many, ok_with("", &stickers)]).await;
+        let client = client_at(base);
+
+        client.stickers().await.expect_err("第一次 429");
+        // 退避期间照旧被挡。
+        let held = client.stickers().await.expect_err("退避中");
+        assert!(
+            matches!(
+                held.detail,
+                ErrorDetail::ThrottledLocally {
+                    reason: LocalThrottle::Backoff,
+                    ..
+                }
+            ),
+            "{held:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        client.stickers().await.expect("退避过了：真的去问");
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 }
