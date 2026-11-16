@@ -2539,6 +2539,20 @@ fn decode<T: DeserializeOwned>(text: &str) -> Result<T, VrccError> {
 ///   错误（429 只在退避或额度闸门挡着重试时）、`no-store`、`no-cache`、在等响应时
 ///   被取消，都在这一条里。写操作、提醒轮询发出去以后就不撤：服务器可能已经收到，
 ///   它们的间隔是官方的。
+///
+/// ## 这条规则的后果：带令牌接口实际上没有本地最小间隔
+///
+/// 2026-11-16 在运行中的应用里确认：个人接口的 `200` 一律回
+/// `Cache-Control: no-store`，也没有 `ETag` / `Last-Modified`。于是它们的每次读都
+/// 会走到「没存下 → 还槽」这一条，间隔内的第二次读不会被挡住：挡着连发的只剩每分钟
+/// `120` 次的窗口、每天额度，以及同一个读的在途排队。
+///
+/// 这是**有意的选择**，由 #23 评审提出、#24 拍板：服务器既然不让复用，就不该拿一个
+/// 「手上没有回答可给」的间隔去换玩家的「请求太频繁」。开放数据不受影响——回答能
+/// 存下，间隔照旧生效。
+///
+/// 服务器哪天开始给个人接口发可复用的回答（或给出 `ETag`），这条会自动回到「间隔内
+/// 复用」，不用改代码。
 #[must_use]
 struct SlotRelease<'a> {
     client: &'a VrccClient,
@@ -4877,6 +4891,73 @@ mod tests {
         reused_twice!(VrccCrossings, crossings_probe());
         reused_twice!(VrccCrossingCards, crossing_cards(false));
         reused_twice!(VrccCrossingCards, crossing_cards(true));
+    }
+
+    /// 带令牌的读、服务器回 `no-store`：两次都要成功，且两次都真的发了请求。
+    ///
+    /// 和 [`reused_twice`] 相反：这种回答存不下，`SlotRelease` 每次都把槽还回去，
+    /// 所以第二次不该被本地间隔挡下，也不该复用任何东西。
+    macro_rules! no_store_twice {
+        ($ty:ty, $method:ident ( $($arg:expr),* $(,)? )) => {{
+            let body = serde_json::to_string(&<$ty>::default()).expect("默认值应能序列化");
+            let response = ok_with("Cache-Control: no-store\r\n", &body);
+            let (base, seen) = serve_script(vec![response.clone(), response]).await;
+            let client = client_at(base);
+            let first = client.$method($($arg),*).await;
+            assert!(
+                first.is_ok(),
+                concat!(stringify!($method), " 第一次就失败了：{:?}"),
+                first.err()
+            );
+            let second = client.$method($($arg),*).await;
+            assert!(
+                second.is_ok(),
+                concat!(stringify!($method), " 第二次被本地间隔挡下了：{:?}"),
+                second.err()
+            );
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                2,
+                concat!(
+                    stringify!($method),
+                    " 的第二次没有真的发出去：no-store 的回答不该让槽占着"
+                )
+            );
+        }};
+    }
+
+    /// 带令牌的读在真实服务器的缓存头下，第二次仍然发得出去。
+    ///
+    /// 2026-11-16 在运行中的应用里实测：个人接口的 `200` 一律回
+    /// `Cache-Control: no-store`，也没有校验值。所以它们的回答存不下，
+    /// [`SlotRelease`] 每次都会把槽还回去——间隔内的第二次读要真的再问一次，而不是
+    /// 拿到本机的「太频繁」。
+    ///
+    /// [`every_reusable_read_survives_a_second_call`] 用不带缓存头的回答（等于
+    /// 「可复用」），守的是复用那一路；这条守的是真实服务器走的那一路。两张表的带
+    /// 令牌部分一一对应。
+    #[tokio::test]
+    async fn every_personal_read_survives_a_no_store_reply() {
+        const WORLD: &str = "wrld_11111111-1111-4111-8111-111111111111";
+        const CLUB: &str = "abc.1234";
+
+        no_store_twice!(VrccRecentNotifications, recent_notifications(false));
+        no_store_twice!(VrccRecentNotifications, recent_notifications(true));
+        no_store_twice!(VrccUnread, unread());
+        no_store_twice!(VrccNotes, notes());
+        no_store_twice!(VrccMyMap, my_map(WORLD));
+        no_store_twice!(VrccMyBoard, my_board(VrccMyBoardSort::Top, None));
+        no_store_twice!(VrccRatedMaps, my_maps());
+        no_store_twice!(VrccToday, today());
+        no_store_twice!(VrccMutuals, mutuals());
+        no_store_twice!(VrccCrossings, crossings(false));
+        no_store_twice!(VrccCrossings, crossings(true));
+        // 可见性探测：自己的槽，同样要还。
+        no_store_twice!(VrccCrossings, crossings_probe());
+        no_store_twice!(VrccCrossingCards, crossing_cards(false));
+        no_store_twice!(VrccCrossingCards, crossing_cards(true));
+        no_store_twice!(VrccMyClubs, my_clubs());
+        no_store_twice!(VrccMyClubResponse, my_club(CLUB));
     }
 
     // -- 拿到了响应、却没存下回答：槽不能占着 ------------------------------
