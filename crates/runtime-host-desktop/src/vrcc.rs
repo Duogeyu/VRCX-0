@@ -91,7 +91,8 @@ pub const VRCC_NOTICES_CHANGED_EVENT: &str = "vrccNoticesChanged";
 
 /// 令牌被服务器判了失效（`404 gone`）、本地已经清掉时发给前端的事件名。
 ///
-/// 前端收到后重读连接状态，显示「连接已失效，请重新连接」。
+/// 前端收到后重读连接状态，显示「连接已失效，请重新连接」。不管是后台轮询还是
+/// 前台命令撞上的失效都会发，见 `spawn_background_poll` 里的 `on_session_expired`。
 pub const VRCC_CONNECTION_CHANGED_EVENT: &str = "vrccConnectionChanged";
 
 /// 桌面侧的星遇同频运行时。
@@ -646,6 +647,15 @@ impl DesktopVrccRuntime {
         let base = Self::BACKGROUND_POLL_BASE;
         let jitter = Self::BACKGROUND_POLL_JITTER;
 
+        // 令牌被判失效时告诉前端改显示。挂在应用层的 `settle` 上，而不是只在
+        // 这条轮询里发：前台命令撞上的失效（例如提交评分收到 `404 gone`）同样
+        // 走 `settle`，已经打开的世界、群组面板也要跟着换到「未连接」。
+        // 事件出口是全局的，每次起任务（换号）重挂一次也无妨。
+        let expired_sink = Arc::clone(&event_sink);
+        self.service.on_session_expired(Arc::new(move || {
+            expired_sink.emit(VRCC_CONNECTION_CHANGED_EVENT, json!({}));
+        }));
+
         supervisor.spawn_cancellable(move |stop_token| {
             let service = Arc::clone(&service);
             let db = Arc::clone(&db);
@@ -733,13 +743,13 @@ impl DesktopVrccRuntime {
                                 if classify_vrcc_error(&error).0 == VrccErrorKind::NeedsReauth =>
                             {
                                 // 令牌已作废，应用层已经把它清掉了：之后几轮会因为
-                                // 未连接而跳过，等玩家重新连接。告诉前端改显示。
-                                // 判据复用应用层的单点分类，不在这里再判一次 HTTP。
+                                // 未连接而跳过，等玩家重新连接。告诉前端改显示的
+                                // 事件由 `settle` 的回调发（见上面 `on_session_expired`），
+                                // 这里不再重复发。
                                 tracing::info!(
                                     round,
                                     "vrcc: token invalid, background poll idle until reconnect"
                                 );
-                                event_sink.emit(VRCC_CONNECTION_CHANGED_EVENT, json!({}));
                             }
                             Err(error) => {
                                 // 不把错误抛出去：一次失败不该杀掉整个轮询。

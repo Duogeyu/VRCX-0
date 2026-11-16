@@ -17,7 +17,9 @@
 //! - 某一份额度当天用完，只停那一份，不让别的接口跟着退避。
 
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -62,6 +64,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(25);
 /// 取 10 秒是因为其余接口的 `min_gap` 都在 5–30 秒之间，正常页面加载
 /// （间隔远大于 30 秒）不会碰到；只有连点两次之类的场景才会命中。
 const MAX_ACQUIRE_WAIT: Duration = Duration::from_secs(10);
+
+/// 最多留多少份「间隔内复用」的回答，见 [`VrccClient::reuse_reply`]。
+///
+/// 每份只活一个最小间隔（最长一小时，多数 3–60 秒），正常浏览远到不了这个数；
+/// 上限只是防止长时间挂着、反复点开不同世界时慢慢涨。
+const REPLY_CACHE_MAX: usize = 256;
 
 /// 客户端错误。定义在契约层（应用层要按它分类，不能反过来依赖网络层），
 /// 这里只做转出，保持既有调用点不变。
@@ -219,10 +227,40 @@ struct SeenQuota {
     until: Instant,
 }
 
+/// 「间隔内复用」那份回答的键。
+///
+/// 按**完整路径**而不是限流槽分：槽名会去掉 `limit`、`mark`（见 [`limiter_key`]），
+/// 而 `limit=20` 和 `limit=50` 的回答不能互相顶替。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReplyKey {
+    /// 带令牌的回答按令牌指纹分开（见 [`token_scope`]），开放数据是 `0`。
+    /// 换了账号就读不到上一个账号的回答。
+    scope: u64,
+    key: &'static str,
+    path: String,
+}
+
+/// 一份可以在间隔内复用的成功回答（原样正文，取用时再解析）。
+#[derive(Debug)]
+struct CachedReply {
+    at: Instant,
+    /// 这份回答能用多久：就是这个接口的最小间隔。
+    ttl: Duration,
+    text: String,
+}
+
+impl CachedReply {
+    fn is_live(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) < self.ttl
+    }
+}
+
 /// 客户端共享状态：限流器与服务器下发的配额。
 #[derive(Debug, Default)]
 pub struct VrccClientState {
     limiter: RateLimiter,
+    /// 间隔内的读请求直接复用的上一份成功回答，见 [`VrccClient::reuse_reply`]。
+    replies: HashMap<ReplyKey, CachedReply>,
     /// 429 退避截止时间。
     backoff_until: Option<Instant>,
     /// 连续 429 次数，用于指数退避。
@@ -305,6 +343,16 @@ struct Call<'a> {
     ///
     /// 这类请求都是玩家手动触发的一次性动作，不可能刷屏，所以不设限没有风险。
     bypass_gate: bool,
+}
+
+impl Call<'_> {
+    /// 这次请求的回答能不能在最小间隔内复用。
+    ///
+    /// 只有读才行。提醒轮询不行：它带游标，复用会让后台把同一批提醒再弹一遍；
+    /// 优先级请求（吊销）本来就是写。
+    fn reusable(&self) -> bool {
+        self.method == "GET" && !self.bypass_gate && self.key != "notifications"
+    }
 }
 
 /// 一个可克隆的客户端句柄。
@@ -564,6 +612,100 @@ impl VrccClient {
         state.backoff_until = None;
     }
 
+    /// 这次请求在缓存里的键；不能复用的请求是 `None`。
+    ///
+    /// 带令牌的请求现在没有令牌时也是 `None`：交给 `send_request` 去报
+    /// `TokenMissing`，不拿谁的回答顶上。
+    fn reply_key(&self, call: &Call<'_>) -> Option<ReplyKey> {
+        if !call.reusable() {
+            return None;
+        }
+        let scope = if call.authed {
+            token_scope(&(self.token)()?)
+        } else {
+            0
+        };
+        Some(ReplyKey {
+            scope,
+            key: call.key,
+            path: call.path.to_string(),
+        })
+    }
+
+    /// 同一个读请求在最小间隔内再来一次：直接给上一次的成功回答。
+    ///
+    /// 客户端在会话里共享以后，每个接口的最小间隔才真正生效（早先每个请求都
+    /// 新建客户端，间隔从来没拦过谁）。生效之后，间隔内的第二次读如果还像
+    /// 原来那样「最多等 10 秒，否则报太频繁」，打开过的页面切回来就会报错。
+    ///
+    /// 官方文档里硬性的只有每分钟 120 次、提醒轮询 25 秒和每天的次数，其余各
+    /// 接口的最小间隔都是本地定的礼貌值：间隔内服务器那边本来也不会有什么新的。
+    /// 所以间隔内直接复用上一份回答——不发请求、不占额度、不等，也不报错。
+    /// 没有可复用的（上一次失败了，或者是另一份 `limit`）才照旧走限流。
+    ///
+    /// 写操作成功后会清掉相关的回答，见 [`Self::forget_replies`]。
+    fn reuse_reply(&self, key: &ReplyKey) -> Option<String> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let reply = state.replies.get(key)?;
+        reply.is_live(Instant::now()).then(|| reply.text.clone())
+    }
+
+    /// 记下一份成功回答，供最小间隔内复用。
+    fn remember_reply(&self, key: ReplyKey, ttl: Duration, text: String) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.replies.retain(|_, reply| reply.is_live(now));
+        if state.replies.len() >= REPLY_CACHE_MAX {
+            // 还活着却已经满了：丢最旧的那份。
+            if let Some(oldest) = state
+                .replies
+                .iter()
+                .min_by_key(|(_, reply)| reply.at)
+                .map(|(key, _)| key.clone())
+            {
+                state.replies.remove(&oldest);
+            }
+        }
+        state
+            .replies
+            .insert(key, CachedReply { at: now, ttl, text });
+    }
+
+    /// 写操作成功了：清掉受影响的回答，并让它们的限流槽立刻可用。
+    ///
+    /// 只清缓存不够：间隔还在，紧接着的重拉（例如打分后重新拉地图页）会被本地
+    /// 限流挡住或排队，界面要么报「太频繁」，要么等几秒才看到自己刚改的内容。
+    /// 间隔本来是「这段时间里不会有新东西」的礼貌值，写了之后这个前提不成立了，
+    /// 所以一起放开。每分钟 120 次的窗口不动。
+    fn forget_replies(&self, affected: impl Fn(&str, &str) -> bool) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slots = Vec::new();
+        state.replies.retain(|key, _| {
+            let hit = affected(key.key, &key.path);
+            if hit {
+                slots.push(limiter_key(key.key, &key.path));
+            }
+            !hit
+        });
+        for slot in slots {
+            state.limiter.forget(&slot);
+        }
+    }
+
+    /// 两个句柄是不是同一个客户端（共享限流、额度与缓存）。测试用。
+    #[cfg(test)]
+    pub(crate) fn shares_state_with(&self, other: &VrccClient) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    /// 丢掉所有带令牌的回答。会话换了令牌（连上、断开、失效）时调用。
+    ///
+    /// 按令牌指纹分键，换了账号本来就读不到；这里是把内存及时还回去。
+    pub fn forget_personal_replies(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.replies.retain(|key, _| key.scope == 0);
+    }
+
     /// 记下服务器在 `RateLimit-*` 里说的一份额度。
     ///
     /// 只存内存。这份数就是界面能看到的全部依据——不再拿它去覆盖什么本地计数，
@@ -697,6 +839,7 @@ impl VrccClient {
     /// 注意 `send()` 失败也算没发出去——连接都建不起来，服务端不可能计数。
     async fn send_request(&self, call: &Call<'_>) -> Result<reqwest::Response, VrccError> {
         // 优先级请求（吊销）不排队：被退避挡住就永远吊销不了了。
+        let mut reserved = None;
         if !call.bypass_gate {
             // 槽名默认按**资源**算（接口 + 保留表达资源的查询参数），见
             // [`limiter_key`]。少数调用方给了显式的 `limiter`，那是「同一份
@@ -707,8 +850,23 @@ impl VrccClient {
                 None => limiter_key(call.key, call.path),
             };
             self.acquire(&slot, call.min_gap).await?;
+            reserved = Some(slot);
         }
+        let sent = self.send_reserved(call).await;
+        if sent.is_err() {
+            // 请求根本没到服务器（令牌没有、连接建不起来）：把占住的槽还回去。
+            // 不还的话，客户端共享以后，玩家在间隔内点「重试」只会得到
+            // 「太频繁」，而服务器一次都没见过这个请求。每分钟的窗口照算。
+            if let Some(slot) = reserved {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.limiter.forget(&slot);
+            }
+        }
+        sent
+    }
 
+    /// 已经拿到发送许可之后，真正把请求发出去。失败一律表示请求没有到服务器。
+    async fn send_reserved(&self, call: &Call<'_>) -> Result<reqwest::Response, VrccError> {
         let mut builder = self
             .http
             .request(
@@ -744,6 +902,12 @@ impl VrccClient {
     /// 核心请求。
     async fn request<T: DeserializeOwned>(&self, call: Call<'_>) -> Result<T, VrccError> {
         Self::validate_path(call.path)?;
+        // 间隔内的同一个读请求：先看有没有能复用的回答。放在扣额度之前——
+        // 复用不发请求，不该占服务器的次数。
+        let reply_key = self.reply_key(&call);
+        if let Some(text) = reply_key.as_ref().and_then(|key| self.reuse_reply(key)) {
+            return decode(&text);
+        }
         let bucket = call.bucket;
         if let Some(bucket) = bucket {
             self.spend(bucket)?;
@@ -786,17 +950,11 @@ impl VrccClient {
 
         if status.is_success() {
             self.note_success();
-            serde_json::from_str(&text).map_err(|error| {
-                // 不把正文塞进错误里：里面可能有玩家数据。
-                //
-                // 归传输层而不是服务器层：拿到了 2xx 却不是 JSON，通常意味着
-                // 中间设备改写了响应（门户页、劫持），或者代理返回了 HTML
-                // 错误页。那不是「服务器按协议拒绝了」，排查方向完全不同。
-                VrccError::new(
-                    ErrorLayer::Transport,
-                    ErrorDetail::Decode(error.to_string()),
-                )
-            })
+            let value = decode(&text)?;
+            if let Some(key) = reply_key {
+                self.remember_reply(key, call.min_gap, text);
+            }
+            Ok(value)
         } else {
             let code = status.as_u16();
             let parsed: VrccErrorBody = serde_json::from_str(&text).unwrap_or_default();
@@ -1236,21 +1394,32 @@ impl VrccClient {
         if let Some(text) = text.as_body_text() {
             body["text"] = json!(text);
         }
-        self.request(Call {
-            method: "POST",
-            path: &format!("me/maps/{world}/rating"),
-            body: Some(body),
-            authed: true,
-            key: "rate_map",
-            // 连点防重：服务器自己的额度才是权威，这里只挡手抖。
-            min_gap: Duration::from_secs(2),
-            // 打分有自己的一份额度（官方《频率限制》：「和网页地图榜共用每天的
-            // 打分与添图次数」），**不算读**。
-            bucket: None,
-            limiter: None,
-            bypass_gate: false,
-        })
-        .await
+        let map = self
+            .request(Call {
+                method: "POST",
+                path: &format!("me/maps/{world}/rating"),
+                body: Some(body),
+                authed: true,
+                key: "rate_map",
+                // 连点防重：服务器自己的额度才是权威，这里只挡手抖。
+                min_gap: Duration::from_secs(2),
+                // 打分有自己的一份额度（官方《频率限制》：「和网页地图榜共用每天的
+                // 打分与添图次数」），**不算读**。
+                bucket: None,
+                limiter: None,
+                bypass_gate: false,
+            })
+            .await?;
+        self.forget_after_rating(world);
+        Ok(map)
+    }
+
+    /// 打分、删分之后，哪些读到的东西已经过时：这张图的地图页（两份排序都算）、
+    /// 地图状态、公开地图页，以及列着「我打的分」的玩家视角地图榜和我打过分的图。
+    fn forget_after_rating(&self, world: &str) {
+        self.forget_replies(|key, path| {
+            path.contains(world) || matches!(key, "my_board" | "my_maps")
+        });
     }
 
     /// 删掉自己给这张图的评分（`POST /me/maps/{world}/rating/delete`）。
@@ -1276,6 +1445,7 @@ impl VrccClient {
             .await?;
         // 只要拿到了 2xx 就算成功；正文可能是什么都没有，或者是一份地图状态。
         drop(response);
+        self.forget_after_rating(world);
         Ok(())
     }
 
@@ -1297,25 +1467,30 @@ impl VrccClient {
         id: i64,
         vote: VrccVote,
     ) -> Result<VrccVoteResult, VrccError> {
-        self.request(Call {
-            method: "POST",
-            path: "me/map-votes",
-            body: Some(json!({
-                "kind": kind.as_str(),
-                "id": id,
-                "v": vote.as_body_value(),
-            })),
-            authed: true,
-            key: "vote_map_content",
-            // 连点防重。服务端自己也有额度，这里只挡手抖。
-            min_gap: Duration::from_secs(1),
-            // 赞踩算写（官方《频率限制》：「地图赞踩 200」，每份授权每天），
-            // 不占读。
-            bucket: None,
-            limiter: None,
-            bypass_gate: false,
-        })
-        .await
+        let result = self
+            .request(Call {
+                method: "POST",
+                path: "me/map-votes",
+                body: Some(json!({
+                    "kind": kind.as_str(),
+                    "id": id,
+                    "v": vote.as_body_value(),
+                })),
+                authed: true,
+                key: "vote_map_content",
+                // 连点防重。服务端自己也有额度，这里只挡手抖。
+                min_gap: Duration::from_secs(1),
+                // 赞踩算写（官方《频率限制》：「地图赞踩 200」，每份授权每天），
+                // 不占读。
+                bucket: None,
+                limiter: None,
+                bypass_gate: false,
+            })
+            .await?;
+        // 票数显示在带令牌的地图页里。`id` 是短评编号，看不出是哪张图，
+        // 所以所有地图页一起清。
+        self.forget_replies(|key, _| key == "my_map_page");
+        Ok(result)
     }
 
     /// 公告和停站（1.12.0 起）。不用令牌，停站时也能问，服务器缓存 1 分钟。
@@ -1849,6 +2024,30 @@ fn crossing_cards_path(mark: bool) -> &'static str {
 ///
 /// `op`（进错误详情的那份）仍然用不带路径的 `key`：那是**接口**的身份，消费方
 /// 靠它区分「同一个错误码在不同接口下的不同含义」，路径里的世界 ID 不属于那里。
+/// 解析一份成功回答的正文。
+fn decode<T: DeserializeOwned>(text: &str) -> Result<T, VrccError> {
+    serde_json::from_str(text).map_err(|error| {
+        // 不把正文塞进错误里：里面可能有玩家数据。
+        //
+        // 归传输层而不是服务器层：拿到了 2xx 却不是 JSON，通常意味着
+        // 中间设备改写了响应（门户页、劫持），或者代理返回了 HTML
+        // 错误页。那不是「服务器按协议拒绝了」，排查方向完全不同。
+        VrccError::new(
+            ErrorLayer::Transport,
+            ErrorDetail::Decode(error.to_string()),
+        )
+    })
+}
+
+/// 令牌的指纹，只用来给「间隔内复用」的回答分账号。
+///
+/// 不存令牌本身；末位置 1，保证不会和开放数据的 `0` 撞上。
+fn token_scope(token: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish() | 1
+}
+
 fn limiter_key(key: &str, path: &str) -> String {
     let (path, query) = match path.split_once('?') {
         Some((path, query)) => (path, query),
@@ -3103,5 +3302,162 @@ mod tests {
         );
         // 没有查询串时不多出一个 `?`。
         assert_eq!(limiter_key("status", "status"), "status status");
+    }
+
+    // -- 间隔内复用回答 ----------------------------------------------------
+
+    /// 和 [`serve`] 一样，只是数着到底来了几个连接。
+    async fn serve_counted(
+        body: &'static str,
+        connections: usize,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        tokio::spawn(async move {
+            for _ in 0..connections {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}/"), seen)
+    }
+
+    const WORLD: &str = "wrld_11111111-1111-4111-8111-111111111111";
+
+    /// 客户端共享以后，`status` 的 30 秒间隔真的生效了。间隔内再问一次不能报
+    /// 「太频繁」（那是打开过的页面切回来就报错），也不该再发请求：直接给上一次
+    /// 的回答。服务器只肯接一个连接，第二次要是真发出去就会失败。
+    #[tokio::test]
+    async fn a_second_read_within_the_gap_reuses_the_first_reply() {
+        let base = serve("200 OK", r#"{"at":1,"state":"ok"}"#, 1).await;
+        let client = client_at(base);
+
+        let first = client.status().await.expect("第一次");
+        let second = client.status().await.expect("间隔内第二次直接复用");
+        assert_eq!(first.state.as_deref(), Some("ok"));
+        assert_eq!(second.state.as_deref(), Some("ok"));
+        assert_eq!(second.at, first.at);
+    }
+
+    /// 带令牌的回答按令牌分开：换了账号，不能拿上一个账号的回答顶上。
+    #[tokio::test]
+    async fn a_reply_is_not_reused_for_another_token() {
+        let base = serve("200 OK", "{}", 1).await;
+        let token = Arc::new(std::sync::Mutex::new("tok-a".to_string()));
+        let current = Arc::clone(&token);
+        let mut client = VrccClient::new(
+            "dev-test",
+            Arc::new(move || Some(current.lock().unwrap().clone())),
+            None,
+        );
+        client.base = base;
+
+        client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("账号 A");
+        // 同一个令牌、间隔内：复用。
+        client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("账号 A 再问一次，复用");
+
+        *token.lock().unwrap() = "tok-b".to_string();
+        // 换了令牌：必须真的去问。服务器已经不接了，所以这一次失败。
+        let error = client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect_err("账号 B 不能拿到 A 的回答");
+        assert_eq!(error.layer, ErrorLayer::Transport, "{error:?}");
+    }
+
+    /// 提醒轮询带游标，复用会让后台把同一批提醒再弹一遍：间隔内照旧被本地挡下。
+    #[tokio::test]
+    async fn the_notification_poll_is_never_reused() {
+        let base = serve("200 OK", r#"{"items":[],"last":7}"#, 1).await;
+        let client = client_at(base);
+
+        client.notifications(None).await.expect("第一次");
+        let error = client
+            .notifications(None)
+            .await
+            .expect_err("25 秒内第二次不复用");
+        assert!(
+            matches!(
+                error.detail,
+                ErrorDetail::ThrottledLocally {
+                    reason: LocalThrottle::Gap,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// 打完分紧接着重拉地图页：不能拿到提交前的那一份，也不该被 3 秒间隔卡住。
+    #[tokio::test]
+    async fn rating_a_map_forgets_its_page_and_lets_the_refetch_through() {
+        use std::sync::atomic::Ordering;
+        let (base, seen) = serve_counted("{}", 3).await;
+        let client = client_at(base);
+
+        client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("先看一眼");
+        client
+            .rate_map(WORLD, 8, &VrccRatingText::Keep)
+            .await
+            .expect("打分");
+        let started = Instant::now();
+        client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("打完分重拉");
+
+        assert_eq!(seen.load(Ordering::SeqCst), 3, "重拉必须真的发出去");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "间隔已经放开，不该等：{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 连不上的那一次没有到服务器，不该占着最小间隔：间隔内重试要真的再试一次，
+    /// 而不是得到「太频繁」。
+    #[tokio::test]
+    async fn a_request_that_never_reached_the_server_does_not_hold_its_gap() {
+        // 绑一个端口再放掉：之后连它一定被拒。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        let client = client_at(format!("http://{addr}/"));
+
+        let first = client.status().await.expect_err("连不上");
+        assert_eq!(first.layer, ErrorLayer::Transport, "{first:?}");
+        let second = client.status().await.expect_err("还是连不上");
+        assert_eq!(
+            second.layer,
+            ErrorLayer::Transport,
+            "间隔内重试应该真的再试一次：{second:?}"
+        );
     }
 }
