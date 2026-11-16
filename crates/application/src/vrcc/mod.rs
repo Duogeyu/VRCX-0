@@ -456,27 +456,10 @@ pub struct VrccService {
     boards: Arc<RwLock<BoardRanks>>,
     /// 最近一次 `me/unread`。后台轮询填，页面和腕表读。
     unread: Arc<RwLock<UnreadCache>>,
-    /// 最近一次成功拉到的地图榜，按排序方式分别记一份。
-    ///
-    /// 用来在限流间隔内接住本机拦截（`is_local_gap`，即
-    /// `ThrottledLocally { reason: Gap }`）：`boards` 的 `min_gap` 是 60 秒，
-    /// 用户在这个窗口里点刷新不该看到错误，也不该干等一分钟。官方说开放
-    /// 数据最多 5 分钟更新一次，旧的那份完全够用。
-    ///
-    /// 键是 [`OwnedBoardKey`]（分区 + 排序），理由同 [`Self::model_details`]：
-    /// **不要拿「这个接口现在公开」去赌未来**。榜单今天不含个人字段，但以后
-    /// 完全可能带上「你投过票没有」这类东西。
-    boards_cache: Arc<RwLock<HashMap<OwnedBoardKey, (u32, VrccBoard)>>>,
-    /// 最近一次成功拉到的模型榜，按排序方式分别记一份。
-    ///
-    /// 和 [`Self::boards_cache`] 同一个理由：`models` 的 `min_gap` 也是 60 秒，
-    /// 窗口内点刷新不该报错、也不该干等。两个榜单各自一份、不共用——
-    /// 它们的资源不同，共用会让「刚看完地图榜就看不到模型榜」。
-    models_cache: Arc<RwLock<HashMap<OwnedModelBoardKey, (u32, VrccModelBoard)>>>,
     /// 按 BOOTH 商品编号缓存的单个模型详情（含热评）。
     ///
-    /// 单独一份，不用 `models_cache` 里那行顶上：行里没有热评，而热评正是
-    /// 对话框要显示的东西。官方说信息最多 5 分钟更新一次，所以同一张卡在
+    /// 不拿榜单里那一行顶上：行里没有热评，而热评正是对话框要显示的东西。
+    /// 官方说信息最多 5 分钟更新一次，所以同一张卡在
     /// 几分钟内反复点开不该重新请求——玩家常常点开、关掉、再点开同一条。
     ///
     /// 值里带时间戳：热评会变，缓存不能永久有效。
@@ -525,35 +508,6 @@ struct OwnedModelKey {
 impl OwnedModelKey {
     fn new(scope: VrccCacheScope, id: i64) -> Self {
         Self { scope, id }
-    }
-}
-
-/// 地图榜缓存的键：**账号分区 + 排序方式**。
-///
-/// 和 [`OwnedModelKey`] 同一个用意。榜单今天不含个人字段，但这条约束
-/// 不该靠「今天」来维持。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct OwnedBoardKey {
-    scope: VrccCacheScope,
-    sort: VrccBoardSort,
-}
-
-impl OwnedBoardKey {
-    fn new(scope: VrccCacheScope, sort: VrccBoardSort) -> Self {
-        Self { scope, sort }
-    }
-}
-
-/// 模型榜缓存的键：**账号分区 + 排序方式**。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct OwnedModelBoardKey {
-    scope: VrccCacheScope,
-    sort: VrccBoardSort,
-}
-
-impl OwnedModelBoardKey {
-    fn new(scope: VrccCacheScope, sort: VrccBoardSort) -> Self {
-        Self { scope, sort }
     }
 }
 
@@ -668,8 +622,6 @@ impl VrccService {
             wrist: Arc::new(RwLock::new(None)),
             boards: Arc::new(RwLock::new(HashMap::new())),
             unread: Arc::new(RwLock::new(UnreadCache::default())),
-            boards_cache: Arc::new(RwLock::new(HashMap::new())),
-            models_cache: Arc::new(RwLock::new(HashMap::new())),
             model_details: Arc::new(RwLock::new(HashMap::new())),
             model_missing: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -887,40 +839,6 @@ impl VrccService {
         }
     }
 
-    /// 记下这一份榜单，供限流窗口内复用。
-    /// 记下这一份榜单，供限流窗口内复用。
-    fn remember_board(&self, limit: u32, key: OwnedBoardKey, board: &VrccBoard) {
-        let Ok(mut cache) = self.boards_cache.write() else {
-            return;
-        };
-        cache.insert(key, (limit, board.clone()));
-    }
-
-    /// 取上次那份榜单，条件严格：**排序方式和条数都要一样**。
-    ///
-    /// 条数不一样就不给：请求 50 条却拿到 20 条的旧数据，界面会以为这就是
-    /// 全部内容。
-    fn cached_board(&self, limit: u32, key: OwnedBoardKey) -> Option<VrccBoard> {
-        let cache = self.boards_cache.read().ok()?;
-        let (cached_limit, board) = cache.get(&key)?;
-        (*cached_limit == limit).then(|| board.clone())
-    }
-
-    /// 记下这一份模型榜，供限流窗口内复用。
-    fn remember_models(&self, limit: u32, key: OwnedModelBoardKey, board: &VrccModelBoard) {
-        let Ok(mut cache) = self.models_cache.write() else {
-            return;
-        };
-        cache.insert(key, (limit, board.clone()));
-    }
-
-    /// 取上次那份模型榜。条件同 [`Self::cached_board`]：排序和条数都一样才给。
-    fn cached_models(&self, limit: u32, key: OwnedModelBoardKey) -> Option<VrccModelBoard> {
-        let cache = self.models_cache.read().ok()?;
-        let (cached_limit, board) = cache.get(&key)?;
-        (*cached_limit == limit).then(|| board.clone())
-    }
-
     /// 当前登录态对应的缓存分区。
     ///
     /// 取的是令牌里的 `star`：它标识「这条数据是在谁的登录态下拿到的」。
@@ -1083,37 +1001,23 @@ impl VrccService {
     ///
     /// `sort` 是本周榜或新上榜、而回答里没有 `sort` 时，说明服务器还不认
     /// 这个参数、回的是总榜：照样返回，由界面判断「还不支持」。
+    ///
+    /// **限流窗口内点刷新不报错**，但接住它的不在这里：客户端在间隔内直接复用
+    /// 上一份回答，请求根本发不出去，也就走不到这一层（见 `vrcc-client` 的
+    /// `lookup_reply`）。应用层原来自己存了一份榜单来兜底，客户端那层做完之后
+    /// 它就再也走不到了。
     pub async fn boards(
         &self,
         limit: u32,
         sort: VrccBoardSort,
     ) -> std::result::Result<VrccBoard, VrccError> {
-        match self.remote.boards(limit, sort).await {
-            Ok(board) => {
-                // 顺手填充腕表的排名缓存：这次请求本来就要发，不额外花额度。
-                // 只用总榜：名次指的是总榜名次，本周榜和新上榜只列一部分地图。
-                if sort == VrccBoardSort::Top || board.sort.is_none() {
-                    self.note_boards(&board);
-                }
-                let key = OwnedBoardKey::new(self.cache_scope(), sort);
-                self.remember_board(limit, key, &board);
-                Ok(board)
-            }
-            // 距上一次请求不到限流间隔：把上次那份还给他。
-            //
-            // 官方说开放数据最多 5 分钟才更新一次，一份旧榜单完全够用；
-            // 而让用户点一下刷新就弹错误，比给旧数据更糟。客户端侧因此
-            // 把「等太久」报成 `ThrottledLocally { reason: Gap }`（见
-            // `MAX_ACQUIRE_WAIT`），这里接住它。没有缓存时才真的报错。
-            Err(error) if error.is_local_gap() => {
-                let key = OwnedBoardKey::new(self.cache_scope(), sort);
-                match self.cached_board(limit, key) {
-                    Some(board) => Ok(board),
-                    None => Err(error),
-                }
-            }
-            Err(error) => Err(error),
+        let board = self.remote.boards(limit, sort).await?;
+        // 顺手填充腕表的排名缓存：这次请求本来就要发，不额外花额度。
+        // 只用总榜：名次指的是总榜名次，本周榜和新上榜只列一部分地图。
+        if sort == VrccBoardSort::Top || board.sort.is_none() {
+            self.note_boards(&board);
         }
+        Ok(board)
     }
 
     /// 服务状态。
@@ -1123,33 +1027,22 @@ impl VrccService {
 
     /// 模型榜（`GET /boards/models`，1.17.0 起）。不需要连接。
     ///
-    /// 和 [`Self::boards`] 同一套降级：限流窗口内点刷新时把上次那份还给玩家，
-    /// 而不是弹一句「请求太频繁」。官方说这个榜也最多 5 分钟更新一次。
-    ///
     /// **旧服务器没有这个接口**（`404 not_found`）时返回 `None`，和
     /// [`Self::announcements`] / [`Self::stickers`] 一样：这是「这台服务器还
     /// 没有模型榜」，不是故障，界面据此显示成空的即可。
     ///
     /// **不碰腕表缓存**：腕表显示的是「当前所在地图的名次」，和 BOOTH 模型
     /// 无关，混进来只会把地图名次覆盖掉。
+    ///
+    /// 限流窗口内点刷新不报错，接住它的地方和 [`Self::boards`] 一样在客户端：
+    /// 间隔内的同一个读直接复用上一份回答，请求根本发不出去。
     pub async fn models_board(
         &self,
         limit: u32,
         sort: VrccBoardSort,
     ) -> std::result::Result<Option<VrccModelBoard>, VrccError> {
         match self.remote.models_board(limit, sort).await {
-            Ok(board) => {
-                let key = OwnedModelBoardKey::new(self.cache_scope(), sort);
-                self.remember_models(limit, key, &board);
-                Ok(Some(board))
-            }
-            Err(error) if error.is_local_gap() => {
-                let key = OwnedModelBoardKey::new(self.cache_scope(), sort);
-                match self.cached_models(limit, key) {
-                    Some(board) => Ok(Some(board)),
-                    None => Err(error),
-                }
-            }
+            Ok(board) => Ok(Some(board)),
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(error),
         }
