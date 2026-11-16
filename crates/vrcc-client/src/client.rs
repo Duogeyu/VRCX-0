@@ -65,7 +65,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(25);
 /// （间隔远大于 30 秒）不会碰到；只有连点两次之类的场景才会命中。
 const MAX_ACQUIRE_WAIT: Duration = Duration::from_secs(10);
 
-/// 最多留多少份「间隔内复用」的回答，见 [`VrccClient::reuse_reply`]。
+/// 过了有效期、但带着 `ETag` / `Last-Modified` 的回答再留多久，供下一次发条件
+/// 请求（`If-None-Match` / `If-Modified-Since`）用，见 [`VrccClient::lookup_reply`]。
+const REVALIDATE_WINDOW: Duration = Duration::from_secs(600);
+
+/// 最多留多少份「间隔内复用」的回答，见 [`VrccClient::lookup_reply`]。
 ///
 /// 每份只活一个最小间隔（最长一小时，多数 3–60 秒），正常浏览远到不了这个数；
 /// 上限只是防止长时间挂着、反复点开不同世界时慢慢涨。
@@ -244,22 +248,126 @@ struct ReplyKey {
 #[derive(Debug)]
 struct CachedReply {
     at: Instant,
-    /// 这份回答能用多久：就是这个接口的最小间隔。
+    /// 这份回答能用多久，见 [`reply_ttl`]。
     ttl: Duration,
     text: String,
+    /// 服务器给的校验值。过期以后靠它发条件请求，服务器回 `304` 就接着用 `text`。
+    validators: Validators,
 }
 
 impl CachedReply {
     fn is_live(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.at) < self.ttl
     }
+
+    /// 过期了还值不值得留着：带校验值的再留一阵，下次可以发条件请求。
+    fn worth_keeping(&self, now: Instant) -> bool {
+        self.is_live(now)
+            || (!self.validators.is_empty()
+                && now.saturating_duration_since(self.at) < self.ttl + REVALIDATE_WINDOW)
+    }
+}
+
+/// 条件请求要用的两个校验值。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Validators {
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+impl Validators {
+    fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none()
+    }
+}
+
+/// 回答里和缓存有关的头。
+///
+/// 实测（1.19.2，开放数据，不带令牌）：地图榜、模型榜、社团、公告、状态回答
+/// `Cache-Control: public, max-age=60`，没有 `ETag` / `Last-Modified`，条件请求
+/// 照样回 `200`。所以眼下起作用的只有开放数据的 `max-age`；校验值和 `304` 这一路
+/// 是给服务器以后加上时准备的，不加也不影响。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CacheHeaders {
+    /// `max-age` 减去 `Age`：服务器说这份回答还能新鲜多久。没给时是 `None`。
+    fresh_for: Option<Duration>,
+    /// `no-store` / `no-cache`：服务器不让拿它当新鲜的用。
+    no_store: bool,
+    validators: Validators,
+}
+
+impl CacheHeaders {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        let mut max_age = None;
+        let mut no_store = false;
+        if let Some(control) = text("cache-control") {
+            for directive in control.split(',') {
+                let directive = directive.trim().to_ascii_lowercase();
+                if directive == "no-store" || directive == "no-cache" {
+                    no_store = true;
+                } else if let Some(secs) = directive.strip_prefix("max-age=") {
+                    max_age = secs.trim_matches('"').parse::<u64>().ok();
+                }
+            }
+        }
+        let age = text("age")
+            .and_then(|age| age.parse::<u64>().ok())
+            .unwrap_or(0);
+        Self {
+            fresh_for: max_age.map(|secs| Duration::from_secs(secs.saturating_sub(age))),
+            no_store,
+            validators: Validators {
+                etag: text("etag"),
+                last_modified: text("last-modified"),
+            },
+        }
+    }
+}
+
+/// 一份回答能复用多久。
+///
+/// 本地的最小间隔是下限：间隔内不复用的话，换来的不是一份更新的回答，而是本机
+/// 的「太频繁」。开放数据的 `max-age` 比它长时就照服务器的：服务器自己说了这段
+/// 时间里回答不会变（实测 60 秒）。`no-store` 不延长，但也不缩短到间隔以下，
+/// 理由同上。
+///
+/// **带令牌的回答不延长**：只实测过开放数据的头，个人接口给不给 `max-age`、给多长
+/// 都没核对过（文档里签名图片是 `private, max-age=600`）。照搬的话，所在地图、
+/// 未读数这类本来 3–25 秒就复用到期的回答，可能悄悄变成几分钟。等有人带令牌实测
+/// 过再放开。
+fn reply_ttl(min_gap: Duration, authed: bool, cache: &CacheHeaders) -> Duration {
+    match cache.fresh_for {
+        Some(fresh) if !cache.no_store && !authed => fresh.max(min_gap),
+        _ => min_gap,
+    }
+}
+
+/// 在缓存里找到的情况，见 [`VrccClient::lookup_reply`]。
+enum Cached {
+    /// 还新鲜：直接用。
+    Fresh(String),
+    /// 过期了，但带着校验值：发条件请求，`304` 时接着用这份正文。
+    Stale {
+        text: String,
+        validators: Validators,
+    },
+    /// 没有可用的。
+    Missing,
 }
 
 /// 客户端共享状态：限流器与服务器下发的配额。
 #[derive(Debug, Default)]
 pub struct VrccClientState {
     limiter: RateLimiter,
-    /// 间隔内的读请求直接复用的上一份成功回答，见 [`VrccClient::reuse_reply`]。
+    /// 间隔内的读请求直接复用的上一份成功回答，见 [`VrccClient::lookup_reply`]。
     replies: HashMap<ReplyKey, CachedReply>,
     /// 429 退避截止时间。
     backoff_until: Option<Instant>,
@@ -644,17 +752,32 @@ impl VrccClient {
     /// 没有可复用的（上一次失败了，或者是另一份 `limit`）才照旧走限流。
     ///
     /// 写操作成功后会清掉相关的回答，见 [`Self::forget_replies`]。
-    fn reuse_reply(&self, key: &ReplyKey) -> Option<String> {
+    ///
+    /// 能用多久见 [`reply_ttl`]：服务器的 `max-age` 更长时照服务器的。过期了但带
+    /// 校验值的，返回 [`Cached::Stale`]，由调用方发条件请求。
+    fn lookup_reply(&self, key: &ReplyKey) -> Cached {
+        let now = Instant::now();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let reply = state.replies.get(key)?;
-        reply.is_live(Instant::now()).then(|| reply.text.clone())
+        let Some(reply) = state.replies.get(key) else {
+            return Cached::Missing;
+        };
+        if reply.is_live(now) {
+            Cached::Fresh(reply.text.clone())
+        } else if reply.worth_keeping(now) {
+            Cached::Stale {
+                text: reply.text.clone(),
+                validators: reply.validators.clone(),
+            }
+        } else {
+            Cached::Missing
+        }
     }
 
-    /// 记下一份成功回答，供最小间隔内复用。
-    fn remember_reply(&self, key: ReplyKey, ttl: Duration, text: String) {
+    /// 记下一份成功回答，供之后复用或发条件请求。
+    fn remember_reply(&self, key: ReplyKey, ttl: Duration, text: String, validators: Validators) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.replies.retain(|_, reply| reply.is_live(now));
+        state.replies.retain(|_, reply| reply.worth_keeping(now));
         if state.replies.len() >= REPLY_CACHE_MAX {
             // 还活着却已经满了：丢最旧的那份。
             if let Some(oldest) = state
@@ -666,9 +789,15 @@ impl VrccClient {
                 state.replies.remove(&oldest);
             }
         }
-        state
-            .replies
-            .insert(key, CachedReply { at: now, ttl, text });
+        state.replies.insert(
+            key,
+            CachedReply {
+                at: now,
+                ttl,
+                text,
+                validators,
+            },
+        );
     }
 
     /// 写操作成功了：清掉受影响的回答，并让它们的限流槽立刻可用。
@@ -837,7 +966,11 @@ impl VrccClient {
     /// `Err` 一律表示**服务器没有收到这次请求**，调用方据此退还预扣。
     ///
     /// 注意 `send()` 失败也算没发出去——连接都建不起来，服务端不可能计数。
-    async fn send_request(&self, call: &Call<'_>) -> Result<reqwest::Response, VrccError> {
+    async fn send_request(
+        &self,
+        call: &Call<'_>,
+        conditional: Option<&Validators>,
+    ) -> Result<reqwest::Response, VrccError> {
         // 优先级请求（吊销）不排队：被退避挡住就永远吊销不了了。
         let mut reserved = None;
         if !call.bypass_gate {
@@ -852,7 +985,7 @@ impl VrccClient {
             self.acquire(&slot, call.min_gap).await?;
             reserved = Some(slot);
         }
-        let sent = self.send_reserved(call).await;
+        let sent = self.send_reserved(call, conditional).await;
         if sent.is_err() {
             // 请求根本没到服务器（令牌没有、连接建不起来）：把占住的槽还回去。
             // 不还的话，客户端共享以后，玩家在间隔内点「重试」只会得到
@@ -866,7 +999,11 @@ impl VrccClient {
     }
 
     /// 已经拿到发送许可之后，真正把请求发出去。失败一律表示请求没有到服务器。
-    async fn send_reserved(&self, call: &Call<'_>) -> Result<reqwest::Response, VrccError> {
+    async fn send_reserved(
+        &self,
+        call: &Call<'_>,
+        conditional: Option<&Validators>,
+    ) -> Result<reqwest::Response, VrccError> {
         let mut builder = self
             .http
             .request(
@@ -888,6 +1025,16 @@ impl VrccClient {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
 
+        // 手上有一份过期但带校验值的回答：问服务器「变了没有」。
+        if let Some(validators) = conditional {
+            if let Some(etag) = &validators.etag {
+                builder = builder.header("If-None-Match", etag);
+            }
+            if let Some(last_modified) = &validators.last_modified {
+                builder = builder.header("If-Modified-Since", last_modified);
+            }
+        }
+
         if let Some(payload) = &call.body {
             let text = payload.to_string();
             check_body_size(text.len())?;
@@ -905,8 +1052,13 @@ impl VrccClient {
         // 间隔内的同一个读请求：先看有没有能复用的回答。放在扣额度之前——
         // 复用不发请求，不该占服务器的次数。
         let reply_key = self.reply_key(&call);
-        if let Some(text) = reply_key.as_ref().and_then(|key| self.reuse_reply(key)) {
-            return decode(&text);
+        let mut stale = None;
+        if let Some(key) = &reply_key {
+            match self.lookup_reply(key) {
+                Cached::Fresh(text) => return decode(&text),
+                Cached::Stale { text, validators } => stale = Some((text, validators)),
+                Cached::Missing => {}
+            }
         }
         let bucket = call.bucket;
         if let Some(bucket) = bucket {
@@ -918,7 +1070,8 @@ impl VrccClient {
         //
         // 不退的后果很实在：断网时后台轮询每分钟扣一次，本地计数很快跑满，
         // 网络恢复后会被自己拦到第二天，而服务端一次都没记过。
-        let response = match self.send_request(&call).await {
+        let conditional = stale.as_ref().map(|(_, validators)| validators);
+        let response = match self.send_request(&call, conditional).await {
             Ok(response) => response,
             Err(error) => {
                 if let Some(bucket) = bucket {
@@ -929,6 +1082,7 @@ impl VrccClient {
         };
         let status = response.status();
         let rate = RateHeaders::from_headers(response.headers());
+        let cache = CacheHeaders::from_headers(response.headers());
         if let Some(sunset) = response
             .headers()
             .get("sunset")
@@ -948,11 +1102,36 @@ impl VrccClient {
             self.note_quota(bucket, quota);
         }
 
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            if let (Some(key), Some((text, validators))) = (reply_key.as_ref(), stale.as_ref()) {
+                // 服务器说没变：接着用手上那份，重新算有效期。`304` 里给了新的
+                // 校验值就换上，没给就沿用原来的。
+                self.note_success();
+                let value = decode(text)?;
+                let renewed = Validators {
+                    etag: cache
+                        .validators
+                        .etag
+                        .clone()
+                        .or_else(|| validators.etag.clone()),
+                    last_modified: cache
+                        .validators
+                        .last_modified
+                        .clone()
+                        .or_else(|| validators.last_modified.clone()),
+                };
+                let ttl = reply_ttl(call.min_gap, call.authed, &cache);
+                self.remember_reply(key.clone(), ttl, text.clone(), renewed);
+                return Ok(value);
+            }
+        }
+
         if status.is_success() {
             self.note_success();
             let value = decode(&text)?;
             if let Some(key) = reply_key {
-                self.remember_reply(key, call.min_gap, text);
+                let ttl = reply_ttl(call.min_gap, call.authed, &cache);
+                self.remember_reply(key, ttl, text, cache.validators);
             }
             Ok(value)
         } else {
@@ -3458,6 +3637,156 @@ mod tests {
             second.layer,
             ErrorLayer::Transport,
             "间隔内重试应该真的再试一次：{second:?}"
+        );
+    }
+
+    // -- 服务器的缓存头 ----------------------------------------------------
+
+    /// 按顺序回答事先写好的几份完整 HTTP 响应，并记下每次收到的请求。
+    async fn serve_script(responses: Vec<String>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests = Arc::clone(&seen);
+        tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                requests
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..read]).to_string());
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}/"), seen)
+    }
+
+    fn ok_with(headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn cache_headers_read_max_age_minus_age_and_the_validators() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cache-control", "public, max-age=60".parse().unwrap());
+        headers.insert("age", "20".parse().unwrap());
+        headers.insert("etag", "W/\"v1\"".parse().unwrap());
+        let cache = CacheHeaders::from_headers(&headers);
+        assert_eq!(cache.fresh_for, Some(Duration::from_secs(40)));
+        assert!(!cache.no_store);
+        assert_eq!(cache.validators.etag.as_deref(), Some("W/\"v1\""));
+        assert_eq!(cache.validators.last_modified, None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("cache-control", "no-store".parse().unwrap());
+        assert!(CacheHeaders::from_headers(&headers).no_store);
+        assert_eq!(
+            CacheHeaders::from_headers(&HeaderMap::new()),
+            CacheHeaders::default()
+        );
+    }
+
+    #[test]
+    fn the_server_may_lengthen_reuse_but_never_below_the_local_gap() {
+        let gap = Duration::from_secs(30);
+        let fresh = |secs| CacheHeaders {
+            fresh_for: Some(Duration::from_secs(secs)),
+            ..CacheHeaders::default()
+        };
+        assert_eq!(reply_ttl(gap, false, &fresh(60)), Duration::from_secs(60));
+        assert_eq!(reply_ttl(gap, false, &fresh(5)), gap);
+        assert_eq!(reply_ttl(gap, false, &CacheHeaders::default()), gap);
+        let no_store = CacheHeaders {
+            no_store: true,
+            ..fresh(600)
+        };
+        assert_eq!(reply_ttl(gap, false, &no_store), gap);
+        // 带令牌的回答没核对过服务器的头，不延长。
+        assert_eq!(reply_ttl(gap, true, &fresh(600)), gap);
+    }
+
+    /// 开放数据：服务器说 60 秒内都新鲜，本地间隔（公开地图页 5 秒）过了也接着用。
+    #[tokio::test]
+    async fn a_server_max_age_keeps_open_data_past_the_local_gap() {
+        let page = r#"{"map":{"world":"wrld_11111111-1111-4111-8111-111111111111"}}"#;
+        let (base, seen) =
+            serve_script(vec![ok_with("Cache-Control: public, max-age=60\r\n", page)]).await;
+        let client = client_at(base);
+
+        client.map_page(WORLD).await.expect("第一次");
+        tokio::time::sleep(Duration::from_millis(5_100)).await;
+        client
+            .map_page(WORLD)
+            .await
+            .expect("本地间隔过了，但服务器说还新鲜");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// 带令牌的回答不听服务器的 `max-age`：本地间隔一过就重新问。
+    #[tokio::test]
+    async fn a_personal_reply_does_not_follow_the_server_max_age() {
+        let (base, seen) = serve_script(vec![
+            ok_with("Cache-Control: private, max-age=600\r\n", "{}"),
+            ok_with("Cache-Control: private, max-age=600\r\n", "{}"),
+        ])
+        .await;
+        let client = client_at(base);
+
+        client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("第一次");
+        tokio::time::sleep(Duration::from_millis(3_100)).await;
+        client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("间隔过了，重新问");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// 带 `ETag` 的回答过期以后发条件请求；服务器回 `304` 就接着用手上那份。
+    #[tokio::test]
+    async fn a_stale_reply_with_an_etag_is_revalidated_and_reused_on_304() {
+        let (base, seen) = serve_script(vec![
+            ok_with("ETag: \"v1\"\r\n", r#"{"sort":"hot"}"#),
+            "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+        ])
+        .await;
+        let client = client_at(base);
+
+        let first = client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("第一次");
+        // 等本地间隔（3 秒）过去，回答过期。
+        tokio::time::sleep(Duration::from_millis(3_100)).await;
+        let second = client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("304 也是成功");
+
+        assert_eq!(second.sort, first.sort);
+        assert_eq!(second.sort.as_deref(), Some("hot"));
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("if-none-match: \"v1\""),
+            "第二次要带上校验值：{}",
+            requests[1]
         );
     }
 }
