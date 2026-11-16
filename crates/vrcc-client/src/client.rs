@@ -20,7 +20,7 @@ use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use reqwest::header::HeaderMap;
@@ -461,7 +461,18 @@ impl Call<'_> {
     fn reusable(&self) -> bool {
         self.method == "GET" && !self.bypass_gate && self.key != "notifications"
     }
+
+    /// 这次读会顺手把服务器上的已读往前推（`?mark=1`）。
+    ///
+    /// 这种读其实带着写：优先真的发出去；被本地间隔或退避挡住时才退回上一份回答，
+    /// 成功后清掉未读数和通知中心的回答，见 [`VrccClient::request`]。
+    fn marks_read(&self) -> bool {
+        self.path.contains("mark=1")
+    }
 }
+
+/// 同一个读请求的「排队号」：同时发起的同一个读，后来的等前面那个的回答。
+type Flight = Arc<tokio::sync::Mutex<()>>;
 
 /// 一个可克隆的客户端句柄。
 #[derive(Clone)]
@@ -471,6 +482,8 @@ pub struct VrccClient {
     client_id: String,
     token: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     state: Arc<std::sync::Mutex<VrccClientState>>,
+    /// 正在路上的读请求，按 [`ReplyKey`] 排队，见 [`Self::flight`]。
+    flights: Arc<std::sync::Mutex<HashMap<ReplyKey, Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 impl VrccClient {
@@ -513,6 +526,7 @@ impl VrccClient {
             client_id: client_id.into(),
             token,
             state: Arc::new(std::sync::Mutex::new(VrccClientState::default())),
+            flights: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -648,7 +662,12 @@ impl VrccClient {
     ///    超过 [`MAX_ACQUIRE_WAIT`] 就返回 `ThrottledLocally { reason: Gap }`，
     ///    让调用方改用缓存（见 `VrccService::boards` 对 `is_local_gap` 的接住）。
     /// 3. **醒来后再看一次退避**。等待期间可能有别的请求吃到了 429。
-    async fn acquire(&self, key: &str, min_gap: Duration) -> Result<(), VrccError> {
+    async fn acquire(
+        &self,
+        key: &str,
+        min_gap: Duration,
+        budget: Duration,
+    ) -> Result<(), VrccError> {
         let now = Instant::now();
         let at = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -662,7 +681,7 @@ impl VrccClient {
                     },
                 ));
             }
-            match state.limiter.reserve(key, min_gap, now, MAX_ACQUIRE_WAIT) {
+            match state.limiter.reserve(key, min_gap, now, budget) {
                 Ok(at) => at,
                 Err(wait) => {
                     // 没占槽：调用方可以拿缓存顶上，而不是干等。
@@ -722,17 +741,13 @@ impl VrccClient {
 
     /// 这次请求在缓存里的键；不能复用的请求是 `None`。
     ///
-    /// 带令牌的请求现在没有令牌时也是 `None`：交给 `send_request` 去报
-    /// `TokenMissing`，不拿谁的回答顶上。
-    fn reply_key(&self, call: &Call<'_>) -> Option<ReplyKey> {
+    /// `token` 是这次请求会带上的令牌（[`Self::request`] 开头只读一次）：缓存按它
+    /// 分账号，请求头也用它，两边不会因为中途换号而对不上。
+    fn reply_key(&self, call: &Call<'_>, token: Option<&str>) -> Option<ReplyKey> {
         if !call.reusable() {
             return None;
         }
-        let scope = if call.authed {
-            token_scope(&(self.token)()?)
-        } else {
-            0
-        };
+        let scope = if call.authed { token_scope(token?) } else { 0 };
         Some(ReplyKey {
             scope,
             key: call.key,
@@ -833,6 +848,23 @@ impl VrccClient {
     pub fn forget_personal_replies(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.replies.retain(|key, _| key.scope == 0);
+    }
+
+    /// 这个读请求的排队号。
+    ///
+    /// 客户端共享以后，同一个读两处同时发起（两个组件一起挂载）时，两个都没在缓存
+    /// 里找到，第二个就会撞上第一个刚占住的间隔，报「太频繁」。排队以后，后来的
+    /// 等前面那个做完，再去缓存里拿它的回答。
+    fn flight(&self, key: &ReplyKey) -> Flight {
+        let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flight) = flights.get(key).and_then(Weak::upgrade) {
+            return flight;
+        }
+        // 顺手清掉已经没人排的键，免得表随逛过的世界一直长。
+        flights.retain(|_, flight| flight.strong_count() > 0);
+        let flight = Arc::new(tokio::sync::Mutex::new(()));
+        flights.insert(key.clone(), Arc::downgrade(&flight));
+        flight
     }
 
     /// 记下服务器在 `RateLimit-*` 里说的一份额度。
@@ -969,7 +1001,9 @@ impl VrccClient {
     async fn send_request(
         &self,
         call: &Call<'_>,
+        token: Option<&str>,
         conditional: Option<&Validators>,
+        wait_budget: Duration,
     ) -> Result<reqwest::Response, VrccError> {
         // 优先级请求（吊销）不排队：被退避挡住就永远吊销不了了。
         let mut reserved = None;
@@ -978,14 +1012,11 @@ impl VrccClient {
             // [`limiter_key`]。少数调用方给了显式的 `limiter`，那是「同一份
             // 资源、不同意图」——例如可见性探测，它不该占住玩家随后那一次
             // 带 `mark=1` 的读取。
-            let slot = match call.limiter {
-                Some(slot) => slot.to_string(),
-                None => limiter_key(call.key, call.path),
-            };
-            self.acquire(&slot, call.min_gap).await?;
+            let slot = slot_of(call);
+            self.acquire(&slot, call.min_gap, wait_budget).await?;
             reserved = Some(slot);
         }
-        let sent = self.send_reserved(call, conditional).await;
+        let sent = self.send_reserved(call, token, conditional).await;
         if sent.is_err() {
             // 请求根本没到服务器（令牌没有、连接建不起来）：把占住的槽还回去。
             // 不还的话，客户端共享以后，玩家在间隔内点「重试」只会得到
@@ -1002,6 +1033,7 @@ impl VrccClient {
     async fn send_reserved(
         &self,
         call: &Call<'_>,
+        token: Option<&str>,
         conditional: Option<&Validators>,
     ) -> Result<reqwest::Response, VrccError> {
         let mut builder = self
@@ -1019,9 +1051,7 @@ impl VrccClient {
             .header("X-Client", &self.client_id)
             .header("Accept", "application/json");
 
-        if call.authed {
-            let token = (self.token)()
-                .ok_or_else(|| VrccError::new(ErrorLayer::Session, ErrorDetail::TokenMissing))?;
+        if let Some(token) = token {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
 
@@ -1049,12 +1079,34 @@ impl VrccClient {
     /// 核心请求。
     async fn request<T: DeserializeOwned>(&self, call: Call<'_>) -> Result<T, VrccError> {
         Self::validate_path(call.path)?;
+        // 令牌只在这里读一次：缓存按它分账号，请求头也用它。分两次读的话，等限流
+        // 的那几秒里换了号，就会拿 B 的令牌去问、却把回答记在 A 的名下。
+        let token =
+            if call.authed {
+                Some((self.token)().ok_or_else(|| {
+                    VrccError::new(ErrorLayer::Session, ErrorDetail::TokenMissing)
+                })?)
+            } else {
+                None
+            };
+        let reply_key = self.reply_key(&call, token.as_deref());
+        // 同一个读同时只有一个在路上；后来的拿到号以后再查缓存，前面那个的回答
+        // 这时已经在里面了。
+        let flight = reply_key.as_ref().map(|key| self.flight(key));
+        let _turn = match &flight {
+            Some(flight) => Some(flight.lock().await),
+            None => None,
+        };
         // 间隔内的同一个读请求：先看有没有能复用的回答。放在扣额度之前——
         // 复用不发请求，不该占服务器的次数。
-        let reply_key = self.reply_key(&call);
+        //
+        // 标已读的读（`mark=1`）例外：优先真的发出去，手上那份只在被本地挡下时
+        // 顶上（见下面 `fallback`）。
         let mut stale = None;
+        let mut fallback = None;
         if let Some(key) = &reply_key {
             match self.lookup_reply(key) {
+                Cached::Fresh(text) if call.marks_read() => fallback = Some(text),
                 Cached::Fresh(text) => return decode(&text),
                 Cached::Stale { text, validators } => stale = Some((text, validators)),
                 Cached::Missing => {}
@@ -1071,11 +1123,29 @@ impl VrccClient {
         // 不退的后果很实在：断网时后台轮询每分钟扣一次，本地计数很快跑满，
         // 网络恢复后会被自己拦到第二天，而服务端一次都没记过。
         let conditional = stale.as_ref().map(|(_, validators)| validators);
-        let response = match self.send_request(&call, conditional).await {
+        // 手上有能顶上的回答（标已读的读）时不为间隔干等：等的这几秒里玩家看到的是
+        // 转圈，而顶上的那份本来就是这个间隔里刚拿到的。
+        let wait_budget = if fallback.is_some() {
+            Duration::ZERO
+        } else {
+            MAX_ACQUIRE_WAIT
+        };
+        let response = match self
+            .send_request(&call, token.as_deref(), conditional, wait_budget)
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 if let Some(bucket) = bucket {
                     self.refund(bucket);
+                }
+                // 标已读的读被本机挡下（间隔或退避）：拿上一份顶上。玩家每次切到
+                // 那一页都会发它，报错会变成一条「太频繁」的提示；上一份回答是这个
+                // 间隔里刚拿到的，服务器那边也已经标过了。
+                if let Some(text) = fallback {
+                    if matches!(error.detail, ErrorDetail::ThrottledLocally { .. }) {
+                        return decode(&text);
+                    }
                 }
                 return Err(error);
             }
@@ -1129,8 +1199,23 @@ impl VrccClient {
         if status.is_success() {
             self.note_success();
             let value = decode(&text)?;
+            let ttl = reply_ttl(call.min_gap, call.authed, &cache);
+            if call.marks_read() {
+                // 服务器上的已读往前推了：未读数和通知中心的回答过时了。
+                self.forget_replies(|other, _| matches!(other, "unread" | "notes"));
+                // 同一个接口不标已读的那份**不清，而是用这份覆盖**：两者是同一份
+                // 资源，这份更新。清掉的话，可见性探测（自己一个 `crossings/probe`
+                // 槽，和不标已读的读共用这份回答）在间隔内再来时，槽还占着、手上却
+                // 没有回答，只能报「太频繁」。
+                if let Some(key) = &reply_key {
+                    let plain = ReplyKey {
+                        path: without_mark(&key.path),
+                        ..key.clone()
+                    };
+                    self.remember_reply(plain, ttl, text.clone(), cache.validators.clone());
+                }
+            }
             if let Some(key) = reply_key {
-                let ttl = reply_ttl(call.min_gap, call.authed, &cache);
                 self.remember_reply(key, ttl, text, cache.validators);
             }
             Ok(value)
@@ -1146,6 +1231,15 @@ impl VrccClient {
             // 承担，不是错误对象的职责。
             if code == 429 {
                 self.record_too_many(&error, rate, call.bucket);
+            } else if call.reusable() {
+                // 其它错误不进缓存。槽要是还占着，间隔内再问一次，调用方看到的就
+                // 不是服务器的回答，而是本机的「太频繁」——例如 `dev-` 标识每次打开
+                // 「连上」都拿到 `403 scope`（预期内，界面会安静地说明原因），第二次
+                // 却变成一条报错提示。客户端共享之前限流从不生效，两次都是服务器的
+                // 回答，这里保持那样。只放开可复用的读：设备授权、提醒轮询这些
+                // 有官方间隔的不动。
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.limiter.forget(&slot_of(&call));
             }
             Err(VrccError::new(
                 ErrorLayer::Server,
@@ -1835,7 +1929,9 @@ impl VrccClient {
             key: "recent",
             min_gap: Duration::from_secs(10),
             bucket: Some(QuotaBucket::Reads),
-            limiter: None,
+            // 标已读的那次单独一个槽：和不标已读的那次共用资源槽的话，先拉了列表、
+            // 再切到这一页时就会被挡在本地，已读推不上去。同 `crossings/probe`。
+            limiter: mark.then_some("recent/mark"),
             bypass_gate: false,
         })
         .await
@@ -2024,7 +2120,9 @@ impl VrccClient {
             key: "crossings",
             min_gap: Duration::from_secs(30),
             bucket: Some(QuotaBucket::Reads),
-            limiter: None,
+            // 标已读的那次单独一个槽，理由见 `recent_notifications`：手动刷新过列表
+            // （不标已读）再切回这一页时，不能被那次挡下。
+            limiter: mark.then_some("crossings/mark"),
             bypass_gate: false,
         })
         .await
@@ -2079,7 +2177,8 @@ impl VrccClient {
             // 列表是 30 秒，星卡**更宽**：它是第二份读，别跟列表抢窗口。
             min_gap: Duration::from_secs(60),
             bucket: Some(QuotaBucket::MoreReads),
-            limiter: None,
+            // 标已读的那次单独一个槽，理由见 `recent_notifications`。
+            limiter: mark.then_some("crossings/cards/mark"),
             bypass_gate: false,
         })
         .await
@@ -2216,6 +2315,32 @@ fn decode<T: DeserializeOwned>(text: &str) -> Result<T, VrccError> {
             ErrorDetail::Decode(error.to_string()),
         )
     })
+}
+
+/// 这次请求占哪个限流槽：调用方给了显式的 `limiter` 就用它，否则按资源算
+/// （见 [`limiter_key`]）。
+fn slot_of(call: &Call<'_>) -> String {
+    match call.limiter {
+        Some(slot) => slot.to_string(),
+        None => limiter_key(call.key, call.path),
+    }
+}
+
+/// 去掉路径里的 `mark=1`：标已读的读和不标已读的读是同一份资源。
+fn without_mark(path: &str) -> String {
+    let (base, query) = match path.split_once('?') {
+        Some((base, query)) => (base, query),
+        None => return path.to_string(),
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && *pair != "mark=1")
+        .collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
 }
 
 /// 令牌的指纹，只用来给「间隔内复用」的回答分账号。
@@ -3788,5 +3913,142 @@ mod tests {
             "第二次要带上校验值：{}",
             requests[1]
         );
+    }
+
+    /// 同一个读两处同时发起（两个组件一起挂载、开发模式下 effect 跑两遍）：
+    /// 第二个要等第一个的回答，而不是撞上本地间隔报「太频繁」。
+    #[tokio::test]
+    async fn two_identical_reads_at_once_share_one_request() {
+        let (base, seen) = serve_counted(r#"{"at":1,"state":"ok"}"#, 1).await;
+        let client = client_at(base);
+
+        let (first, second) = tokio::join!(client.status(), client.status());
+        assert_eq!(first.expect("第一个").state.as_deref(), Some("ok"));
+        assert_eq!(
+            second.expect("第二个等第一个的回答").state.as_deref(),
+            Some("ok")
+        );
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// 先刷新了列表（不标已读），紧接着切到这一页（标已读）：标已读那次必须
+    /// 真的发出去；再切回来一次，被自己的间隔挡下时拿上一份顶上，不报错、
+    /// 也不再请求。
+    #[tokio::test]
+    async fn a_mark_read_goes_out_after_a_plain_read_and_falls_back_inside_its_gap() {
+        use std::sync::atomic::Ordering;
+        let (base, seen) = serve_counted("{}", 3).await;
+        let client = client_at(base);
+
+        client.crossings(false).await.expect("先刷新列表");
+        client.crossings(true).await.expect("切到这一页，标已读");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "标已读那次要真的发出去");
+
+        client
+            .crossings(true)
+            .await
+            .expect("间隔内再切回来：拿上一份，不报太频繁");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "间隔内不再请求");
+    }
+
+    /// 标已读之后，未读数的那份回答过时了：下一次读未读数要马上去问。
+    #[tokio::test]
+    async fn a_mark_read_forgets_the_unread_counts() {
+        use std::sync::atomic::Ordering;
+        let (base, seen) = serve_counted("{}", 3).await;
+        let client = client_at(base);
+
+        client.unread().await.expect("先看一眼未读数");
+        client.crossings(true).await.expect("标已读");
+        let started = Instant::now();
+        client.unread().await.expect("再看未读数");
+
+        assert_eq!(seen.load(Ordering::SeqCst), 3, "未读数要重新问");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// 一次带令牌的请求只读一次令牌：缓存分账号用的和请求头里带的是同一个。
+    #[tokio::test]
+    async fn a_personal_request_reads_the_token_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let base = serve("200 OK", "{}", 1).await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&reads);
+        let mut client = VrccClient::new(
+            "dev-test",
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Some("tok".to_string())
+            }),
+            None,
+        );
+        client.base = base;
+
+        client.my_map(WORLD).await.expect("请求");
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// 打开页面时先探测（`crossings/probe` 槽），紧接着切到星轨相交页（标已读），
+    /// 离开后 30 秒内再回来又探测一次：第三次不能被探测自己的槽挡下、手上却没
+    /// 有回答可给。
+    #[tokio::test]
+    async fn a_probe_after_a_mark_read_still_has_a_reply() {
+        let (base, seen) =
+            serve_script(vec![ok_with("", r#"{"n":1}"#), ok_with("", r#"{"n":2}"#)]).await;
+        let client = client_at(base);
+
+        client.crossings_probe().await.expect("打开页面时探测");
+        client.crossings(true).await.expect("切到这一页，标已读");
+        let again = client
+            .crossings_probe()
+            .await
+            .expect("30 秒内再探测：不能报太频繁");
+        // 用的是标已读那次（更新的）回答，不是第一次探测那份。
+        assert_eq!(again.n, Some(2));
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// 标已读的读手上有上一份时，不为间隔干等：直接用上一份。
+    #[tokio::test]
+    async fn a_mark_read_inside_its_gap_does_not_wait() {
+        use std::sync::atomic::Ordering;
+        let (base, seen) = serve_counted("{}", 2).await;
+        let client = client_at(base);
+
+        client.recent_notifications(true).await.expect("第一次");
+        let started = Instant::now();
+        client
+            .recent_notifications(true)
+            .await
+            .expect("10 秒内再切回来");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "不该等满间隔：{:?}",
+            started.elapsed()
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    /// 服务器回了错误（例如 `dev-` 标识拿到的 `403 scope`）：间隔内再问一次，
+    /// 调用方看到的必须还是服务器的回答，不能变成本机的「太频繁」。
+    #[tokio::test]
+    async fn a_server_error_does_not_turn_the_next_try_into_too_frequent() {
+        let body = r#"{"error":"scope","need":"mutuals"}"#;
+        let refused = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (base, seen) = serve_script(vec![refused.clone(), refused]).await;
+        let client = client_at(base);
+
+        let first = client.mutuals().await.expect_err("第一次 403");
+        let second = client.mutuals().await.expect_err("第二次也该是 403");
+        for error in [&first, &second] {
+            assert!(
+                matches!(&error.detail, ErrorDetail::Http(http) if http.status == 403),
+                "{error:?}"
+            );
+        }
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 }
