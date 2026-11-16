@@ -691,14 +691,17 @@ impl VrccClient {
     ///    超过 [`MAX_ACQUIRE_WAIT`] 就返回 `ThrottledLocally { reason: Gap }`，
     ///    让调用方改用缓存（见 `VrccService::boards` 对 `is_local_gap` 的接住）。
     /// 3. **醒来后再看一次退避**。等待期间可能有别的请求吃到了 429。
+    /// 4. **占到槽就交出守卫**。从预占那一刻起，这次预占由返回的 [`SlotRelease`]
+    ///    管：在这里等着时被取消（future 被丢掉）、睡醒发现开始退避了，守卫都会把
+    ///    预占撤回去，不留一个谁都没用上的槽。
     async fn acquire(
         &self,
         key: &str,
         min_gap: Duration,
         budget: Duration,
-    ) -> Result<(), VrccError> {
+    ) -> Result<SlotRelease<'_>, VrccError> {
         let now = Instant::now();
-        let at = {
+        let (at, previous) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let backoff = state.backoff_remaining(now);
             if !backoff.is_zero() {
@@ -710,8 +713,10 @@ impl VrccClient {
                     },
                 ));
             }
+            // 预占前槽上记的时间，和预占在同一把锁里取：撤回时只撤自己那一截。
+            let previous = state.limiter.last(key);
             match state.limiter.reserve(key, min_gap, now, budget) {
-                Ok(at) => at,
+                Ok(at) => (at, previous),
                 Err(wait) => {
                     // 没占槽：调用方可以拿缓存顶上，而不是干等。
                     return Err(VrccError::new(
@@ -723,6 +728,14 @@ impl VrccClient {
                     ));
                 }
             }
+        };
+        let release = SlotRelease {
+            client: self,
+            held: Some(Reserved {
+                slot: key.to_string(),
+                at,
+                previous,
+            }),
         };
         let wait = at.saturating_duration_since(Instant::now());
         if !wait.is_zero() {
@@ -742,7 +755,7 @@ impl VrccClient {
                 },
             ));
         }
-        Ok(())
+        Ok(release)
     }
 
     /// 现在是不是有东西挡着重试：全局退避还没结束，或者这一份额度已经用完。
@@ -1095,35 +1108,50 @@ impl VrccClient {
     /// `Err` 一律表示**服务器没有收到这次请求**，调用方据此退还预扣。
     ///
     /// 注意 `send()` 失败也算没发出去——连接都建不起来，服务端不可能计数。
+    ///
+    /// 成功时连同还槽守卫一起交回：可复用的读，守卫一直带到响应处理完（见
+    /// [`SlotRelease`]）；其余请求发出去以后槽就留着，交回的守卫是空的。
     async fn send_request(
         &self,
         call: &Call<'_>,
         token: Option<&str>,
         conditional: Option<&Validators>,
         wait_budget: Duration,
-    ) -> Result<reqwest::Response, VrccError> {
+    ) -> Result<(reqwest::Response, SlotRelease<'_>), VrccError> {
         // 优先级请求（吊销）不排队：被退避挡住就永远吊销不了了。
-        let mut reserved = None;
-        if !call.bypass_gate {
-            // 槽名默认按**资源**算（接口 + 保留表达资源的查询参数），见
-            // [`limiter_key`]。少数调用方给了显式的 `limiter`，那是「同一份
-            // 资源、不同意图」——例如可见性探测，它不该占住玩家随后那一次
-            // 带 `mark=1` 的读取。
-            let slot = slot_of(call);
-            self.acquire(&slot, call.min_gap, wait_budget).await?;
-            reserved = Some(slot);
+        //
+        // 槽名默认按**资源**算（接口 + 保留表达资源的查询参数），见
+        // [`limiter_key`]。少数调用方给了显式的 `limiter`，那是「同一份
+        // 资源、不同意图」——例如可见性探测，它不该占住玩家随后那一次
+        // 带 `mark=1` 的读取。
+        //
+        // 从占到槽起，`release` 管着这次预占：等待时被取消、睡醒碰上退避、连接建不
+        // 起来（下面 `send_reserved` 返回 `Err`），都会撤回去——服务器一次都没见过
+        // 这个请求，不该占着间隔，否则玩家在间隔内点「重试」只会得到「太频繁」。
+        // 每分钟的窗口照算。
+        let mut release = if call.bypass_gate {
+            SlotRelease::none(self)
+        } else {
+            self.acquire(&slot_of(call), call.min_gap, wait_budget)
+                .await?
+        };
+        if call.reusable() {
+            // 可复用的读：等响应时被取消也撤（守卫跟着 future 一起丢掉）。拿到响应
+            // 以后由 `request()` 决定留不留。
+            let response = self.send_reserved(call, token, conditional).await?;
+            return Ok((response, release));
         }
-        let sent = self.send_reserved(call, token, conditional).await;
-        if sent.is_err() {
-            // 请求根本没到服务器（令牌没有、连接建不起来）：把占住的槽还回去。
-            // 不还的话，客户端共享以后，玩家在间隔内点「重试」只会得到
-            // 「太频繁」，而服务器一次都没见过这个请求。每分钟的窗口照算。
-            if let Some(slot) = reserved {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                state.limiter.forget(&slot);
+        // 写操作、提醒轮询：开始发了就不撤——等响应时被取消，服务器可能已经收到，
+        // 它们的间隔是官方的。只有确定没发出去（`Err`）才撤。
+        let held = release.held.take();
+        match self.send_reserved(call, token, conditional).await {
+            Ok(response) => Ok((response, SlotRelease::none(self))),
+            Err(error) => {
+                // 把预占交回守卫，返回时撤掉。
+                release.held = held;
+                Err(error)
             }
         }
-        sent
     }
 
     /// 已经拿到发送许可之后，真正把请求发出去。失败一律表示请求没有到服务器。
@@ -1235,11 +1263,11 @@ impl VrccClient {
         } else {
             MAX_ACQUIRE_WAIT
         };
-        let response = match self
+        let (response, mut release) = match self
             .send_request(&call, token.as_deref(), conditional, wait_budget)
             .await
         {
-            Ok(response) => response,
+            Ok(sent) => sent,
             Err(error) => {
                 if let Some(bucket) = bucket {
                     self.refund(bucket);
@@ -1265,12 +1293,8 @@ impl VrccClient {
             }
         };
         // 从这里起拿到了响应。可复用的读要是最后没存下能直接给出的回答（正文解不
-        // 出来、读到一半断了、服务器回错误、`no-store` / `no-cache`），守卫在函数
-        // 返回时把槽还回去；只有存下了才 `keep`。
-        let mut release = SlotRelease {
-            client: self,
-            slot: call.reusable().then(|| slot_of(&call)),
-        };
+        // 出来、读到一半断了、服务器回错误、`no-store` / `no-cache`），`release` 在
+        // 函数返回时把槽还回去；只有存下了才 `keep`。其余请求的 `release` 是空的。
         let status = response.status();
         let rate = RateHeaders::from_headers(response.headers());
         let cache = CacheHeaders::from_headers(response.headers());
@@ -2424,33 +2448,50 @@ fn decode<T: DeserializeOwned>(text: &str) -> Result<T, VrccError> {
     })
 }
 
-/// 可复用的读拿到响应以后的还槽守卫。
+/// 一次限流预占的还槽守卫：`acquire` 占到槽就交出它，没被 `keep` 就在丢掉时把这次
+/// 预占撤回去（[`RateLimiter::undo`]：只撤自己那一截，预占前就在的间隔照旧）。
 ///
-/// 本地间隔只在「间隔内有回答可给」时才有意义：槽占着、手上却没有能直接给出的回答，
-/// 下一次读只能拿到本机的「太频繁」，而重构前（客户端每次新建、间隔从不生效）它会
-/// 真的去问。所以一条规则：**这次没存下能直接复用的回答，就把槽还回去**——正文解不
-/// 出来、读到一半断了、服务器回错误（包括 429，退避照旧挡着重试）、`no-store`、
-/// `no-cache`，都在这一条里，不再各自记得还。
+/// 撤回的时机分两段：
 ///
-/// 只管可复用的读。写操作、提醒轮询、设备授权有自己的（官方）间隔，不动。请求没
-/// 发出去的情况在 `send_request` 里还。
+/// - **请求还没发出去**：在 `acquire` 里等着时被取消、睡醒发现开始退避了、连接
+///   建不起来——服务器一次都没见过，所有请求都撤。
+/// - **请求发出去以后**：只有可复用的读撤。本地间隔只在「间隔内有回答可给」时才有
+///   意义：槽占着、手上却没有能直接给出的回答，下一次读只能拿到本机的「太频繁」，
+///   而重构前（客户端每次新建、间隔从不生效）它会真的去问。所以一条规则：**这次没
+///   存下能直接复用的回答，就把槽还回去**——正文解不出来、读到一半断了、服务器回
+///   错误（429 只在退避或额度闸门挡着重试时）、`no-store`、`no-cache`、在等响应时
+///   被取消，都在这一条里。写操作、提醒轮询发出去以后就不撤：服务器可能已经收到，
+///   它们的间隔是官方的。
+#[must_use]
 struct SlotRelease<'a> {
     client: &'a VrccClient,
-    slot: Option<String>,
+    held: Option<Reserved>,
 }
 
-impl SlotRelease<'_> {
-    /// 存下了能直接给出的回答：槽留着，间隔内的下一次读拿这份回答。
+/// 守卫手上的那次预占：槽名、预占到的时间、预占前槽上记的时间。
+struct Reserved {
+    slot: String,
+    at: Instant,
+    previous: Option<Instant>,
+}
+
+impl<'a> SlotRelease<'a> {
+    /// 手上没有预占（绕过限流的请求）：什么都不撤。
+    fn none(client: &'a VrccClient) -> Self {
+        Self { client, held: None }
+    }
+
+    /// 槽留着：存下了能直接给出的回答，或者这次请求已经发出去、不该撤。
     fn keep(&mut self) {
-        self.slot = None;
+        self.held = None;
     }
 }
 
 impl Drop for SlotRelease<'_> {
     fn drop(&mut self) {
-        if let Some(slot) = self.slot.take() {
+        if let Some(Reserved { slot, at, previous }) = self.held.take() {
             let mut state = self.client.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.limiter.forget(&slot);
+            state.limiter.undo(&slot, at, previous);
         }
     }
 }
@@ -3941,6 +3982,169 @@ mod tests {
             second.layer,
             ErrorLayer::Transport,
             "间隔内重试应该真的再试一次：{second:?}"
+        );
+    }
+
+    /// 第一个连接收下请求后一直不回答，模拟「等响应时被取消」；之后的连接照常回答。
+    /// 第一个请求到达时 `received` 通知一次，测试据此丢掉还在等的那个 future。
+    async fn serve_holding_first(
+        body: &'static str,
+    ) -> (
+        String,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let received = Arc::new(tokio::sync::Notify::new());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (notify, counter) = (Arc::clone(&received), Arc::clone(&seen));
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    notify.notify_one();
+                    held.push(socket);
+                    continue;
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}/"), received, seen)
+    }
+
+    /// 可复用的读在等响应时被取消（调用方丢掉了 future）：手上没有回答，槽不能
+    /// 占着。`status` 的间隔是 30 秒，比 `MAX_ACQUIRE_WAIT` 长，槽要是还占着，
+    /// 紧接着的那次读只能拿到「太频繁」。
+    #[tokio::test]
+    async fn a_read_cancelled_while_waiting_for_its_reply_gives_its_slot_back() {
+        use std::sync::atomic::Ordering;
+        let (base, received, seen) = serve_holding_first(r#"{"at":1,"state":"ok"}"#).await;
+        let client = client_at(base);
+
+        tokio::select! {
+            result = client.status() => panic!("服务器没回答，不该返回：{result:?}"),
+            () = received.notified() => {}
+        }
+        // 上面那个 future 已经丢掉了：请求到了服务器，回答没等到。
+        let reply = client
+            .status()
+            .await
+            .expect("取消的那次不该占着 30 秒的间隔");
+        assert_eq!(reply.state.as_deref(), Some("ok"));
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "第二次要真的发出去");
+    }
+
+    /// 提醒轮询不一样：发出去以后被取消，服务器可能已经收到，25 秒的官方间隔
+    /// 照旧挡着，不能因为取消就放开。
+    #[tokio::test]
+    async fn a_poll_cancelled_mid_flight_still_holds_its_gap() {
+        let (base, received, _) = serve_holding_first(r#"{"items":[],"last":7}"#).await;
+        let client = client_at(base);
+
+        tokio::select! {
+            result = client.notifications(None) => panic!("服务器没回答，不该返回：{result:?}"),
+            () = received.notified() => {}
+        }
+        let error = client
+            .notifications(None)
+            .await
+            .expect_err("25 秒内第二次轮询仍被本地挡下");
+        assert!(
+            matches!(
+                error.detail,
+                ErrorDetail::ThrottledLocally {
+                    reason: LocalThrottle::Gap,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// 等在 `acquire` 里的请求被取消：撤掉的只能是它自己那次预占。前面那次请求
+    /// 留下的间隔（这里模拟一个发出去、槽留着的请求）还该挡着下一次——既不能像
+    /// 以前那样一直占着取消掉的那截，也不能连前面那段一起抹掉。
+    #[tokio::test]
+    async fn a_request_cancelled_while_queued_leaves_the_earlier_gap_alone() {
+        let client = client_at("http://127.0.0.1:9/".to_string());
+        let gap = Duration::from_secs(4);
+        let budget = Duration::from_secs(10);
+
+        let mut first = client.acquire("slot", gap, budget).await.expect("第一次");
+        first.keep();
+        let queued = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.acquire("slot", gap, budget),
+        )
+        .await;
+        assert!(
+            queued.is_err(),
+            "第二次要排到间隔之后，测试在它等着时丢掉它"
+        );
+
+        let wait = {
+            let state = client.state.lock().unwrap();
+            state
+                .limiter
+                .check("slot", gap, Instant::now())
+                .expect_err("第一次的间隔还在")
+        };
+        // 以前取消掉的那截一直占着：要等将近两个间隔。
+        assert!(
+            wait <= gap,
+            "只剩第一次的间隔，取消掉的那截已经撤了：{wait:?}"
+        );
+    }
+
+    /// 排着队时开始退避了：睡醒拿到「退避中」，这次没发出去，预占要撤回去。
+    #[tokio::test]
+    async fn a_request_turned_away_by_backoff_after_queueing_gives_its_slot_back() {
+        let client = client_at("http://127.0.0.1:9/".to_string());
+        let gap = Duration::from_millis(1500);
+        let budget = Duration::from_secs(10);
+
+        let mut first = client.acquire("slot", gap, budget).await.expect("第一次");
+        first.keep();
+        let queued = client.acquire("slot", gap, budget);
+        let backoff = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            client.state.lock().unwrap().backoff_until =
+                Some(Instant::now() + Duration::from_secs(5));
+        };
+        let (queued, ()) = tokio::join!(queued, backoff);
+        let error = queued.err().expect("睡醒碰上退避");
+        assert!(
+            matches!(
+                error.detail,
+                ErrorDetail::ThrottledLocally {
+                    reason: LocalThrottle::Backoff,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        // 第一次的间隔已经过了（排着的那次就是等到它过了才醒）：撤回以后槽是空的。
+        let state = client.state.lock().unwrap();
+        assert_eq!(
+            state.limiter.check("slot", gap, Instant::now()),
+            Ok(()),
+            "没发出去的那次不该还占着槽"
         );
     }
 

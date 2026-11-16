@@ -185,6 +185,34 @@ impl RateLimiter {
         self.last_at.remove(key);
     }
 
+    /// 这个槽上一次放行（或预占）的时间。
+    pub fn last(&self, key: &str) -> Option<Instant> {
+        self.last_at.get(key).copied()
+    }
+
+    /// 撤销自己在 `at` 的那次预占，把槽恢复成预占前的样子（`previous`）。
+    ///
+    /// 和 [`Self::forget`] 不同：`forget` 连预占之前就在的间隔也一起抹掉。等在
+    /// `acquire` 里的请求被取消时，那段更早的间隔（比如上一次请求吃到 429 后留着的
+    /// 槽）还该挡着，只撤掉自己加上去的那一截。
+    ///
+    /// 槽上记的已经不是 `at`（之后又有人预占，或者整张表被 `forget_gaps` /
+    /// `forget` 清过）时什么都不做：那是别人的记录。窗口里的记录不动，每分钟的
+    /// 总数照算。
+    pub fn undo(&mut self, key: &str, at: Instant, previous: Option<Instant>) {
+        if self.last_at.get(key) != Some(&at) {
+            return;
+        }
+        match previous {
+            Some(previous) => {
+                self.last_at.insert(key.to_string(), previous);
+            }
+            None => {
+                self.last_at.remove(key);
+            }
+        }
+    }
+
     /// 忘掉所有槽的上次放行时间（会话换了令牌时用，见
     /// `VrccClient::forget_session_state`）。窗口里的记录不动，每分钟的总数照算。
     pub fn forget_gaps(&mut self) {
