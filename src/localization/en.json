@@ -859,6 +859,7 @@
             "source_mine": "Connected — includes member-only clubs",
             "loading": "Loading clubs…",
             "error": "The club list didn't load. Try again later.",
+            "stale_hint": "Showing the last loaded list; refreshing failed.",
             "empty": "No public clubs yet.",
             "members": "{count} members",
             "likes": "{count} likes",

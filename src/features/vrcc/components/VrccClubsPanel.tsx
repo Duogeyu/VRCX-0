@@ -350,7 +350,10 @@ export function VrccClubsPanel({
         );
     }
 
-    if (error) {
+    // 只有手上**什么都没有**时才整页报错。React Query 在后台刷新失败时会保留
+    // 上一份数据、同时给出 `error`：早先这里先判 `error`，过了 staleTime 再切回
+    // 这一页、刷新又恰好失败，已经看到过的列表就被一句「没能加载出来」顶掉。
+    if (error && !view) {
         return (
             <p className="text-muted-foreground p-4 text-sm">
                 {t('vrcc.clubs.error')}
@@ -396,6 +399,13 @@ export function VrccClubsPanel({
                         : t('vrcc.clubs.source_public')}
                 </span>
             </div>
+
+            {/* 有旧数据、这次刷新失败：留着列表，只在上面加一条提示（同星轨相交）。 */}
+            {error ? (
+                <p className="text-muted-foreground shrink-0 px-1 text-xs">
+                    {t('vrcc.clubs.stale_hint')}
+                </p>
+            ) : null}
 
             {sorted.length === 0 ? (
                 <p className="text-muted-foreground p-4 text-sm">
