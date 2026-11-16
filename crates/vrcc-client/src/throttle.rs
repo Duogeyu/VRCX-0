@@ -250,6 +250,30 @@ mod tests {
         base + Duration::from_secs(secs)
     }
 
+    /// 同一个槽上先后两次预占，先占的那次后撤：槽上记的已经是后一次，不能动。
+    /// 写操作之后的重拉就会造出这种局面——打分前的读还在路上，重拉又占了一次。
+    #[test]
+    fn undo_leaves_a_later_reservation_alone() {
+        let base = Instant::now();
+        let gap = Duration::from_secs(5);
+        let budget = Duration::from_secs(10);
+        let mut limiter = RateLimiter::new();
+
+        let previous = limiter.last("k");
+        let first = limiter.reserve("k", gap, base, budget).expect("第一次");
+        let later = limiter
+            .reserve("k", gap, base, budget)
+            .expect("第二次排在后面");
+        assert!(later > first);
+
+        limiter.undo("k", first, previous);
+        assert_eq!(limiter.last("k"), Some(later), "后一次的预占还在");
+
+        // 槽上记的是自己时才恢复成预占前的值。
+        limiter.undo("k", later, Some(first));
+        assert_eq!(limiter.last("k"), Some(first));
+    }
+
     #[test]
     fn window_blocks_after_limit() {
         let base = Instant::now();
