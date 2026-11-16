@@ -2547,12 +2547,12 @@ fn decode<T: DeserializeOwned>(text: &str) -> Result<T, VrccError> {
 /// 会走到「没存下 → 还槽」这一条，间隔内的第二次读不会被挡住：挡着连发的只剩每分钟
 /// `120` 次的窗口、每天额度，以及同一个读的在途排队。
 ///
-/// 这是**有意的选择**，由 #23 评审提出、#24 拍板：服务器既然不让复用，就不该拿一个
-/// 「手上没有回答可给」的间隔去换玩家的「请求太频繁」。开放数据不受影响——回答能
-/// 存下，间隔照旧生效。
+/// 这是**有意的选择**，在 #23 里定下来的（#24 只是记录这个问题的 issue）：服务器既然
+/// 不让复用，就不该拿一个「手上没有回答可给」的间隔去换玩家的「请求太频繁」。开放数据
+/// 不受影响——回答能存下，间隔照旧生效。
 ///
-/// 服务器哪天开始给个人接口发可复用的回答（或给出 `ETag`），这条会自动回到「间隔内
-/// 复用」，不用改代码。
+/// 服务器哪天不再给个人接口发 `no-store`，这条就自动回到「间隔内复用」，不用改代码。
+/// 只给 `ETag` 不够：`no-store` 存不下，就没有可以拿去验证的那一份。
 #[must_use]
 struct SlotRelease<'a> {
     client: &'a VrccClient,
@@ -4941,6 +4941,9 @@ mod tests {
         const WORLD: &str = "wrld_11111111-1111-4111-8111-111111111111";
         const CLUB: &str = "abc.1234";
 
+        no_store_twice!(VrccMyClubs, my_clubs());
+        no_store_twice!(VrccMyClubResponse, my_club(CLUB));
+        no_store_twice!(VrccMyMapPage, my_map_page(WORLD, Some("hot")));
         no_store_twice!(VrccRecentNotifications, recent_notifications(false));
         no_store_twice!(VrccRecentNotifications, recent_notifications(true));
         no_store_twice!(VrccUnread, unread());
@@ -4956,8 +4959,6 @@ mod tests {
         no_store_twice!(VrccCrossings, crossings_probe());
         no_store_twice!(VrccCrossingCards, crossing_cards(false));
         no_store_twice!(VrccCrossingCards, crossing_cards(true));
-        no_store_twice!(VrccMyClubs, my_clubs());
-        no_store_twice!(VrccMyClubResponse, my_club(CLUB));
     }
 
     // -- 拿到了响应、却没存下回答：槽不能占着 ------------------------------
