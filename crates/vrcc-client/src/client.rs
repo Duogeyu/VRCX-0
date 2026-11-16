@@ -253,11 +253,16 @@ struct CachedReply {
     text: String,
     /// 服务器给的校验值。过期以后靠它发条件请求，服务器回 `304` 就接着用 `text`。
     validators: Validators,
+    /// 服务器说过 `no-cache`：可以存，但每次复用前都要先问一次（条件请求）。
+    ///
+    /// 记在条目上，是因为服务器的 `304` 常常不重复 `Cache-Control`：只看 `304`
+    /// 自己的头，这份回答就会重新变成「间隔内新鲜」，下一次不验证就直接给出去。
+    must_revalidate: bool,
 }
 
 impl CachedReply {
     fn is_live(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.at) < self.ttl
+        !self.must_revalidate && now.saturating_duration_since(self.at) < self.ttl
     }
 
     /// 过期了还值不值得留着：带校验值的再留一阵，下次可以发条件请求。
@@ -291,8 +296,12 @@ impl Validators {
 struct CacheHeaders {
     /// `max-age` 减去 `Age`：服务器说这份回答还能新鲜多久。没给时是 `None`。
     fresh_for: Option<Duration>,
-    /// `no-store` / `no-cache`：服务器不让拿它当新鲜的用。
+    /// `no-store`：不能存（RFC 9111 §5.2.2.5）。
     no_store: bool,
+    /// `no-cache`：可以存，但复用前必须先向服务器验证（RFC 9111 §5.2.2.4）。
+    no_cache: bool,
+    /// 回答里到底有没有 `Cache-Control`。`304` 不带时，沿用上一份的 `no-cache`。
+    has_control: bool,
     validators: Validators,
 }
 
@@ -308,11 +317,15 @@ impl CacheHeaders {
         };
         let mut max_age = None;
         let mut no_store = false;
-        if let Some(control) = text("cache-control") {
+        let mut no_cache = false;
+        let control = text("cache-control");
+        if let Some(control) = &control {
             for directive in control.split(',') {
                 let directive = directive.trim().to_ascii_lowercase();
-                if directive == "no-store" || directive == "no-cache" {
+                if directive == "no-store" {
                     no_store = true;
+                } else if directive == "no-cache" {
+                    no_cache = true;
                 } else if let Some(secs) = directive.strip_prefix("max-age=") {
                     max_age = secs.trim_matches('"').parse::<u64>().ok();
                 }
@@ -324,6 +337,8 @@ impl CacheHeaders {
         Self {
             fresh_for: max_age.map(|secs| Duration::from_secs(secs.saturating_sub(age))),
             no_store,
+            no_cache,
+            has_control: control.is_some(),
             validators: Validators {
                 etag: text("etag"),
                 last_modified: text("last-modified"),
@@ -345,19 +360,31 @@ impl CacheHeaders {
 /// 过再放开。
 fn reply_ttl(min_gap: Duration, authed: bool, cache: &CacheHeaders) -> Duration {
     match cache.fresh_for {
-        Some(fresh) if !cache.no_store && !authed => fresh.max(min_gap),
+        Some(fresh) if !cache.no_store && !cache.no_cache && !authed => fresh.max(min_gap),
         _ => min_gap,
     }
+}
+
+/// 一份回答按什么条件存，见 [`VrccClient::keep_reply`]。
+#[derive(Clone, Debug)]
+struct ReplyPolicy {
+    ttl: Duration,
+    validators: Validators,
+    /// 存下来，但每次复用前都要先验证（`no-cache`）。
+    must_revalidate: bool,
+    /// 不存（`no-store`）。
+    no_store: bool,
 }
 
 /// 在缓存里找到的情况，见 [`VrccClient::lookup_reply`]。
 enum Cached {
     /// 还新鲜：直接用。
     Fresh(String),
-    /// 过期了，但带着校验值：发条件请求，`304` 时接着用这份正文。
+    /// 过期了（或者必须先验证），但带着校验值：发条件请求，`304` 时接着用这份正文。
     Stale {
         text: String,
         validators: Validators,
+        must_revalidate: bool,
     },
     /// 没有可用的。
     Missing,
@@ -782,14 +809,61 @@ impl VrccClient {
             Cached::Stale {
                 text: reply.text.clone(),
                 validators: reply.validators.clone(),
+                must_revalidate: reply.must_revalidate,
             }
         } else {
             Cached::Missing
         }
     }
 
+    /// 按服务器的缓存头存一份成功回答（或者不存），返回存了没有。
+    ///
+    /// - `no-store`：不存，并删掉这个键下的旧回答；
+    /// - `no-cache`：只有带校验值才存，而且每次复用前都要先验证；没有校验值就和
+    ///   `no-store` 一样处理（存了也没法验证）；
+    /// - 这两种情况都把限流槽还回去：间隔内没有能直接给出的回答，槽还占着的话，下一次
+    ///   读只能报「太频繁」。本地间隔只在「间隔内有回答可给」时才有意义。
+    fn keep_reply(
+        &self,
+        call: &Call<'_>,
+        key: ReplyKey,
+        text: String,
+        policy: ReplyPolicy,
+    ) -> bool {
+        let unusable = policy.no_store || (policy.must_revalidate && policy.validators.is_empty());
+        if policy.must_revalidate || unusable {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.limiter.forget(&slot_of(call));
+        }
+        if unusable {
+            tracing::debug!(
+                key = call.key,
+                no_store = policy.no_store,
+                "vrcc: the server does not let this reply be reused; not keeping it"
+            );
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.replies.remove(&key);
+            return false;
+        }
+        self.remember_reply(
+            key,
+            policy.ttl,
+            text,
+            policy.validators,
+            policy.must_revalidate,
+        );
+        true
+    }
+
     /// 记下一份成功回答，供之后复用或发条件请求。
-    fn remember_reply(&self, key: ReplyKey, ttl: Duration, text: String, validators: Validators) {
+    fn remember_reply(
+        &self,
+        key: ReplyKey,
+        ttl: Duration,
+        text: String,
+        validators: Validators,
+        must_revalidate: bool,
+    ) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.replies.retain(|_, reply| reply.worth_keeping(now));
@@ -811,6 +885,7 @@ impl VrccClient {
                 ttl,
                 text,
                 validators,
+                must_revalidate,
             },
         );
     }
@@ -1108,7 +1183,11 @@ impl VrccClient {
             match self.lookup_reply(key) {
                 Cached::Fresh(text) if call.marks_read() => fallback = Some(text),
                 Cached::Fresh(text) => return decode(&text),
-                Cached::Stale { text, validators } => stale = Some((text, validators)),
+                Cached::Stale {
+                    text,
+                    validators,
+                    must_revalidate,
+                } => stale = Some((text, validators, must_revalidate)),
                 Cached::Missing => {}
             }
         }
@@ -1122,7 +1201,7 @@ impl VrccClient {
         //
         // 不退的后果很实在：断网时后台轮询每分钟扣一次，本地计数很快跑满，
         // 网络恢复后会被自己拦到第二天，而服务端一次都没记过。
-        let conditional = stale.as_ref().map(|(_, validators)| validators);
+        let conditional = stale.as_ref().map(|(_, validators, _)| validators);
         // 手上有能顶上的回答（标已读的读）时不为间隔干等：等的这几秒里玩家看到的是
         // 转圈，而顶上的那份本来就是这个间隔里刚拿到的。
         let wait_budget = if fallback.is_some() {
@@ -1173,7 +1252,9 @@ impl VrccClient {
         }
 
         if status == reqwest::StatusCode::NOT_MODIFIED {
-            if let (Some(key), Some((text, validators))) = (reply_key.as_ref(), stale.as_ref()) {
+            if let (Some(key), Some((text, validators, was_no_cache))) =
+                (reply_key.as_ref(), stale.as_ref())
+            {
                 // 服务器说没变：接着用手上那份，重新算有效期。`304` 里给了新的
                 // 校验值就换上，没给就沿用原来的。
                 self.note_success();
@@ -1190,8 +1271,15 @@ impl VrccClient {
                         .clone()
                         .or_else(|| validators.last_modified.clone()),
                 };
-                let ttl = reply_ttl(call.min_gap, call.authed, &cache);
-                self.remember_reply(key.clone(), ttl, text.clone(), renewed);
+                // `304` 不带 `Cache-Control` 时沿用上一份的 `no-cache`：不沿用的话，这份
+                // 回答会重新变成「间隔内新鲜」，下一次不验证就直接给出去。
+                let policy = ReplyPolicy {
+                    ttl: reply_ttl(call.min_gap, call.authed, &cache),
+                    validators: renewed,
+                    must_revalidate: cache.no_cache || (!cache.has_control && *was_no_cache),
+                    no_store: cache.no_store,
+                };
+                self.keep_reply(&call, key.clone(), text.clone(), policy);
                 return Ok(value);
             }
         }
@@ -1199,7 +1287,12 @@ impl VrccClient {
         if status.is_success() {
             self.note_success();
             let value = decode(&text)?;
-            let ttl = reply_ttl(call.min_gap, call.authed, &cache);
+            let policy = ReplyPolicy {
+                ttl: reply_ttl(call.min_gap, call.authed, &cache),
+                validators: cache.validators.clone(),
+                must_revalidate: cache.no_cache,
+                no_store: cache.no_store,
+            };
             if call.marks_read() {
                 // 服务器上的已读往前推了：未读数和通知中心的回答过时了。
                 self.forget_replies(|other, _| matches!(other, "unread" | "notes"));
@@ -1207,16 +1300,18 @@ impl VrccClient {
                 // 资源，这份更新。清掉的话，可见性探测（自己一个 `crossings/probe`
                 // 槽，和不标已读的读共用这份回答）在间隔内再来时，槽还占着、手上却
                 // 没有回答，只能报「太频繁」。
-                if let Some(key) = &reply_key {
+                //
+                // 服务器不让存（`no-store`）时这一步跳过。
+                if let (Some(key), false) = (&reply_key, policy.no_store) {
                     let plain = ReplyKey {
                         path: without_mark(&key.path),
                         ..key.clone()
                     };
-                    self.remember_reply(plain, ttl, text.clone(), cache.validators.clone());
+                    self.keep_reply(&call, plain, text.clone(), policy.clone());
                 }
             }
             if let Some(key) = reply_key {
-                self.remember_reply(key, ttl, text, cache.validators);
+                self.keep_reply(&call, key, text, policy);
             }
             Ok(value)
         } else {
@@ -4050,5 +4145,71 @@ mod tests {
             );
         }
         assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn no_store_and_no_cache_are_read_apart() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cache-control", "private, no-cache".parse().unwrap());
+        let cache = CacheHeaders::from_headers(&headers);
+        assert!(cache.no_cache && !cache.no_store && cache.has_control);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("cache-control", "no-store".parse().unwrap());
+        let cache = CacheHeaders::from_headers(&headers);
+        assert!(cache.no_store && !cache.no_cache);
+
+        assert!(!CacheHeaders::from_headers(&HeaderMap::new()).has_control);
+    }
+
+    /// `no-store` 的回答不存：间隔内再读要真的去问，而且不能被本地间隔挡成「太频繁」。
+    #[tokio::test]
+    async fn a_no_store_reply_is_not_kept_and_does_not_hold_the_gap() {
+        // `status` 的本地间隔是 30 秒，超过等待上限：槽不还的话第二次只能报太频繁。
+        let body = r#"{"at":1,"state":"ok"}"#;
+        let (base, seen) = serve_script(vec![
+            ok_with("Cache-Control: no-store\r\n", body),
+            ok_with("Cache-Control: no-store\r\n", body),
+        ])
+        .await;
+        let client = client_at(base);
+
+        client.status().await.expect("第一次");
+        client
+            .status()
+            .await
+            .expect("间隔内第二次：去问服务器，不报太频繁");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// `no-cache` 加 `ETag`：每次复用前都先验证。服务器的 `304` 不重复
+    /// `Cache-Control` 时也一样——第三次读仍然要带着 `If-None-Match` 去问。
+    #[tokio::test]
+    async fn a_no_cache_reply_is_revalidated_every_time_even_after_a_bare_304() {
+        let body = r#"{"at":1,"state":"ok"}"#;
+        let bare_304 = "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_string();
+        let (base, seen) = serve_script(vec![
+            ok_with("Cache-Control: no-cache\r\nETag: \"v1\"\r\n", body),
+            bare_304.clone(),
+            bare_304,
+        ])
+        .await;
+        let client = client_at(base);
+
+        client.status().await.expect("第一次");
+        client.status().await.expect("第二次：验证后复用");
+        client.status().await.expect("第三次：还是要验证");
+
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 3, "每次都要先问服务器");
+        for request in &requests[1..] {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("if-none-match: \"v1\""),
+                "{request}"
+            );
+        }
     }
 }

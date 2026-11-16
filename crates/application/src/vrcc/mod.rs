@@ -1387,8 +1387,8 @@ impl VrccService {
         &self,
         mark: bool,
     ) -> std::result::Result<VrccRecentNotifications, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let result = self
             .remote
             .recent_notifications(mark)
@@ -1427,13 +1427,13 @@ impl VrccService {
     /// **每个调用点都必须自己判断 `off`**，所以两处调用点（所在地图卡、世界
     /// 详情页）都做了显式判断，不要依赖「反正拿不到」。
     pub async fn my_map(&self, world: &str) -> std::result::Result<Option<VrccMyMap>, VrccError> {
-        let generation = self.remote.generation();
         // 只认 wrld_…：带房间实例号的 location 会让接口查错图。
         let world = vrcx_0_core::location::world_id_from_location(world);
         if world.is_empty() {
             return Ok(None);
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let map = self
             .remote
             .my_map(&world)
@@ -1456,8 +1456,8 @@ impl VrccService {
     pub async fn refresh_unread(
         &self,
     ) -> std::result::Result<Option<(VrccUnread, bool)>, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let skip = self
             .unread
             .read()
@@ -1488,8 +1488,8 @@ impl VrccService {
     ///
     /// 旧服务器没有这个接口时返回 `None`，界面就不显示这一块。
     pub async fn notes(&self) -> std::result::Result<Option<VrccNotes>, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.notes().await {
             Ok(notes) => Ok(Some(notes)),
             Err(error) if error.is_not_found() => Ok(None),
@@ -1512,8 +1512,8 @@ impl VrccService {
     pub async fn poll_notifications(
         &self,
     ) -> std::result::Result<vrcx_0_contracts::vrcc::VrccNotifications, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let cursor = self.remote.connection().notifications_cursor;
         let polled = self
             .remote
@@ -1566,12 +1566,12 @@ impl VrccService {
         world: &str,
         sort: Option<&str>,
     ) -> std::result::Result<Option<VrccMyMapPage>, VrccError> {
-        let generation = self.remote.generation();
         let world = vrcx_0_core::location::world_id_from_location(world);
         if world.is_empty() {
             return Ok(None);
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.my_map_page(&world, sort).await {
             Ok(page) => Ok(Some(page)),
             Err(error) if error.is_not_found() => Ok(None),
@@ -1599,7 +1599,6 @@ impl VrccService {
         score: i64,
         text: &VrccRatingText,
     ) -> std::result::Result<VrccMyMap, VrccError> {
-        let generation = self.remote.generation();
         let world = vrcx_0_core::location::world_id_from_location(world);
         if world.is_empty() {
             // 读接口遇到空 ID 会安静地返回 `None`，写接口不能：一个写操作
@@ -1610,6 +1609,7 @@ impl VrccService {
             ));
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .rate_map(&world, score, text)
             .await
@@ -1621,7 +1621,6 @@ impl VrccService {
     /// 同样是写操作，不做重试。`404` 表示本来就没打过分——对它而言目标已经
     /// 达成，所以按成功处理，免得玩家看到一句莫名其妙的错误。
     pub async fn delete_map_rating(&self, world: &str) -> std::result::Result<(), VrccError> {
-        let generation = self.remote.generation();
         let world = vrcx_0_core::location::world_id_from_location(world);
         if world.is_empty() {
             return Err(VrccError::new(
@@ -1630,6 +1629,7 @@ impl VrccService {
             ));
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.delete_map_rating(&world).await {
             Ok(()) => Ok(()),
             Err(error) if error.is_not_found() => Ok(()),
@@ -1655,7 +1655,6 @@ impl VrccService {
         id: i64,
         vote: VrccVote,
     ) -> std::result::Result<VrccVoteResult, VrccError> {
-        let generation = self.remote.generation();
         if id <= 0 {
             return Err(VrccError::new(
                 vrcx_0_contracts::vrcc::ErrorLayer::Input,
@@ -1663,6 +1662,7 @@ impl VrccService {
             ));
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .vote_map_content(kind, id, vote)
             .await
@@ -1678,8 +1678,8 @@ impl VrccService {
         sort: VrccMyBoardSort,
         q: Option<&str>,
     ) -> std::result::Result<VrccMyBoard, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .my_board(sort, q)
             .await
@@ -1691,8 +1691,8 @@ impl VrccService {
     /// 未连接时先拒绝，不把一个必然 `TokenMissing` 的请求发出去——那会被
     /// 判成「要重新授权」，在还没连过的玩家那里就是一句莫名其妙的红字。
     pub async fn my_maps(&self) -> std::result::Result<VrccRatedMaps, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .my_maps()
             .await
@@ -1701,8 +1701,8 @@ impl VrccService {
 
     /// 今天这一轮 + 轮次进度（需要 `today` 敏感权限）。
     pub async fn today(&self) -> std::result::Result<VrccToday, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .today()
             .await
@@ -1715,8 +1715,8 @@ impl VrccService {
     /// 要求，这里**不提供**代玩家发送好友请求的通道——加好友必须由玩家在
     /// 原生界面里自己点。
     pub async fn mutuals(&self) -> std::result::Result<VrccMutuals, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .mutuals()
             .await
@@ -1771,8 +1771,8 @@ impl VrccService {
     /// 缺权限（`403 scope`）**不吞**：那要引导玩家重新授权，是个需要说出来
     /// 的状态，和「这个星池没有社团」是两回事。
     pub async fn my_clubs(&self) -> std::result::Result<Option<VrccMyClubs>, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.my_clubs().await {
             Ok(clubs) => Ok(Some(clubs)),
             Err(error) if error.is_absent() => Ok(None),
@@ -1788,8 +1788,8 @@ impl VrccService {
         &self,
         code: &str,
     ) -> std::result::Result<Option<VrccMyClubResponse>, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.my_club(code).await {
             Ok(club) => Ok(Some(club)),
             Err(error) if error.is_absent() => Ok(None),
@@ -1810,8 +1810,8 @@ impl VrccService {
     /// 返回里的 `why` 必须由调用方处理：`hide` 时**不应显示**该模块
     /// （16–17 岁星池，或玩家在隐私设置里关了星轨相交）。
     pub async fn crossings(&self, mark: bool) -> std::result::Result<VrccCrossings, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let mut crossings = self
             .remote
             .crossings(mark)
@@ -1832,8 +1832,8 @@ impl VrccService {
     /// 走 [`VrccRemote::crossings_probe`] 的独立限流槽：探测不该占住玩家随后
     /// 点开页签那一次（那一次要带 `mark=1` 清红点）。
     pub async fn crossings_visibility(&self) -> std::result::Result<VrccCrossings, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let mut crossings = self
             .remote
             .crossings_probe()
@@ -1859,8 +1859,8 @@ impl VrccService {
         &self,
         mark: bool,
     ) -> std::result::Result<Option<VrccCrossingCards>, VrccError> {
-        let generation = self.remote.generation();
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.crossing_cards(mark).await {
             Ok(cards) => Ok(Some(cards)),
             Err(error) if error.is_not_found() => Ok(None),
