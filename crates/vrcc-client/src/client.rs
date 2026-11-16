@@ -4258,4 +4258,98 @@ mod tests {
             requests[1]
         );
     }
+
+    // -- 每个可复用的读，间隔内都还拿得到东西 ------------------------------
+
+    /// 把「同一个读连做两次」写成一条断言。
+    ///
+    /// 正文由类型的 `Default` 序列化而来：必填字段都有值，所以一定解得回来，也
+    /// 不用跟着 schema 手写一份 fixture（改了字段这里不用动）。
+    ///
+    /// 断言两件事：两次都成功，且**第二次一个请求都没发**。后者才是真正的重点——
+    /// 复用要是没生效，玩家的额度已经被偷偷花掉了，界面却看不出来。
+    ///
+    /// 参数是「方法名 + 实参」而不是闭包：闭包返回的 future 借着自己那个参数，
+    /// 同一份字面量被调用两次时推断不出足够的生命周期。
+    macro_rules! reused_twice {
+        ($ty:ty, $method:ident ( $($arg:expr),* $(,)? )) => {{
+            let body = serde_json::to_string(&<$ty>::default()).expect("默认值应能序列化");
+            let response = ok_with("", &body);
+            let (base, seen) = serve_script(vec![response.clone(), response]).await;
+            let client = client_at(base);
+            let first = client.$method($($arg),*).await;
+            assert!(
+                first.is_ok(),
+                concat!(stringify!($method), " 第一次就失败了：{:?}"),
+                first.err()
+            );
+            let second = client.$method($($arg),*).await;
+            assert!(
+                second.is_ok(),
+                concat!(stringify!($method), " 第二次没拿到可复用的回答：{:?}"),
+                second.err()
+            );
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                1,
+                concat!(
+                    stringify!($method),
+                    " 第二次又发了请求，间隔内那份回答没有复用上"
+                )
+            );
+        }};
+    }
+
+    /// 每个可复用的读，连调两次都还拿得到东西。
+    ///
+    /// 这条守的是**一整类**漏洞，不是某一个场景：客户端在会话里共享之后，各接口的
+    /// 最小间隔才真正生效，而「间隔内的第二次读」能不能过，取决于前面那层有没有
+    /// 回答可以给。前几轮抓到的漏洞全是同一类——限流槽被占着、手上却没有能顶上的
+    /// 回答，玩家只看到「太频繁」。逐个场景去补，总会漏掉下一个。
+    ///
+    /// 不在这张表里的：
+    ///
+    /// - `notifications`：带游标，[`Call::reusable`] 明确排除（复用会让后台把同一批
+    ///   提醒再弹一遍）；
+    /// - `fetch_site_asset`：拿的是图片字节，不是 JSON；
+    /// - 所有写操作，以及 `disconnect`（`bypass_gate`）。
+    #[tokio::test]
+    async fn every_reusable_read_survives_a_second_call() {
+        const WORLD: &str = "wrld_11111111-1111-4111-8111-111111111111";
+        // 短码的形状是「3–6 位字母数字 + `.` + 4 位数字」，形状不对会在本地被拒。
+        const CLUB: &str = "abc.1234";
+        let worlds = vec![WORLD.to_string()];
+
+        reused_twice!(VrccBoard, boards(100, VrccBoardSort::Top));
+        reused_twice!(VrccModelBoard, models_board(100, VrccBoardSort::Top));
+        reused_twice!(VrccModelDetail, model(42));
+        reused_twice!(VrccStatus, status());
+        reused_twice!(VrccMapDetail, map(WORLD));
+        reused_twice!(VrccBoard, maps(&worlds));
+        reused_twice!(VrccClubResponse, club(CLUB));
+        reused_twice!(VrccClubs, clubs(100, 0));
+        reused_twice!(VrccMyClubs, my_clubs());
+        reused_twice!(VrccMyClubResponse, my_club(CLUB));
+        reused_twice!(VrccMapPage, map_page(WORLD));
+        reused_twice!(VrccMyMapPage, my_map_page(WORLD, Some("hot")));
+        reused_twice!(VrccAnnouncements, announcements());
+        reused_twice!(VrccStickers, stickers());
+        reused_twice!(VrccRecentNotifications, recent_notifications(false));
+        // 标已读的读：第二次优先真的发出去，被本地间隔挡下才退回手上那份。不管走
+        // 哪条，都不该报错，也不该把请求发出去。
+        reused_twice!(VrccRecentNotifications, recent_notifications(true));
+        reused_twice!(VrccUnread, unread());
+        reused_twice!(VrccNotes, notes());
+        reused_twice!(VrccMyMap, my_map(WORLD));
+        reused_twice!(VrccMyBoard, my_board(VrccMyBoardSort::Top, None));
+        reused_twice!(VrccRatedMaps, my_maps());
+        reused_twice!(VrccToday, today());
+        reused_twice!(VrccMutuals, mutuals());
+        reused_twice!(VrccCrossings, crossings(false));
+        reused_twice!(VrccCrossings, crossings(true));
+        // 可见性探测和上面共用一个回答，但占的是自己的限流槽。
+        reused_twice!(VrccCrossings, crossings_probe());
+        reused_twice!(VrccCrossingCards, crossing_cards(false));
+        reused_twice!(VrccCrossingCards, crossing_cards(true));
+    }
 }
