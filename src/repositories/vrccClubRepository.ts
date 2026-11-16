@@ -5,8 +5,6 @@ import { queryOptions } from '@tanstack/react-query';
 import { entityQueryPolicies, queryKeys } from '@/lib/entityQueryCache';
 import { commands } from '@/platform/tauri/bindings';
 
-import { callVrcc } from './vrccConnectionRepository';
-
 /**
  * 一个群组对应的星遇同频社团（`GET /clubs/{code}`）。
  *
@@ -44,7 +42,7 @@ export function vrccMyClubQueryOptions(
         queryKey: queryKeys.groupVrccClubDetail(trimmed, account),
         queryFn: async () => {
             const { commands } = await import('@/platform/tauri/bindings');
-            return callVrcc(() => commands.appVrccMyClub(trimmed));
+            return commands.appVrccMyClub(trimmed);
         },
         enabled: enabled && Boolean(trimmed),
         staleTime: 60_000,

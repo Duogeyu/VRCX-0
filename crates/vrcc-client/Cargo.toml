@@ -11,7 +11,7 @@ reqwest = { workspace = true, features = ["json", "socks"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 vrcx-0-vrcc-contracts = { path = "../vrcc-contracts" }
 

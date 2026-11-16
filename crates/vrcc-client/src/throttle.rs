@@ -177,6 +177,20 @@ impl RateLimiter {
         self.last_at.insert(key.to_string(), now);
     }
 
+    /// 忘掉某个槽的上次放行时间：下一次这个槽的请求不再受最小间隔约束。
+    ///
+    /// 窗口里的记录不动，每分钟的总数照算。只给「写操作之后，相关的读马上要
+    /// 重拉」用，见 `VrccClient::forget_replies`。
+    pub fn forget(&mut self, key: &str) {
+        self.last_at.remove(key);
+    }
+
+    /// 忘掉所有槽的上次放行时间（会话换了令牌时用，见
+    /// `VrccClient::forget_session_state`）。窗口里的记录不动，每分钟的总数照算。
+    pub fn forget_gaps(&mut self) {
+        self.last_at.clear();
+    }
+
     /// 当前窗口内已用次数。
     pub fn window_used(&self, now: Instant) -> usize {
         self.stamps

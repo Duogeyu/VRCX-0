@@ -25,8 +25,8 @@ use vrcx_0_vrcc_client::{now_millis, VrccSession, WINDOW_LIMIT};
 
 /// 星遇同频网络端口的实现。
 ///
-/// 持有 `VrccSession`：它同时管令牌状态和「按当前令牌造客户端」，所以
-/// 每个请求都现造一个客户端，令牌换了立刻生效，不用额外同步。
+/// 持有 `VrccSession`：它同时管令牌状态和这个会话唯一的客户端。客户端经回调
+/// 现取令牌，令牌换了立刻生效，不用重建。
 pub struct VrccRemoteAdapter {
     session: VrccSession,
 }
@@ -42,7 +42,7 @@ impl VrccRemoteAdapter {
         }
     }
 
-    /// 按当前会话造一个客户端。每个请求一次，确保用的是当前令牌。
+    /// 会话的客户端（同一个，限流与额度共享）。
     fn client(&self) -> vrcx_0_vrcc_client::VrccClient {
         self.session.client()
     }
@@ -216,8 +216,12 @@ impl VrccRemote for VrccRemoteAdapter {
         self.session.disconnect();
     }
 
-    fn expire(&self) {
-        self.session.expire();
+    fn expire(&self, generation: u64) -> bool {
+        self.session.expire(generation)
+    }
+
+    fn generation(&self) -> u64 {
+        self.session.generation()
     }
 
     fn connection(&self) -> VrccConnection {
@@ -250,8 +254,15 @@ impl VrccRemote for VrccRemoteAdapter {
         }
     }
 
-    fn note_poll(&self, at_ms: i64, cursor: Option<i64>, every_secs: Option<i64>) {
-        self.session.note_poll(at_ms, cursor, every_secs);
+    fn note_poll(
+        &self,
+        generation: u64,
+        at_ms: i64,
+        cursor: Option<i64>,
+        every_secs: Option<i64>,
+    ) -> bool {
+        self.session
+            .note_poll(generation, at_ms, cursor, every_secs)
     }
 
     fn window_limit(&self) -> i64 {

@@ -203,12 +203,29 @@ pub trait VrccRemote: Send + Sync {
     /// 玩家主动断开：只清本地。
     fn disconnect(&self);
     /// 令牌被判失效（`404 gone`）：清本地并记下原因。
-    fn expire(&self);
+    ///
+    /// **只在会话代次还是 `generation` 时清**，返回清了没有。失败是拿那一代的
+    /// 令牌换来的；会话之后如果已经换过（重新授权、换号），说的就是旧令牌。
+    /// 判断和清理必须在实现方的同一把锁里，中间插不进别的连接。
+    fn expire(&self, generation: u64) -> bool;
+    /// 当前会话代次：连上、断开、被判失效时各推进一次。
+    ///
+    /// 请求发出前记下，响应回来时拿它判断「这个响应还属不属于现在的会话」。
+    fn generation(&self) -> u64;
     fn connection(&self) -> VrccConnection;
     fn client_id(&self) -> String;
     fn local_usage(&self) -> VrccLocalUsage;
     /// 记一次轮询结果（游标与建议间隔）。
-    fn note_poll(&self, at_ms: i64, cursor: Option<i64>, every_secs: Option<i64>);
+    ///
+    /// **只在会话代次还是 `generation` 时记**，返回记了没有：换号或重新授权之后
+    /// 才回来的结果，不能把旧会话的游标写进新会话。
+    fn note_poll(
+        &self,
+        generation: u64,
+        at_ms: i64,
+        cursor: Option<i64>,
+        every_secs: Option<i64>,
+    ) -> bool;
     /// 限流窗口容量（每分钟）。
     fn window_limit(&self) -> i64;
     /// 当前毫秒时间戳，由实现方提供以保持「时间来自一处」。
@@ -402,11 +419,16 @@ pub enum VrccDeviceAuthStep {
 /// 地图榜缓存：world 映射到（名次，均分 ×10）。
 type BoardRanks = HashMap<String, (i64, Option<i64>)>;
 
+/// 令牌被判失效之后的回调，见 [`VrccService::on_session_expired`]。
+type SessionExpiredHook = Arc<dyn Fn() + Send + Sync>;
+
 /// 星遇同频服务。
 pub struct VrccService {
     store: Arc<dyn VrccTokenStore>,
     /// 网络端口。实现是 `outbound-adapters` 里的适配器，本层不知道协议细节。
     remote: Arc<dyn VrccRemote>,
+    /// 令牌被判失效、本地已经清掉之后要做的事，见 [`Self::on_session_expired`]。
+    session_expired: Arc<RwLock<Option<SessionExpiredHook>>>,
     /// 凭据状态（跨重启）。
     ///
     /// 不从 `remote.connection()` 取：那是网络侧会话的即时状态，重启就没了。
@@ -434,27 +456,10 @@ pub struct VrccService {
     boards: Arc<RwLock<BoardRanks>>,
     /// 最近一次 `me/unread`。后台轮询填，页面和腕表读。
     unread: Arc<RwLock<UnreadCache>>,
-    /// 最近一次成功拉到的地图榜，按排序方式分别记一份。
-    ///
-    /// 用来在限流间隔内接住本机拦截（`is_local_gap`，即
-    /// `ThrottledLocally { reason: Gap }`）：`boards` 的 `min_gap` 是 60 秒，
-    /// 用户在这个窗口里点刷新不该看到错误，也不该干等一分钟。官方说开放
-    /// 数据最多 5 分钟更新一次，旧的那份完全够用。
-    ///
-    /// 键是 [`OwnedBoardKey`]（分区 + 排序），理由同 [`Self::model_details`]：
-    /// **不要拿「这个接口现在公开」去赌未来**。榜单今天不含个人字段，但以后
-    /// 完全可能带上「你投过票没有」这类东西。
-    boards_cache: Arc<RwLock<HashMap<OwnedBoardKey, (u32, VrccBoard)>>>,
-    /// 最近一次成功拉到的模型榜，按排序方式分别记一份。
-    ///
-    /// 和 [`Self::boards_cache`] 同一个理由：`models` 的 `min_gap` 也是 60 秒，
-    /// 窗口内点刷新不该报错、也不该干等。两个榜单各自一份、不共用——
-    /// 它们的资源不同，共用会让「刚看完地图榜就看不到模型榜」。
-    models_cache: Arc<RwLock<HashMap<OwnedModelBoardKey, (u32, VrccModelBoard)>>>,
     /// 按 BOOTH 商品编号缓存的单个模型详情（含热评）。
     ///
-    /// 单独一份，不用 `models_cache` 里那行顶上：行里没有热评，而热评正是
-    /// 对话框要显示的东西。官方说信息最多 5 分钟更新一次，所以同一张卡在
+    /// 不拿榜单里那一行顶上：行里没有热评，而热评正是对话框要显示的东西。
+    /// 官方说信息最多 5 分钟更新一次，所以同一张卡在
     /// 几分钟内反复点开不该重新请求——玩家常常点开、关掉、再点开同一条。
     ///
     /// 值里带时间戳：热评会变，缓存不能永久有效。
@@ -503,35 +508,6 @@ struct OwnedModelKey {
 impl OwnedModelKey {
     fn new(scope: VrccCacheScope, id: i64) -> Self {
         Self { scope, id }
-    }
-}
-
-/// 地图榜缓存的键：**账号分区 + 排序方式**。
-///
-/// 和 [`OwnedModelKey`] 同一个用意。榜单今天不含个人字段，但这条约束
-/// 不该靠「今天」来维持。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct OwnedBoardKey {
-    scope: VrccCacheScope,
-    sort: VrccBoardSort,
-}
-
-impl OwnedBoardKey {
-    fn new(scope: VrccCacheScope, sort: VrccBoardSort) -> Self {
-        Self { scope, sort }
-    }
-}
-
-/// 模型榜缓存的键：**账号分区 + 排序方式**。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct OwnedModelBoardKey {
-    scope: VrccCacheScope,
-    sort: VrccBoardSort,
-}
-
-impl OwnedModelBoardKey {
-    fn new(scope: VrccCacheScope, sort: VrccBoardSort) -> Self {
-        Self { scope, sort }
     }
 }
 
@@ -640,13 +616,12 @@ impl VrccService {
         Self {
             store,
             remote,
+            session_expired: Arc::new(RwLock::new(None)),
             credential: Arc::new(RwLock::new(credential_state)),
             guidance: Arc::new(RwLock::new(guidance_state)),
             wrist: Arc::new(RwLock::new(None)),
             boards: Arc::new(RwLock::new(HashMap::new())),
             unread: Arc::new(RwLock::new(UnreadCache::default())),
-            boards_cache: Arc::new(RwLock::new(HashMap::new())),
-            models_cache: Arc::new(RwLock::new(HashMap::new())),
             model_details: Arc::new(RwLock::new(HashMap::new())),
             model_missing: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -708,29 +683,47 @@ impl VrccService {
     ///
     /// 服务器有 `me/unread` 时，腕表显示的是那几处红点的合计，这里就不覆盖它；
     /// 只有旧服务器（没有 `me/unread`）才用「最近的提醒」里 `id > read` 的条数。
-    fn note_recent(&self, unread: u32) {
+    ///
+    /// `generation` 是请求发出时的会话代次：会话换过了就不写，见 [`Self::note_unread`]。
+    fn note_recent(&self, generation: u64, unread: u32) {
         if self.cached_unread().is_some() {
             return;
         }
         let Ok(mut wrist) = self.wrist.write() else {
             return;
         };
+        if self.remote.generation() != generation {
+            return;
+        }
         let entry = wrist.get_or_insert_with(VrccWristSummary::default);
         entry.unread = unread;
     }
 
     /// 拿到 `me/unread` 后更新缓存和腕表。返回和上一次比有没有变。
-    fn note_unread(&self, counts: &VrccUnread) -> bool {
+    ///
+    /// `generation` 是请求发出时的会话代次。换号、重新授权之后才回来的结果
+    /// 不能写进来，否则新账号会看到旧账号的未读数。
+    ///
+    /// 代次在**持着锁的时候**判断：会话变化时总是先推进代次、再
+    /// [`Self::forget_unread`]（它要拿同样两把锁）。所以要么这里先看到新代次、
+    /// 不写；要么这里先写完，随后被 `forget_unread` 清掉。不会留下旧数。
+    fn note_unread(&self, generation: u64, counts: &VrccUnread) -> bool {
         let changed = {
             let Ok(mut cache) = self.unread.write() else {
                 return false;
             };
+            if self.remote.generation() != generation {
+                return false;
+            }
             let changed = cache.counts.as_ref() != Some(counts);
             cache.counts = Some(counts.clone());
             cache.skip_until = None;
             changed
         };
         if let Ok(mut wrist) = self.wrist.write() {
+            if self.remote.generation() != generation {
+                return false;
+            }
             let entry = wrist.get_or_insert_with(VrccWristSummary::default);
             entry.unread = u32::try_from(counts.total()).unwrap_or(u32::MAX);
         }
@@ -767,19 +760,65 @@ impl VrccService {
     ///
     /// 不清的话，后台轮询会拿着死令牌每分钟问一次，界面还一直显示「已连接」。
     /// 1.10.0 起「90 天没调用过任何接口」也会这样，所以这不是罕见情况。
-    fn settle(&self, error: VrccError) -> VrccError {
-        if classify_vrcc_error(&error).0 == VrccErrorKind::NeedsReauth {
-            tracing::info!(
-                "vrcc: token is invalid (disconnected on the site, re-authorized elsewhere, client mismatch, or unused for 90 days); dropping it"
-            );
-            if let Err(clear_error) = self.store.clear() {
-                tracing::warn!(%clear_error, "vrcc: failed to clear the dead token");
-            }
-            self.remote.expire();
-            self.forget_unread();
-            self.set_credential_state(VrccCredentialState::Expired);
+    ///
+    /// `generation` 是请求发出时的会话代次。两种情况不收拾，只把错误原样交回：
+    ///
+    /// - `TokenMissing`：本地本来就没有令牌，没有东西可清。不排除的话，玩家点
+    ///   「断开」时正在路上的请求回来 `TokenMissing`，会把刚记下的
+    ///   `Disconnected` 改写成 `Expired`，界面说「连接已失效」。
+    /// - 会话已经换过（重新授权、换号）：失败说的是旧令牌。例如重新授权期间，
+    ///   旧令牌的请求回来 `404 gone`（同一客户端再次授权会让旧令牌失效），
+    ///   不能拿它把刚存下的新令牌删掉。
+    ///
+    /// 清掉之后调用 [`Self::on_session_expired`] 挂上的回调。
+    fn settle(&self, generation: u64, error: VrccError) -> VrccError {
+        if matches!(error.detail, ErrorDetail::TokenMissing) {
+            return error;
         }
+        if classify_vrcc_error(&error).0 != VrccErrorKind::NeedsReauth {
+            return error;
+        }
+        // 先在会话里按代次清：判断和清理在同一把锁里。会话已经换过就到此为止。
+        if !self.remote.expire(generation) {
+            tracing::debug!("vrcc: a token failure from an earlier session came back; ignoring it");
+            return error;
+        }
+        tracing::info!(
+            "vrcc: token is invalid (disconnected on the site, re-authorized elsewhere, client mismatch, or unused for 90 days); dropping it"
+        );
+        if let Err(clear_error) = self.store.clear() {
+            tracing::warn!(%clear_error, "vrcc: failed to clear the dead token");
+        }
+        self.forget_unread();
+        self.set_credential_state(VrccCredentialState::Expired);
+        self.notify_session_expired();
         error
+    }
+
+    /// 令牌被服务器判失效、本地已经清掉之后要做什么。桌面侧在这里告诉前端
+    /// 「连接变了」。
+    ///
+    /// 前台命令和后台轮询撞上的失效都经过 [`Self::settle`]，挂在这一处，两条路
+    /// 都会通知到。早先只有后台轮询发事件，前台撞上的（例如提交评分收到
+    /// `404 gone`）不发，已经打开的面板一直拿着旧账号的数据。
+    ///
+    /// 再挂一次会替换上一个。
+    pub fn on_session_expired(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.session_expired.write() {
+            *slot = Some(hook);
+        }
+    }
+
+    fn notify_session_expired(&self) {
+        // 先取出来再调：回调里如果又碰到服务，不能还持着这把锁。
+        let hook = self
+            .session_expired
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// 拿到地图榜后更新名次缓存。
@@ -798,40 +837,6 @@ impl VrccService {
             let avg_x10 = map.avg.map(|avg| (avg * 10.0).round() as i64);
             boards.insert(map.world.clone(), (rank, avg_x10));
         }
-    }
-
-    /// 记下这一份榜单，供限流窗口内复用。
-    /// 记下这一份榜单，供限流窗口内复用。
-    fn remember_board(&self, limit: u32, key: OwnedBoardKey, board: &VrccBoard) {
-        let Ok(mut cache) = self.boards_cache.write() else {
-            return;
-        };
-        cache.insert(key, (limit, board.clone()));
-    }
-
-    /// 取上次那份榜单，条件严格：**排序方式和条数都要一样**。
-    ///
-    /// 条数不一样就不给：请求 50 条却拿到 20 条的旧数据，界面会以为这就是
-    /// 全部内容。
-    fn cached_board(&self, limit: u32, key: OwnedBoardKey) -> Option<VrccBoard> {
-        let cache = self.boards_cache.read().ok()?;
-        let (cached_limit, board) = cache.get(&key)?;
-        (*cached_limit == limit).then(|| board.clone())
-    }
-
-    /// 记下这一份模型榜，供限流窗口内复用。
-    fn remember_models(&self, limit: u32, key: OwnedModelBoardKey, board: &VrccModelBoard) {
-        let Ok(mut cache) = self.models_cache.write() else {
-            return;
-        };
-        cache.insert(key, (limit, board.clone()));
-    }
-
-    /// 取上次那份模型榜。条件同 [`Self::cached_board`]：排序和条数都一样才给。
-    fn cached_models(&self, limit: u32, key: OwnedModelBoardKey) -> Option<VrccModelBoard> {
-        let cache = self.models_cache.read().ok()?;
-        let (cached_limit, board) = cache.get(&key)?;
-        (*cached_limit == limit).then(|| board.clone())
     }
 
     /// 当前登录态对应的缓存分区。
@@ -996,37 +1001,23 @@ impl VrccService {
     ///
     /// `sort` 是本周榜或新上榜、而回答里没有 `sort` 时，说明服务器还不认
     /// 这个参数、回的是总榜：照样返回，由界面判断「还不支持」。
+    ///
+    /// **限流窗口内点刷新不报错**，但接住它的不在这里：客户端在间隔内直接复用
+    /// 上一份回答，请求根本发不出去，也就走不到这一层（见 `vrcc-client` 的
+    /// `lookup_reply`）。应用层原来自己存了一份榜单来兜底，客户端那层做完之后
+    /// 它就再也走不到了。
     pub async fn boards(
         &self,
         limit: u32,
         sort: VrccBoardSort,
     ) -> std::result::Result<VrccBoard, VrccError> {
-        match self.remote.boards(limit, sort).await {
-            Ok(board) => {
-                // 顺手填充腕表的排名缓存：这次请求本来就要发，不额外花额度。
-                // 只用总榜：名次指的是总榜名次，本周榜和新上榜只列一部分地图。
-                if sort == VrccBoardSort::Top || board.sort.is_none() {
-                    self.note_boards(&board);
-                }
-                let key = OwnedBoardKey::new(self.cache_scope(), sort);
-                self.remember_board(limit, key, &board);
-                Ok(board)
-            }
-            // 距上一次请求不到限流间隔：把上次那份还给他。
-            //
-            // 官方说开放数据最多 5 分钟才更新一次，一份旧榜单完全够用；
-            // 而让用户点一下刷新就弹错误，比给旧数据更糟。客户端侧因此
-            // 把「等太久」报成 `ThrottledLocally { reason: Gap }`（见
-            // `MAX_ACQUIRE_WAIT`），这里接住它。没有缓存时才真的报错。
-            Err(error) if error.is_local_gap() => {
-                let key = OwnedBoardKey::new(self.cache_scope(), sort);
-                match self.cached_board(limit, key) {
-                    Some(board) => Ok(board),
-                    None => Err(error),
-                }
-            }
-            Err(error) => Err(error),
+        let board = self.remote.boards(limit, sort).await?;
+        // 顺手填充腕表的排名缓存：这次请求本来就要发，不额外花额度。
+        // 只用总榜：名次指的是总榜名次，本周榜和新上榜只列一部分地图。
+        if sort == VrccBoardSort::Top || board.sort.is_none() {
+            self.note_boards(&board);
         }
+        Ok(board)
     }
 
     /// 服务状态。
@@ -1036,33 +1027,22 @@ impl VrccService {
 
     /// 模型榜（`GET /boards/models`，1.17.0 起）。不需要连接。
     ///
-    /// 和 [`Self::boards`] 同一套降级：限流窗口内点刷新时把上次那份还给玩家，
-    /// 而不是弹一句「请求太频繁」。官方说这个榜也最多 5 分钟更新一次。
-    ///
     /// **旧服务器没有这个接口**（`404 not_found`）时返回 `None`，和
     /// [`Self::announcements`] / [`Self::stickers`] 一样：这是「这台服务器还
     /// 没有模型榜」，不是故障，界面据此显示成空的即可。
     ///
     /// **不碰腕表缓存**：腕表显示的是「当前所在地图的名次」，和 BOOTH 模型
     /// 无关，混进来只会把地图名次覆盖掉。
+    ///
+    /// 限流窗口内点刷新不报错，接住它的地方和 [`Self::boards`] 一样在客户端：
+    /// 间隔内的同一个读直接复用上一份回答，请求根本发不出去。
     pub async fn models_board(
         &self,
         limit: u32,
         sort: VrccBoardSort,
     ) -> std::result::Result<Option<VrccModelBoard>, VrccError> {
         match self.remote.models_board(limit, sort).await {
-            Ok(board) => {
-                let key = OwnedModelBoardKey::new(self.cache_scope(), sort);
-                self.remember_models(limit, key, &board);
-                Ok(Some(board))
-            }
-            Err(error) if error.is_local_gap() => {
-                let key = OwnedModelBoardKey::new(self.cache_scope(), sort);
-                match self.cached_models(limit, key) {
-                    Some(board) => Ok(Some(board)),
-                    None => Err(error),
-                }
-            }
+            Ok(board) => Ok(Some(board)),
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(error),
         }
@@ -1301,11 +1281,12 @@ impl VrccService {
         mark: bool,
     ) -> std::result::Result<VrccRecentNotifications, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let result = self
             .remote
             .recent_notifications(mark)
             .await
-            .map_err(|error| self.settle(error))?;
+            .map_err(|error| self.settle(generation, error))?;
         // 未读数按官方语义算：id 大于 read 的算未读。`read` 缺省时（账号上
         // 还没记过已读），把返回的条目都当作未读——这是唯一诚实的解读。
         //
@@ -1315,8 +1296,9 @@ impl VrccService {
             Some(read) => result.items.iter().filter(|item| item.id > read).count() as u32,
             None => result.items.len() as u32,
         };
-        self.note_recent(unread);
-        self.remote.note_poll(self.remote.now_millis(), None, None);
+        self.note_recent(generation, unread);
+        self.remote
+            .note_poll(generation, self.remote.now_millis(), None, None);
         Ok(result)
     }
 
@@ -1344,11 +1326,12 @@ impl VrccService {
             return Ok(None);
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let map = self
             .remote
             .my_map(&world)
             .await
-            .map_err(|error| self.settle(error))?;
+            .map_err(|error| self.settle(generation, error))?;
         if !map.is_visible() {
             // 只是记一条日志，仍然把对象交出去——界面要用 `off` 说明原因。
             tracing::debug!(
@@ -1367,6 +1350,7 @@ impl VrccService {
         &self,
     ) -> std::result::Result<Option<(VrccUnread, bool)>, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let skip = self
             .unread
             .read()
@@ -1378,7 +1362,7 @@ impl VrccService {
         }
         match self.remote.unread().await {
             Ok(counts) => {
-                let changed = self.note_unread(&counts);
+                let changed = self.note_unread(generation, &counts);
                 Ok(Some((counts, changed)))
             }
             Err(error) if error.is_not_found() => {
@@ -1389,7 +1373,7 @@ impl VrccService {
                 }
                 Ok(None)
             }
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1398,10 +1382,11 @@ impl VrccService {
     /// 旧服务器没有这个接口时返回 `None`，界面就不显示这一块。
     pub async fn notes(&self) -> std::result::Result<Option<VrccNotes>, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.notes().await {
             Ok(notes) => Ok(Some(notes)),
             Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1421,14 +1406,20 @@ impl VrccService {
         &self,
     ) -> std::result::Result<vrcx_0_contracts::vrcc::VrccNotifications, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let cursor = self.remote.connection().notifications_cursor;
         let polled = self
             .remote
             .notifications(cursor)
             .await
-            .map_err(|error| self.settle(error))?;
-        self.remote
-            .note_poll(self.remote.now_millis(), polled.last, polled.every);
+            .map_err(|error| self.settle(generation, error))?;
+        // 换号或重新授权之后才回来的结果不写：新会话的游标要从头问。
+        self.remote.note_poll(
+            generation,
+            self.remote.now_millis(),
+            polled.last,
+            polled.every,
+        );
         // 有新提醒到达时，未读数会变；下次打开页面拉 recent 时会修正。
         // 这里若把 items 长度加上去，会和 `read` 的语义打架。
         Ok(polled)
@@ -1442,6 +1433,7 @@ impl VrccService {
         &self,
         world: &str,
     ) -> std::result::Result<Option<VrccMapPage>, VrccError> {
+        let generation = self.remote.generation();
         let world = vrcx_0_core::location::world_id_from_location(world);
         if world.is_empty() {
             return Ok(None);
@@ -1449,7 +1441,7 @@ impl VrccService {
         match self.remote.map_page(&world).await {
             Ok(page) => Ok(Some(page)),
             Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1472,10 +1464,11 @@ impl VrccService {
             return Ok(None);
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.my_map_page(&world, sort).await {
             Ok(page) => Ok(Some(page)),
             Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1509,10 +1502,11 @@ impl VrccService {
             ));
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .rate_map(&world, score, text)
             .await
-            .map_err(|error| self.settle(error))
+            .map_err(|error| self.settle(generation, error))
     }
 
     /// 删掉自己给这张图的评分（需要 `maps.rate`）。
@@ -1528,10 +1522,11 @@ impl VrccService {
             ));
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.delete_map_rating(&world).await {
             Ok(()) => Ok(()),
             Err(error) if error.is_not_found() => Ok(()),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1560,10 +1555,11 @@ impl VrccService {
             ));
         }
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .vote_map_content(kind, id, vote)
             .await
-            .map_err(|error| self.settle(error))
+            .map_err(|error| self.settle(generation, error))
     }
 
     /// 玩家视角地图榜（需要 `maps` 普通权限）。
@@ -1576,10 +1572,11 @@ impl VrccService {
         q: Option<&str>,
     ) -> std::result::Result<VrccMyBoard, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .my_board(sort, q)
             .await
-            .map_err(|error| self.settle(error))
+            .map_err(|error| self.settle(generation, error))
     }
 
     /// 我打过分的地图（需要 `maps` 普通权限）。最近的在前。
@@ -1588,19 +1585,21 @@ impl VrccService {
     /// 判成「要重新授权」，在还没连过的玩家那里就是一句莫名其妙的红字。
     pub async fn my_maps(&self) -> std::result::Result<VrccRatedMaps, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .my_maps()
             .await
-            .map_err(|error| self.settle(error))
+            .map_err(|error| self.settle(generation, error))
     }
 
     /// 今天这一轮 + 轮次进度（需要 `today` 敏感权限）。
     pub async fn today(&self) -> std::result::Result<VrccToday, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .today()
             .await
-            .map_err(|error| self.settle(error))
+            .map_err(|error| self.settle(generation, error))
     }
 
     /// 「互相连上」的星友列表（需要 `mutuals` 敏感权限）。
@@ -1610,10 +1609,11 @@ impl VrccService {
     /// 原生界面里自己点。
     pub async fn mutuals(&self) -> std::result::Result<VrccMutuals, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         self.remote
             .mutuals()
             .await
-            .map_err(|error| self.settle(error))
+            .map_err(|error| self.settle(generation, error))
     }
 
     /// 一个社团的公开页（`GET /clubs/{code}`，1.18.0 起）。**不需要连接。**
@@ -1630,10 +1630,11 @@ impl VrccService {
         &self,
         code: &str,
     ) -> std::result::Result<Option<VrccClubResponse>, VrccError> {
+        let generation = self.remote.generation();
         match self.remote.club(code).await {
             Ok(club) => Ok(Some(club)),
             Err(error) if error.is_absent() => Ok(None),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1648,9 +1649,10 @@ impl VrccService {
         limit: u32,
         offset: u32,
     ) -> std::result::Result<VrccClubs, VrccError> {
+        let generation = self.remote.generation();
         match self.remote.clubs(limit, offset).await {
             Ok(clubs) => Ok(clubs),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1663,10 +1665,11 @@ impl VrccService {
     /// 的状态，和「这个星池没有社团」是两回事。
     pub async fn my_clubs(&self) -> std::result::Result<Option<VrccMyClubs>, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.my_clubs().await {
             Ok(clubs) => Ok(Some(clubs)),
             Err(error) if error.is_absent() => Ok(None),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1679,10 +1682,11 @@ impl VrccService {
         code: &str,
     ) -> std::result::Result<Option<VrccMyClubResponse>, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.my_club(code).await {
             Ok(club) => Ok(Some(club)),
             Err(error) if error.is_absent() => Ok(None),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 
@@ -1700,11 +1704,12 @@ impl VrccService {
     /// （16–17 岁星池，或玩家在隐私设置里关了星轨相交）。
     pub async fn crossings(&self, mark: bool) -> std::result::Result<VrccCrossings, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let mut crossings = self
             .remote
             .crossings(mark)
             .await
-            .map_err(|error| self.settle(error))?;
+            .map_err(|error| self.settle(generation, error))?;
         // `why == "hide"` 的判定只在这里做一次，消费方只看 `hidden`。
         crossings.settle_visibility();
         Ok(crossings)
@@ -1721,11 +1726,12 @@ impl VrccService {
     /// 点开页签那一次（那一次要带 `mark=1` 清红点）。
     pub async fn crossings_visibility(&self) -> std::result::Result<VrccCrossings, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         let mut crossings = self
             .remote
             .crossings_probe()
             .await
-            .map_err(|error| self.settle(error))?;
+            .map_err(|error| self.settle(generation, error))?;
         crossings.settle_visibility();
         Ok(crossings)
     }
@@ -1747,10 +1753,11 @@ impl VrccService {
         mark: bool,
     ) -> std::result::Result<Option<VrccCrossingCards>, VrccError> {
         self.ensure_connected()?;
+        let generation = self.remote.generation();
         match self.remote.crossing_cards(mark).await {
             Ok(cards) => Ok(Some(cards)),
             Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(self.settle(error)),
+            Err(error) => Err(self.settle(generation, error)),
         }
     }
 

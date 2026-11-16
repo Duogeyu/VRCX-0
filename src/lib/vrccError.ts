@@ -226,18 +226,6 @@ export async function normalizeVrccError(error: unknown): Promise<VrccError> {
     );
 }
 
-/**
- * 读出错误的类别：已经归一化的 [`VrccError`]、命令直接抛出的原始错误都认。
- *
- * 不是星遇同频错误时是 `other`。
- */
-export function vrccErrorKind(error: unknown): VrccErrorKind {
-    if (error instanceof VrccError) {
-        return error.kind;
-    }
-    return normalizeKind(readVrccDetail(error)?.kind);
-}
-
 /** 这个错误是不是星遇同频错误（带结构化细节）。 */
 export function isVrccError(error: unknown): error is VrccError {
     return error instanceof VrccError;
