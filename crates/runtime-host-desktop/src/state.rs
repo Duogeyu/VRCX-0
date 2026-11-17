@@ -423,8 +423,8 @@ impl DesktopRuntimeHostState {
         if !self.is_game_running() {
             return String::new();
         }
-        let snapshot = self.desktop.services.game_log_snapshot();
-        vrcx_0_core::location::world_id_from_location(&snapshot.location)
+        // 开着游戏隔离时不给，见 `DesktopRuntimeServices::vrcc_world_id`。
+        self.desktop.services.vrcc_world_id()
     }
 
     pub fn set_game_log_persistence_disabled(&self, disabled: bool) -> Result<()> {

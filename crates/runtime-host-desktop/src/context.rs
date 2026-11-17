@@ -304,6 +304,19 @@ impl DesktopRuntimeServices {
         self.game_log_snapshot.snapshot()
     }
 
+    /// 星遇同频用的「玩家现在在哪张图」（所在地图卡片、腕表摘要）。
+    ///
+    /// 开启游戏隔离时不给：隔离是为了用另一个账号玩时不暴露本机在做什么，游戏日志里
+    /// 的位置可能已经是小号所在的世界。上游读本机位置的地方也只看这个开关（见
+    /// `IsolatedLocalGameContextSource`），所以这里一样：开关打开那一刻起就不给，
+    /// 不等游戏日志闸门在下一次换世界时才生效。
+    pub fn vrcc_world_id(&self) -> String {
+        if self.game_isolation.is_enabled() {
+            return String::new();
+        }
+        vrcx_0_core::location::world_id_from_location(&self.game_log_snapshot().location)
+    }
+
     pub fn now_playing(&self) -> Arc<NowPlayingSnapshot> {
         self.now_playing.snapshot()
     }
@@ -469,9 +482,8 @@ impl VrOverlayRuntimeServices for DesktopRuntimeServices {
                 return None;
             }
         };
-        // 玩家当前在哪张图由游戏日志给；取不到就只显示未读数。
-        let world =
-            vrcx_0_core::location::world_id_from_location(&self.game_log_snapshot().location);
+        // 玩家当前在哪张图由游戏日志给；取不到（或开着游戏隔离）就只显示未读数。
+        let world = self.vrcc_world_id();
         let world = (!world.is_empty()).then_some(world.as_str());
         let summary = vrcc.wrist_summary(world)?;
         Some(summary)

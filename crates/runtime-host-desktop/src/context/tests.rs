@@ -86,3 +86,23 @@ fn game_log_side_effect_observer_merges_and_resets_now_playing() {
         &NowPlayingSnapshot::default()
     );
 }
+
+/// 星遇同频的「所在地图」：开启游戏隔离时不给，关掉以后照常。
+#[test]
+fn vrcc_world_id_is_hidden_while_game_isolation_is_on() {
+    let (_dir, services) = test_services("vrcc-world-isolation");
+    let world = "wrld_11111111-1111-4111-8111-111111111111";
+    services
+        .game_log_snapshot_handle()
+        .replace(vrcx_0_application_game::RuntimeSnapshot {
+            location: format!("{world}:12345~private(usr_x)"),
+            ..Default::default()
+        });
+    assert_eq!(services.vrcc_world_id(), world);
+
+    services.game_isolation().set_enabled(true).unwrap();
+    assert_eq!(services.vrcc_world_id(), "", "隔离时不暴露本机所在的世界");
+
+    services.game_isolation().set_enabled(false).unwrap();
+    assert_eq!(services.vrcc_world_id(), world);
+}
