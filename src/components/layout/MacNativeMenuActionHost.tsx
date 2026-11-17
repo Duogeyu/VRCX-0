@@ -175,6 +175,7 @@ export function MacNativeMenuActionHost() {
                 action !== 'github' &&
                 action !== 'report-issue' &&
                 action !== 'discord' &&
+                action !== 'qq-group' &&
                 action !== 'changelog' &&
                 action !== 'keyboard-shortcuts' &&
                 action !== 'about' &&
@@ -250,6 +251,9 @@ export function MacNativeMenuActionHost() {
                     break;
                 case 'discord':
                     openExternalLink(links.discord);
+                    break;
+                case 'qq-group':
+                    openExternalLink(links.qqGroup);
                     break;
                 case 'changelog':
                     openExternalLink(links.releases);

@@ -915,6 +915,7 @@
                 "keyboardShortcuts": "鍵盤快捷鍵",
                 "sendFeedback": "傳送意見回饋",
                 "reportIssue": "在 GitHub 回報問題",
+                "qqGroup": "QQ 群組",
                 "openDevtools": "開啟開發者工具",
                 "supportVrcx": "支援 VRCX-0"
             }
@@ -1257,6 +1258,7 @@
         }
     },
     "nav_menu": {
+        "qq_group": "QQ 群組",
         "changelog": "最新更新",
         "update": "更新",
         "update_downloading": "下載中",

@@ -12,6 +12,7 @@ const links: Record<string, string> = {
         'https://api.github.com/repos/Map1en/VRCX-0/contributors?per_page=100',
     license: 'https://github.com/Map1en/VRCX-0/blob/master/LICENSE',
     discord: 'https://discord.gg/fehKP3SVPN',
+    qqGroup: 'https://qm.qq.com/q/o68fQ6mvxm',
     vrchatStatus: 'https://status.vrchat.com/',
     vrchatDocsConfigurationFile:
         'https://docs.vrchat.com/docs/configuration-file',

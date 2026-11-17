@@ -163,6 +163,14 @@ export function SettingsFeedbackTab() {
                     >
                         Discord
                     </button>
+                    {' · '}
+                    <button
+                        type="button"
+                        className="hover:text-foreground font-medium transition-colors"
+                        onClick={() => void openExternalLink(links.qqGroup)}
+                    >
+                        {t('nav_menu.qq_group')}
+                    </button>
                 </p>
             </div>
         </SettingsTabContent>
