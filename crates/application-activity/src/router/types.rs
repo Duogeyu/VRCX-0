@@ -43,6 +43,7 @@ pub struct ActivityTypeDefinition {
     pub allowed_scopes: Vec<ActivityScope>,
     pub wrist_default_scope: ActivityScope,
     pub alert_default_scope: ActivityScope,
+    pub desktop_default_scope: ActivityScope,
     pub tts_default_scope: ActivityScope,
     pub widget_default_scope: ActivityScope,
     pub aliases: Vec<String>,
@@ -102,11 +103,8 @@ enum FavoriteGroupKeysShape {
 }
 
 impl specta::Type for ActivityFavoriteGroupKeys {
-    fn inline(
-        type_map: &mut specta::TypeCollection,
-        generics: specta::Generics,
-    ) -> specta::DataType {
-        FavoriteGroupKeysShape::inline(type_map, generics)
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        FavoriteGroupKeysShape::definition(types)
     }
 }
 
@@ -117,15 +115,31 @@ pub struct ActivityRule {
     pub favorite_group_keys: ActivityFavoriteGroupKeys,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+#[serde(rename = "NotificationActivityFilterSurface")]
 pub enum NotificationSurface {
     Wrist,
-    Desktop,
+    #[serde(rename = "vr")]
     ExternalOverlay,
     Hmd,
+    Desktop,
     Webhook,
     Tts,
+    #[serde(rename = "widget")]
     DesktopWidget,
+}
+
+impl NotificationSurface {
+    pub const ALL: [Self; 7] = [
+        Self::Wrist,
+        Self::ExternalOverlay,
+        Self::Hmd,
+        Self::Desktop,
+        Self::Webhook,
+        Self::Tts,
+        Self::DesktopWidget,
+    ];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -133,7 +147,7 @@ pub enum NotificationSurface {
 pub struct ActivityFilters {
     pub version: u32,
     pub wrist: ActivitySurfaceFilters,
-    #[serde(default = "ActivitySurfaceFilters::alert_defaults")]
+    #[serde(default = "ActivitySurfaceFilters::desktop_defaults")]
     pub desktop: ActivitySurfaceFilters,
     #[serde(default = "ActivitySurfaceFilters::alert_defaults")]
     pub vr: ActivitySurfaceFilters,
@@ -160,8 +174,12 @@ impl ActivitySurfaceFilters {
         }
     }
 
-    fn alert_defaults() -> Self {
+    fn desktop_defaults() -> Self {
         Self::defaults(NotificationSurface::Desktop)
+    }
+
+    fn alert_defaults() -> Self {
+        Self::defaults(NotificationSurface::Hmd)
     }
 
     fn webhook_defaults() -> Self {

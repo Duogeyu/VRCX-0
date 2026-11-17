@@ -13,6 +13,8 @@ pub struct RecallEncounterInput {
     pub world_id: Option<String>,
     #[serde(default)]
     pub co_present_with_user_id: Option<String>,
+    #[serde(default)]
+    pub target_user_id: Option<String>,
     pub time_window: TimeWindow,
     #[serde(default)]
     pub limit: Option<i64>,
@@ -36,5 +38,5 @@ pub struct RecallEncounterRow {
     pub first_seen: String,
     pub last_seen: String,
     pub is_friend: bool,
-    pub sample_locations: Vec<String>,
+    pub sample_worlds: Vec<String>,
 }

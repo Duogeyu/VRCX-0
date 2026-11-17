@@ -2,9 +2,11 @@ import { PlusIcon, XIcon } from 'lucide-react';
 import { useEffect, useRef, useState, type PropsWithChildren } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useRouteScrollMemory } from '@/lib/useRouteScrollMemory';
 import { setTablePageSizesPreference } from '@/services/preferencesService';
 import { toast } from '@/services/toastService';
 import { usePreferencesStore } from '@/state/preferencesStore';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Badge } from '@/ui/shadcn/badge';
 import { Button } from '@/ui/shadcn/button';
 import { Checkbox } from '@/ui/shadcn/checkbox';
@@ -55,8 +57,12 @@ export function SettingsTabContent({
     value,
     children
 }: SettingsTabContentProps) {
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    useRouteScrollMemory(scrollRef, `settings:${value}`);
+
     return (
         <TabsContent
+            ref={scrollRef}
             value={value}
             className="m-0 flex min-h-0 w-full max-w-[820px] min-w-0 flex-1 flex-col gap-7 overflow-x-hidden overflow-y-auto px-px pt-1 pb-4 data-hidden:hidden [&>[data-slot=card]]:shrink-0"
         >
@@ -204,18 +210,20 @@ export function TablePageSizesDialog({
                                 className="gap-2"
                             >
                                 {size}
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon-xs"
-                                    aria-label={t(
-                                        'accessibility.remove_value',
-                                        { value: size }
-                                    )}
-                                    onClick={() => removePageSize(size)}
+                                <HintTooltip
+                                    label={t('accessibility.remove_value', {
+                                        value: size
+                                    })}
                                 >
-                                    <XIcon data-icon="inline-start" />
-                                </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon-xs"
+                                        onClick={() => removePageSize(size)}
+                                    >
+                                        <XIcon data-icon="inline-start" />
+                                    </Button>
+                                </HintTooltip>
                             </Badge>
                         ))}
                     </div>
@@ -254,16 +262,19 @@ export function TablePageSizesDialog({
                                 />
                             </NumberField>
                             <InputGroupAddon align="inline-end">
-                                <InputGroupButton
-                                    type="button"
-                                    size="icon-xs"
-                                    aria-label={t(
+                                <HintTooltip
+                                    label={t(
                                         'accessibility.add_table_page_size'
                                     )}
-                                    onClick={() => addPageSize()}
                                 >
-                                    <PlusIcon data-icon="inline-start" />
-                                </InputGroupButton>
+                                    <InputGroupButton
+                                        type="button"
+                                        size="icon-xs"
+                                        onClick={() => addPageSize()}
+                                    >
+                                        <PlusIcon data-icon="inline-start" />
+                                    </InputGroupButton>
+                                </HintTooltip>
                             </InputGroupAddon>
                         </InputGroup>
                     </Field>

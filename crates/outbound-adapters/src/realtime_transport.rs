@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,11 +9,11 @@ use serde_json::Value;
 use tokio::sync::watch;
 use vrcx_0_vrchat_client::realtime::{
     auth_token_from_response, build_transport_url, classify_websocket_frame, connect_websocket,
-    heartbeat, normalize_websocket_domain, Error as RealtimeTransportError, RealtimeFrame,
-    HEARTBEAT_INTERVAL,
+    heartbeat, Error as RealtimeTransportError, RealtimeFrame, HEARTBEAT_INTERVAL,
 };
 
 use vrcx_0_core::realtime::{RealtimeMessageParseOutcome, RealtimeMessageParser};
+use vrcx_0_core::vrchat_endpoints::normalize_vrchat_websocket_endpoint;
 
 use vrcx_0_application_core::BackendRuntimeStatusPublisher;
 use vrcx_0_application_core::Error;
@@ -25,12 +26,15 @@ use vrcx_0_application_realtime::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const AUTH_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 const ALIVE_TRAIL_INTERVAL: Duration = Duration::from_secs(300);
+const LIVENESS_QUIET_PERIOD: Duration = Duration::from_secs(5);
+const LIVENESS_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct RealtimeTransportDeps {
-    store: Arc<dyn vrcx_0_application_realtime::RealtimeStore>,
+    database_path: PathBuf,
     web: Arc<WebClient>,
     pub backend_status: BackendRuntimeStatusPublisher,
+    liveness_probe: Arc<watch::Sender<u64>>,
 }
 
 #[derive(Clone)]
@@ -40,15 +44,16 @@ pub struct VrchatRealtimeTransport {
 
 impl VrchatRealtimeTransport {
     pub fn new(
-        store: Arc<dyn vrcx_0_application_realtime::RealtimeStore>,
+        database_path: PathBuf,
         web: Arc<WebClient>,
         backend_status: BackendRuntimeStatusPublisher,
     ) -> Self {
         Self {
             deps: RealtimeTransportDeps {
-                store,
+                database_path,
                 web,
                 backend_status,
+                liveness_probe: Arc::new(watch::channel(0).0),
             },
         }
     }
@@ -73,6 +78,12 @@ impl RealtimeTransport for VrchatRealtimeTransport {
             session,
             cancel_rx,
         ))
+    }
+
+    fn verify_liveness(&self) {
+        self.deps
+            .liveness_probe
+            .send_modify(|probe| *probe = probe.wrapping_add(1));
     }
 }
 
@@ -186,7 +197,7 @@ async fn run_realtime_transport_inner(
     cancel_rx: &mut watch::Receiver<u64>,
 ) -> RealtimeTransportTermination {
     let backend_status = deps.backend_status.clone();
-    let websocket_domain = normalize_websocket_domain(&session.websocket);
+    let websocket_domain = normalize_vrchat_websocket_endpoint(&session.websocket);
     if is_cancelled(cancel_rx, generation) {
         return stopped_transport(
             &backend_status,
@@ -222,7 +233,7 @@ async fn run_realtime_transport_inner(
         cancel_rx,
         backend_status: &backend_status,
     };
-    let trail_db_path = deps.store.database_path();
+    let trail_db_path = deps.database_path.clone();
     let diagnostics_web = Arc::clone(&deps.web);
     let cookie_diagnostics = diagnostics_web.cookie_diagnostics();
     trail(
@@ -340,7 +351,7 @@ async fn connect_once(
     message_sink: Arc<dyn RealtimeMessageSink>,
     attempt: ConnectionAttempt<'_>,
 ) -> std::result::Result<ConnectionEnd, RealtimeConnectionError> {
-    let trail_db_path = deps.store.database_path();
+    let trail_db_path = deps.database_path.clone();
     let auth_started_at = tokio::time::Instant::now();
     let Some(token) = wait_for_result_or_cancel(
         fetch_auth_token(&deps, attempt.session, &trail_db_path),
@@ -370,7 +381,7 @@ async fn connect_once(
 
     let url = build_transport_url(&attempt.session.websocket, &token)
         .map_err(RealtimeConnectionError::from)?;
-    let websocket_domain = normalize_websocket_domain(&attempt.session.websocket);
+    let websocket_domain = normalize_vrchat_websocket_endpoint(&attempt.session.websocket);
     let handshake_started_at = tokio::time::Instant::now();
     let Some(mut stream) = wait_for_result_or_cancel(
         async {
@@ -421,8 +432,7 @@ async fn connect_once(
             "websocketDomain": websocket_domain,
         }),
     );
-    let database_path = deps.store.database_path();
-    let ws_event_log_path = crate::ws_event_log::resolve_path(&database_path);
+    let ws_event_log_path = crate::ws_event_log::resolve_path(&deps.database_path);
     if let Some(path) = &ws_event_log_path {
         crate::ws_event_log::append_connect_marker(
             path,
@@ -431,11 +441,42 @@ async fn connect_once(
             attempt.session_generation,
         );
     }
+    let mut liveness_rx = deps.liveness_probe.subscribe();
+    let mut liveness_requested = false;
+    let mut liveness_deadline: Option<tokio::time::Instant> = None;
     let reason = loop {
-        if last_inbound_at.elapsed() >= HEARTBEAT_INTERVAL {
+        if liveness_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            break format!(
+                "websocket did not answer a liveness ping within {} seconds",
+                LIVENESS_REPLY_TIMEOUT.as_secs()
+            );
+        }
+        let liveness_due = liveness_requested && last_inbound_at.elapsed() >= LIVENESS_QUIET_PERIOD;
+        if liveness_due || last_inbound_at.elapsed() >= HEARTBEAT_INTERVAL {
             if let Err(reason) = heartbeat(&mut stream, last_inbound_at).await {
                 break reason;
             }
+            if liveness_due {
+                liveness_requested = false;
+                liveness_deadline = Some(tokio::time::Instant::now() + LIVENESS_REPLY_TIMEOUT);
+                trail(
+                    &trail_db_path,
+                    "livenessProbe",
+                    serde_json::json!({
+                        "generation": attempt.generation,
+                        "silentSecs": last_inbound_at.elapsed().as_secs(),
+                    }),
+                );
+            }
+        }
+        let mut read_timeout = liveness_deadline.map_or(HEARTBEAT_INTERVAL, |deadline| {
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(HEARTBEAT_INTERVAL)
+        });
+        if liveness_requested {
+            read_timeout =
+                read_timeout.min(LIVENESS_QUIET_PERIOD.saturating_sub(last_inbound_at.elapsed()));
         }
         tokio::select! {
             changed = attempt.cancel_rx.changed() => {
@@ -443,7 +484,10 @@ async fn connect_once(
                     return Ok(ConnectionEnd::Stopped);
                 }
             }
-            frame = tokio::time::timeout(HEARTBEAT_INTERVAL, stream.next()) => {
+            Ok(()) = liveness_rx.changed() => {
+                liveness_requested = true;
+            }
+            frame = tokio::time::timeout(read_timeout, stream.next()) => {
                 let Ok(frame) = frame else {
                     trail(
                         &trail_db_path,
@@ -465,6 +509,8 @@ async fn connect_once(
                     Err(error) => break format!("websocket read: {error}"),
                 };
                 last_inbound_at = tokio::time::Instant::now();
+                liveness_requested = false;
+                liveness_deadline = None;
                 messages_received = messages_received.saturating_add(1);
                 if last_alive_trail_at.elapsed() >= ALIVE_TRAIL_INTERVAL {
                     last_alive_trail_at = last_inbound_at;

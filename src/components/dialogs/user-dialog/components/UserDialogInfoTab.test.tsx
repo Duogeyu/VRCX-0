@@ -15,6 +15,8 @@ vi.mock('@/components/economy/useEconomyBalance', () => ({
     useEconomyBalance: () => ({ data: 2450, refetch: vi.fn() })
 }));
 
+import { useAssistantChatStore } from '@/state/assistantChatStore';
+
 import {
     UserDialogActivitySummaryPanel,
     UserDialogBioPanel
@@ -240,6 +242,34 @@ describe('UserDialogActivitySummaryPanel', () => {
             })
         );
         expect(onOpenFeed).toHaveBeenCalledOnce();
+    });
+
+    it('starts an assistant chat about the person', () => {
+        render(
+            <UserDialogActivitySummaryPanel
+                friendedAt={undefined}
+                isCurrentUser={false}
+                isFriend
+                lastSeen={undefined}
+                presenceActivityAt={undefined}
+                profile={{ id: 'usr_test', displayName: 'Mika' }}
+                userTimeSpent={0}
+                userJoinCount={0}
+            />
+        );
+
+        fireEvent.click(
+            screen.getByRole('button', {
+                name: 'assistant.title'
+            })
+        );
+        expect(useAssistantChatStore.getState()).toMatchObject({
+            open: true,
+            assistantDraft: {
+                topic: 'profile',
+                target: { kind: 'user', id: 'usr_test', name: 'Mika' }
+            }
+        });
     });
 });
 

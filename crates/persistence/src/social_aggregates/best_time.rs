@@ -30,7 +30,9 @@ pub fn get_best_time_to_play(
     let tz_modifier = tz_offset_modifier(offset_minutes);
     let bucket_expr = match input.bucket {
         ActivityBucket::HourOfDay => "strftime('%H', created_at, @tz)",
-        ActivityBucket::DayOfWeek => "strftime('%w', created_at, @tz)",
+        ActivityBucket::DayOfWeek => {
+            "CAST((CAST(strftime('%w', created_at, @tz) AS INTEGER) + 6) % 7 AS TEXT)"
+        }
     };
     let mut sql = format!(
         "WITH filtered AS (
@@ -107,7 +109,7 @@ pub fn get_best_time_to_play(
                     .then_with(|| left.user_id.cmp(&right.user_id))
             });
             let distinct_friends = top_friends.len();
-            top_friends.truncate(5);
+            top_friends.truncate(3);
             BestTimeBucketRow {
                 label: bucket_label(&input.bucket, &bucket),
                 bucket,

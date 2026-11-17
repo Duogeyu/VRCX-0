@@ -1,9 +1,9 @@
-use vrcx_0_host_desktop::vr_overlay::{OverlaySurfaceConfig, VrDeviceSnapshot};
 use vrcx_0_overlay_runtime::{
     OverlayServiceStartError, VrOverlayEligibility, VrOverlayManager, VrOverlayServiceControl,
     WristOverlayStartMode,
 };
 use vrcx_0_vr_overlay::{OverlaySurfaceId, RgbaFrame};
+use vrcx_0_vr_overlay_backend::{OverlaySurfaceConfig, VrDeviceSnapshot};
 
 fn eligible(start_mode: WristOverlayStartMode) -> VrOverlayEligibility {
     VrOverlayEligibility {
@@ -201,10 +201,6 @@ impl VrOverlayServiceControl for RecordingOverlayService {
         Ok(())
     }
 
-    fn update_frame(&mut self, _frame: RgbaFrame) -> Result<(), String> {
-        Ok(())
-    }
-
     fn update_surface_frame(
         &mut self,
         _surface_id: &OverlaySurfaceId,
@@ -221,7 +217,7 @@ impl VrOverlayServiceControl for RecordingOverlayService {
         Ok(())
     }
 
-    fn show(&mut self) -> Result<(), String> {
+    fn show_surface(&mut self, _surface_id: &OverlaySurfaceId) -> Result<(), String> {
         Ok(())
     }
 

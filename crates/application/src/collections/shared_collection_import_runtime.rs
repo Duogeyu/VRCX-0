@@ -20,6 +20,9 @@ use super::{
     SharedCollectionImportProgress, SharedCollectionImportResult, SharedCollectionImportStartInput,
     SharedCollectionImportState, SharedCollectionImportStatus,
 };
+use crate::scope_gate::ScopeGate;
+
+const GATE: ScopeGate = ScopeGate::new("Shared collection import");
 
 pub trait SharedCollectionImportActionsFactory: Send + Sync {
     fn create(&self, endpoint: String) -> Arc<dyn SharedCollectionImportActions>;
@@ -107,12 +110,7 @@ impl SharedCollectionImportRuntime {
         input: SharedCollectionImportStartInput,
     ) -> Result<SharedCollectionImportStatus> {
         let prepared = prepare_shared_collection_import(input)?;
-        let scope = self.auth_scope.snapshot();
-        if !scope.active || scope.current_user_id.trim().is_empty() {
-            return Err(Error::Custom(
-                "Shared collection import requires an authenticated session.".into(),
-            ));
-        }
+        let scope = GATE.require_active(&self.auth_scope)?;
 
         let cancel = Arc::new(AtomicBool::new(false));
         let status = {
@@ -194,19 +192,6 @@ impl SharedCollectionImportRuntime {
         status
     }
 
-    pub fn cancel_if_scope_mismatch(&self) -> SharedCollectionImportStatus {
-        let scope = self.auth_scope.snapshot();
-        let status = {
-            let mut inner = self.lock_inner();
-            if !mark_cancelling_if_scope_mismatch(&mut inner, &scope) {
-                return inner.status.clone();
-            }
-            inner.status.clone()
-        };
-        self.emit_status(status.clone());
-        status
-    }
-
     fn apply_progress(&self, run_id: &str, progress: SharedCollectionImportProgress) {
         let status = {
             let mut inner = self.lock_inner();
@@ -264,20 +249,6 @@ fn is_active_status(status: SharedCollectionImportState) -> bool {
         status,
         SharedCollectionImportState::Running | SharedCollectionImportState::Cancelling
     )
-}
-
-fn mark_cancelling_if_scope_mismatch(
-    inner: &mut SharedCollectionImportRuntimeInner,
-    scope: &RuntimeAuthScopeSnapshot,
-) -> bool {
-    if !is_active_status(inner.status.status) || inner.auth_generation == scope.generation {
-        return false;
-    }
-    if let Some(cancel) = &inner.cancel {
-        cancel.store(true, Ordering::Release);
-    }
-    inner.status.status = SharedCollectionImportState::Cancelling;
-    true
 }
 
 fn prepare_terminal_result(

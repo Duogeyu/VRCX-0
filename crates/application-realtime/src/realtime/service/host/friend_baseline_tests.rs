@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use super::friend_profile::FriendProfileRefreshExpectation;
 use super::test_support::*;
 use super::*;
+use vrcx_0_application_core::ConfigStore;
 use vrcx_0_core::friends::{FriendBaselineEntry, FriendBaselinePresence, FriendRecord};
 use vrcx_0_core::presence::PresenceView;
 use vrcx_0_core::OwnerId;
@@ -27,9 +28,7 @@ fn sync_friend_snapshot_debounces_online_to_offline() -> Result<()> {
             },
         },
     );
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), initial_friends)?;
+    runtime.sync_friend_baseline(&active_session, initial_friends)?;
     let initial_events = runtime.runtime().deps.event_bus.take_events_for_test();
     let initial_projection = initial_events
         .iter()
@@ -61,11 +60,9 @@ fn sync_friend_snapshot_debounces_online_to_offline() -> Result<()> {
             },
         },
     );
-    let result = runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
-        refreshed_friends,
-    )?;
+    let result = runtime
+        .sync_friend_baseline(&active_session, refreshed_friends)?
+        .result;
 
     let events = runtime.runtime().deps.event_bus.take_events_for_test();
     let projection = events
@@ -105,9 +102,7 @@ fn sync_friend_snapshot_keeps_a_pending_offline_until_its_deadline() -> Result<(
             },
         },
     );
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), initial_friends)?;
+    runtime.sync_friend_baseline(&active_session, initial_friends)?;
 
     let RealtimeFriendApplyResult::Output(pending_output) = runtime
         .runtime()
@@ -165,7 +160,9 @@ fn sync_friend_snapshot_keeps_a_pending_offline_until_its_deadline() -> Result<(
     );
     assert!(events
         .iter()
-        .all(|event| event.name != "realtimeFeedProjection"));
+        .filter(|event| event.name == "realtimeFeedProjection")
+        .flat_map(|event| event.payload["upserts"].as_array().unwrap())
+        .all(|upsert| upsert["entry"]["type"] == "DisplayName"));
 
     let fired = runtime
         .runtime()
@@ -240,9 +237,8 @@ fn host_watermark_preserves_pending_created_after_capture() -> Result<()> {
         let (_dir, runtime, active_session) =
             runtime_with_active_session(&format!("host-stale-watermark-{state_bucket}"))?;
         runtime.set_task_executor_for_test(DiscardTaskExecutor);
-        runtime.runtime().sync_friend_snapshot(
-            active_session.clone(),
-            Some(7),
+        runtime.sync_friend_baseline(
+            &active_session,
             [(
                 "usr_friend".to_string(),
                 FriendBaselineEntry {
@@ -335,9 +331,8 @@ fn host_watermark_preserves_online_cancellation_after_capture() -> Result<()> {
     let (_dir, runtime, active_session) =
         runtime_with_active_session("host-online-cancel-watermark")?;
     runtime.set_task_executor_for_test(DiscardTaskExecutor);
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [(
             "usr_friend".to_string(),
             FriendBaselineEntry {
@@ -471,14 +466,16 @@ fn causal_sync_returns_canonical_snapshot_after_newer_friend_delete() -> Result<
             ..FriendBaselinePresence::default()
         },
     };
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [("usr_friend".to_string(), stale_friend.clone())]
             .into_iter()
             .collect(),
     )?;
-    config_store::set_bool(runtime.database(), "friendLogInit_usr_self", true)?;
+    runtime
+        .database()
+        .config
+        .set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
         runtime.database(),
         &OwnerId::new(active_session.user_id.clone()),
@@ -564,9 +561,8 @@ fn causal_watermark_rejects_baseline_after_local_friend_log_mutation() -> Result
             ..FriendBaselinePresence::default()
         },
     };
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [("usr_friend".to_string(), friend.clone())]
             .into_iter()
             .collect(),
@@ -619,9 +615,9 @@ fn verdict(user_id: &str, is_friend: bool) -> FriendStatusVerdicts {
     HashMap::from([(user_id.to_string(), is_friend)]).into()
 }
 
-fn seeded_friend_log(dir: &TestDir, target_user_id: &str) -> Result<TestRealtimeStore> {
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
-    config_store::set_bool(&db, "friendLogInit_usr_self", true)?;
+fn seeded_friend_log(target_user_id: &str) -> Result<TestRealtimeStore> {
+    let db = TestRealtimeStore::default();
+    db.config.set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
         &db,
         &OwnerId::new("usr_self"),
@@ -692,8 +688,7 @@ fn baseline_entries(
 
 #[test]
 fn relationship_candidates_cover_both_diff_directions_after_init() -> Result<()> {
-    let dir = TestDir::new("relationship-candidates");
-    let db = seeded_friend_log(&dir, "usr_dropped")?;
+    let db = seeded_friend_log("usr_dropped")?;
     let mut friends_by_id = roster("usr_new");
     friends_by_id.extend(roster("usr_self"));
     friends_by_id.insert(
@@ -707,8 +702,12 @@ fn relationship_candidates_cover_both_diff_directions_after_init() -> Result<()>
         },
     );
 
-    let mut candidates =
-        friend_log_relationship_candidates(&db, "usr_self", &baseline_entries(friends_by_id));
+    let mut candidates = friend_log_relationship_candidates(
+        &db,
+        &db.config,
+        "usr_self",
+        &baseline_entries(friends_by_id),
+    );
     candidates.sort();
 
     assert_eq!(candidates, vec!["usr_dropped", "usr_new"]);
@@ -717,11 +716,11 @@ fn relationship_candidates_cover_both_diff_directions_after_init() -> Result<()>
 
 #[test]
 fn relationship_candidates_stay_empty_before_friend_log_init() -> Result<()> {
-    let dir = TestDir::new("relationship-candidates-uninitialized");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
+    let db = TestRealtimeStore::default();
 
     assert!(friend_log_relationship_candidates(
         &db,
+        &db.config,
         "usr_self",
         &baseline_entries(roster("usr_new"))
     )
@@ -731,11 +730,11 @@ fn relationship_candidates_stay_empty_before_friend_log_init() -> Result<()> {
 
 #[test]
 fn reconcile_keeps_roster_dropout_until_friend_status_confirms_it() -> Result<()> {
-    let dir = TestDir::new("reconcile-unconfirmed-removal");
-    let db = seeded_friend_log(&dir, "usr_friend")?;
+    let db = Arc::new(seeded_friend_log("usr_friend")?);
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &HashMap::new(),
         None,
@@ -744,18 +743,18 @@ fn reconcile_keeps_roster_dropout_until_friend_status_confirms_it() -> Result<()
     );
 
     assert!(!outcome.changed);
-    assert_eq!(friend_log_current_list(&db, "usr_self".into())?.len(), 1);
+    assert_eq!(friend_log_current_list(&*db, "usr_self".into())?.len(), 1);
     assert_eq!(friend_log_history_count(&db, "usr_friend", "Unfriend")?, 0);
     Ok(())
 }
 
 #[test]
 fn reconcile_removes_roster_dropout_confirmed_as_unfriended() -> Result<()> {
-    let dir = TestDir::new("reconcile-confirmed-removal");
-    let db = seeded_friend_log(&dir, "usr_friend")?;
+    let db = Arc::new(seeded_friend_log("usr_friend")?);
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &HashMap::new(),
         None,
@@ -764,20 +763,20 @@ fn reconcile_removes_roster_dropout_confirmed_as_unfriended() -> Result<()> {
     );
 
     assert!(outcome.changed);
-    assert!(friend_log_current_list(&db, "usr_self".into())?.is_empty());
+    assert!(friend_log_current_list(&*db, "usr_self".into())?.is_empty());
     assert_eq!(friend_log_history_count(&db, "usr_friend", "Unfriend")?, 1);
     Ok(())
 }
 
 #[test]
 fn reconcile_holds_back_roster_arrival_until_friend_status_confirms_it() -> Result<()> {
-    let dir = TestDir::new("reconcile-unconfirmed-addition");
-    let db = seeded_friend_log(&dir, "usr_friend")?;
+    let db = Arc::new(seeded_friend_log("usr_friend")?);
     let mut friends_by_id = roster("usr_friend");
     friends_by_id.extend(roster("usr_new"));
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -786,20 +785,20 @@ fn reconcile_holds_back_roster_arrival_until_friend_status_confirms_it() -> Resu
     );
 
     assert!(!outcome.changed);
-    assert_eq!(friend_log_current_list(&db, "usr_self".into())?.len(), 1);
+    assert_eq!(friend_log_current_list(&*db, "usr_self".into())?.len(), 1);
     assert_eq!(friend_log_history_count(&db, "usr_new", "Friend")?, 0);
     Ok(())
 }
 
 #[test]
 fn reconcile_adds_roster_arrival_confirmed_as_friend() -> Result<()> {
-    let dir = TestDir::new("reconcile-confirmed-addition");
-    let db = seeded_friend_log(&dir, "usr_friend")?;
+    let db = Arc::new(seeded_friend_log("usr_friend")?);
     let mut friends_by_id = roster("usr_friend");
     friends_by_id.extend(roster("usr_new"));
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -808,18 +807,17 @@ fn reconcile_adds_roster_arrival_confirmed_as_friend() -> Result<()> {
     );
 
     assert!(outcome.changed);
-    assert_eq!(friend_log_current_list(&db, "usr_self".into())?.len(), 2);
+    assert_eq!(friend_log_current_list(&*db, "usr_self".into())?.len(), 2);
     assert_eq!(friend_log_history_count(&db, "usr_new", "Friend")?, 1);
     Ok(())
 }
 
 #[test]
 fn reconcile_records_display_name_change_for_existing_friend() -> Result<()> {
-    let dir = TestDir::new("reconcile-display-name");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
-    config_store::set_bool(&db, "friendLogInit_usr_self", true)?;
+    let db = Arc::new(TestRealtimeStore::default());
+    db.config.set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
-        &db,
+        &*db,
         &OwnerId::new("usr_self"),
         &RealtimePersistenceBatch {
             friend_log_upserts: vec![FriendLogUpsert {
@@ -846,7 +844,8 @@ fn reconcile_records_display_name_change_for_existing_friend() -> Result<()> {
     .collect();
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -862,7 +861,8 @@ fn reconcile_records_display_name_change_for_existing_friend() -> Result<()> {
     assert_eq!(rename["friendNumber"], 1);
     assert!(
         !reconcile_friend_roster_records(
-            &db,
+            &crate::RealtimeStores::shared(Arc::clone(&db)),
+            &db.config,
             "usr_self",
             &friends_by_id,
             None,
@@ -872,7 +872,7 @@ fn reconcile_records_display_name_change_for_existing_friend() -> Result<()> {
         .changed
     );
 
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].display_name, "New Name");
     assert_eq!(current[0].trust_level, "Known");
@@ -895,11 +895,10 @@ fn reconcile_records_display_name_change_for_existing_friend() -> Result<()> {
 
 #[test]
 fn reconcile_records_and_projects_trust_only_change_once() -> Result<()> {
-    let dir = TestDir::new("reconcile-trust-level");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
-    config_store::set_bool(&db, "friendLogInit_usr_self", true)?;
+    let db = Arc::new(TestRealtimeStore::default());
+    db.config.set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
-        &db,
+        &*db,
         &OwnerId::new("usr_self"),
         &RealtimePersistenceBatch {
             friend_log_upserts: vec![FriendLogUpsert {
@@ -928,7 +927,8 @@ fn reconcile_records_and_projects_trust_only_change_once() -> Result<()> {
     .collect();
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -949,7 +949,8 @@ fn reconcile_records_and_projects_trust_only_change_once() -> Result<()> {
     assert_eq!(outcome.feed_entries[0].to_json()["friendNumber"], 7);
     assert!(
         !reconcile_friend_roster_records(
-            &db,
+            &crate::RealtimeStores::shared(Arc::clone(&db)),
+            &db.config,
             "usr_self",
             &friends_by_id,
             None,
@@ -959,7 +960,7 @@ fn reconcile_records_and_projects_trust_only_change_once() -> Result<()> {
         .changed
     );
 
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current[0].trust_level, "Trusted User");
     let history = friend_log_history_query(
         &db,
@@ -978,11 +979,10 @@ fn reconcile_records_and_projects_trust_only_change_once() -> Result<()> {
 
 #[test]
 fn reconcile_skips_placeholder_records() -> Result<()> {
-    let dir = TestDir::new("reconcile-placeholder");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
-    config_store::set_bool(&db, "friendLogInit_usr_self", true)?;
+    let db = Arc::new(TestRealtimeStore::default());
+    db.config.set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
-        &db,
+        &*db,
         &OwnerId::new("usr_self"),
         &RealtimePersistenceBatch {
             friend_log_upserts: vec![FriendLogUpsert {
@@ -1014,7 +1014,8 @@ fn reconcile_skips_placeholder_records() -> Result<()> {
     .collect();
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -1024,7 +1025,7 @@ fn reconcile_skips_placeholder_records() -> Result<()> {
 
     assert!(!outcome.changed);
     assert!(outcome.feed_entries.is_empty());
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current[0].trust_level, "Trusted User");
     let history = friend_log_history_query(
         &db,
@@ -1041,8 +1042,7 @@ fn reconcile_skips_placeholder_records() -> Result<()> {
 
 #[test]
 fn init_seeds_placeholder_without_trust_and_reconcile_fills_it_silently() -> Result<()> {
-    let dir = TestDir::new("reconcile-placeholder-init");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
+    let db = Arc::new(TestRealtimeStore::default());
     let placeholder_roster: HashMap<String, FriendRecord> = [(
         "usr_friend".to_string(),
         FriendRecord {
@@ -1062,7 +1062,8 @@ fn init_seeds_placeholder_without_trust_and_reconcile_fills_it_silently() -> Res
 
     assert!(
         reconcile_friend_roster_records(
-            &db,
+            &crate::RealtimeStores::shared(Arc::clone(&db)),
+            &db.config,
             "usr_self",
             &placeholder_roster,
             None,
@@ -1071,7 +1072,7 @@ fn init_seeds_placeholder_without_trust_and_reconcile_fills_it_silently() -> Res
         )
         .changed
     );
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current[0].trust_level, "");
 
     let fetched_roster: HashMap<String, FriendRecord> = [(
@@ -1089,7 +1090,8 @@ fn init_seeds_placeholder_without_trust_and_reconcile_fills_it_silently() -> Res
     .collect();
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &fetched_roster,
         None,
@@ -1098,7 +1100,7 @@ fn init_seeds_placeholder_without_trust_and_reconcile_fills_it_silently() -> Res
     );
     assert!(outcome.changed);
     assert!(outcome.feed_entries.is_empty());
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current[0].trust_level, "Trusted User");
     let history = friend_log_history_query(
         &db,
@@ -1115,11 +1117,10 @@ fn init_seeds_placeholder_without_trust_and_reconcile_fills_it_silently() -> Res
 
 #[test]
 fn reconcile_updates_legacy_equivalent_trust_without_history_or_feed() -> Result<()> {
-    let dir = TestDir::new("reconcile-equivalent-trust");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
-    config_store::set_bool(&db, "friendLogInit_usr_self", true)?;
+    let db = Arc::new(TestRealtimeStore::default());
+    db.config.set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
-        &db,
+        &*db,
         &OwnerId::new("usr_self"),
         &RealtimePersistenceBatch {
             friend_log_upserts: vec![FriendLogUpsert {
@@ -1148,7 +1149,8 @@ fn reconcile_updates_legacy_equivalent_trust_without_history_or_feed() -> Result
     .collect();
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -1158,7 +1160,7 @@ fn reconcile_updates_legacy_equivalent_trust_without_history_or_feed() -> Result
 
     assert!(outcome.changed);
     assert!(outcome.feed_entries.is_empty());
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current[0].trust_level, "Trusted User");
     let history = friend_log_history_query(
         &db,
@@ -1175,8 +1177,7 @@ fn reconcile_updates_legacy_equivalent_trust_without_history_or_feed() -> Result
 
 #[test]
 fn first_time_baseline_init_fills_current_roster_without_history_or_feed() -> Result<()> {
-    let dir = TestDir::new("reconcile-first-init");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
+    let db = Arc::new(TestRealtimeStore::default());
     let friends_by_id: HashMap<String, FriendRecord> = [
         (
             "usr_a_friend".to_string(),
@@ -1201,15 +1202,12 @@ fn first_time_baseline_init_fills_current_roster_without_history_or_feed() -> Re
     .into_iter()
     .collect();
 
-    assert!(!config_store::get_bool(
-        &db,
-        "friendLogInit_usr_self",
-        false
-    )?);
+    assert!(!db.config.get_bool("friendLogInit_usr_self", false)?);
 
     let roster_order = ["usr_b_friend".to_string(), "usr_a_friend".to_string()];
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         Some(&roster_order),
@@ -1230,25 +1228,20 @@ fn first_time_baseline_init_fills_current_roster_without_history_or_feed() -> Re
     )?
     .is_empty());
 
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current.len(), 2);
     assert_eq!(current[0].user_id, "usr_b_friend");
     assert_eq!(current[0].friend_number, 1);
     assert_eq!(current[1].user_id, "usr_a_friend");
     assert_eq!(current[1].friend_number, 2);
     assert_eq!(current[1].trust_level, "Trusted User");
-    assert!(config_store::get_bool(
-        &db,
-        "friendLogInit_usr_self",
-        false
-    )?);
+    assert!(db.config.get_bool("friendLogInit_usr_self", false)?);
     Ok(())
 }
 
 #[test]
 fn first_time_baseline_init_failure_leaves_flag_unset_for_retry() -> Result<()> {
-    let dir = TestDir::new("reconcile-first-init-failure");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
+    let db = Arc::new(TestRealtimeStore::default());
     let friends_by_id: HashMap<String, FriendRecord> = [(
         "usr_friend".to_string(),
         FriendRecord {
@@ -1261,7 +1254,8 @@ fn first_time_baseline_init_failure_leaves_flag_unset_for_retry() -> Result<()> 
     .collect();
 
     let failed_outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr!self",
         &friends_by_id,
         None,
@@ -1269,14 +1263,11 @@ fn first_time_baseline_init_failure_leaves_flag_unset_for_retry() -> Result<()> 
         &no_verdicts(),
     );
     assert!(!failed_outcome.changed);
-    assert!(!config_store::get_bool(
-        &db,
-        "friendLogInit_usr!self",
-        false
-    )?);
+    assert!(!db.config.get_bool("friendLogInit_usr!self", false)?);
 
     let retried_outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -1284,20 +1275,15 @@ fn first_time_baseline_init_failure_leaves_flag_unset_for_retry() -> Result<()> 
         &no_verdicts(),
     );
     assert!(retried_outcome.changed);
-    assert!(config_store::get_bool(
-        &db,
-        "friendLogInit_usr_self",
-        false
-    )?);
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    assert!(db.config.get_bool("friendLogInit_usr_self", false)?);
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current.len(), 1);
     Ok(())
 }
 
 #[test]
 fn first_time_init_treats_friend_accepted_during_init_window_as_preexisting() -> Result<()> {
-    let dir = TestDir::new("reconcile-first-init-race");
-    let db = TestRealtimeStore::new(dir.path.join("VRCX-0.sqlite3"));
+    let db = Arc::new(TestRealtimeStore::default());
     let friends_by_id: HashMap<String, FriendRecord> = [
         (
             "usr_established".to_string(),
@@ -1320,7 +1306,8 @@ fn first_time_init_treats_friend_accepted_during_init_window_as_preexisting() ->
     .collect();
 
     let outcome = reconcile_friend_roster_records(
-        &db,
+        &crate::RealtimeStores::shared(Arc::clone(&db)),
+        &db.config,
         "usr_self",
         &friends_by_id,
         None,
@@ -1340,7 +1327,7 @@ fn first_time_init_treats_friend_accepted_during_init_window_as_preexisting() ->
         },
     )?;
     assert!(history.is_empty());
-    let current = friend_log_current_list(&db, "usr_self".into())?;
+    let current = friend_log_current_list(&*db, "usr_self".into())?;
     assert_eq!(current.len(), 2);
     Ok(())
 }
@@ -1348,13 +1335,13 @@ fn first_time_init_treats_friend_accepted_during_init_window_as_preexisting() ->
 #[test]
 fn active_baseline_trust_change_fans_out_after_atomic_persistence() -> Result<()> {
     let (_dir, runtime, active_session) = runtime_with_active_session("active-baseline-trust")?;
-    config_store::set_bool(
-        runtime.runtime().deps.store.as_ref(),
-        "friendLogInit_usr_self",
-        true,
-    )?;
+    runtime
+        .runtime()
+        .deps
+        .config
+        .set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
-        runtime.runtime().deps.store.as_ref(),
+        runtime.runtime().deps.stores.batch_writer.as_ref(),
         &OwnerId::new("usr_self"),
         &RealtimePersistenceBatch {
             friend_log_upserts: vec![FriendLogUpsert {
@@ -1410,13 +1397,13 @@ fn active_baseline_trust_change_fans_out_after_atomic_persistence() -> Result<()
 fn active_baseline_uses_runtime_feed_persistence_state() -> Result<()> {
     let (_dir, runtime, active_session) =
         runtime_with_active_session("active-baseline-feed-disabled")?;
-    config_store::set_bool(
-        runtime.runtime().deps.store.as_ref(),
-        "friendLogInit_usr_self",
-        true,
-    )?;
+    runtime
+        .runtime()
+        .deps
+        .config
+        .set_bool("friendLogInit_usr_self", true)?;
     write_realtime_batch(
-        runtime.runtime().deps.store.as_ref(),
+        runtime.runtime().deps.stores.batch_writer.as_ref(),
         &OwnerId::new("usr_self"),
         &RealtimePersistenceBatch {
             friend_log_upserts: vec![FriendLogUpsert {
@@ -1431,11 +1418,11 @@ fn active_baseline_uses_runtime_feed_persistence_state() -> Result<()> {
         },
     )?;
     runtime.runtime().set_feed_persistence_disabled(true)?;
-    config_store::set_bool(
-        runtime.runtime().deps.store.as_ref(),
-        "feedPersistenceDisabled",
-        false,
-    )?;
+    runtime
+        .runtime()
+        .deps
+        .config
+        .set_bool("feedPersistenceDisabled", false)?;
     let watermark = runtime.runtime().capture_friend_baseline_watermark()?;
     let friend = FriendBaselineEntry {
         record: FriendRecord {
@@ -1500,13 +1487,9 @@ fn causal_watermark_rejects_superseded_baseline() -> Result<()> {
         .into_iter()
         .collect()
     };
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), friend("Initial"))?;
+    runtime.sync_friend_baseline(&active_session, friend("Initial"))?;
     let stale_watermark = runtime.runtime().capture_friend_baseline_watermark()?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), friend("Newer"))?;
+    runtime.sync_friend_baseline(&active_session, friend("Newer"))?;
 
     let result = runtime.runtime().sync_friend_snapshot_with_watermark(
         active_session.clone(),
@@ -1534,9 +1517,7 @@ fn causal_watermark_rejects_superseded_baseline() -> Result<()> {
 #[test]
 fn causal_baseline_from_stopped_generation_is_not_cached() -> Result<()> {
     let (_dir, runtime, active_session) = runtime_with_active_session("stopped-watermark")?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), HashMap::new())?;
+    runtime.sync_friend_baseline(&active_session, HashMap::new())?;
     let watermark = runtime.runtime().capture_friend_baseline_watermark()?;
     runtime.runtime().stop(RealtimeStopRequest {
         generation: Some(7),
@@ -1611,9 +1592,7 @@ fn sync_friend_snapshot_emits_projection_for_active_removals() -> Result<()> {
             },
         },
     );
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), initial_friends)?;
+    runtime.sync_friend_baseline(&active_session, initial_friends)?;
     assert_eq!(
         runtime.activity_sink_for_test().friend_user_ids(),
         vec!["usr_removed".to_string()]
@@ -1625,10 +1604,9 @@ fn sync_friend_snapshot_emits_projection_for_active_removals() -> Result<()> {
         .is_some());
     runtime.runtime().deps.event_bus.take_events_for_test();
 
-    let result =
-        runtime
-            .runtime()
-            .sync_friend_snapshot(active_session.clone(), Some(7), HashMap::new())?;
+    let result = runtime
+        .sync_friend_baseline(&active_session, HashMap::new())?
+        .result;
 
     let events = runtime.runtime().deps.event_bus.take_events_for_test();
     let projection = events
@@ -1683,9 +1661,7 @@ fn apply_friend_profile_refresh_updates_existing_friend_only() -> Result<()> {
             },
         },
     );
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), friends_by_id)?;
+    runtime.sync_friend_baseline(&active_session, friends_by_id)?;
 
     let friend_rev = runtime
         .runtime()
@@ -1766,9 +1742,8 @@ fn friend_projection_clears_feed_entries_when_persistence_fails() -> Result<()> 
 fn repeated_friend_delete_retries_after_persistence_failure_without_duplicate_feed() -> Result<()> {
     let (_dir, runtime, active_session) =
         runtime_with_active_session("friend-delete-persistence-retry")?;
-    runtime.runtime().sync_friend_snapshot(
-        active_session.clone(),
-        Some(7),
+    runtime.sync_friend_baseline(
+        &active_session,
         [(
             "usr_friend".to_string(),
             FriendBaselineEntry {
@@ -1787,7 +1762,7 @@ fn repeated_friend_delete_retries_after_persistence_failure_without_duplicate_fe
         .collect(),
     )?;
     write_realtime_batch(
-        runtime.runtime().deps.store.as_ref(),
+        runtime.runtime().deps.stores.batch_writer.as_ref(),
         &OwnerId::new(active_session.user_id.clone()),
         &RealtimePersistenceBatch {
             friend_log_upserts: vec![FriendLogUpsert {
@@ -1824,7 +1799,7 @@ fn repeated_friend_delete_retries_after_persistence_failure_without_duplicate_fe
 
     assert_eq!(
         friend_log_current_list(
-            runtime.runtime().deps.store.as_ref(),
+            runtime.runtime().deps.stores.friend_log.as_ref(),
             active_session.user_id.clone(),
         )?
         .len(),
@@ -1841,7 +1816,7 @@ fn repeated_friend_delete_retries_after_persistence_failure_without_duplicate_fe
     runtime.runtime().apply_friend_output(*retry);
 
     assert!(friend_log_current_list(
-        runtime.runtime().deps.store.as_ref(),
+        runtime.runtime().deps.stores.friend_log.as_ref(),
         active_session.user_id,
     )?
     .is_empty());
@@ -1943,9 +1918,7 @@ fn emit_friend_log_changed_carries_the_active_baseline_scope() -> Result<()> {
             },
         },
     );
-    runtime
-        .runtime()
-        .sync_friend_snapshot(active_session.clone(), Some(7), friends)?;
+    runtime.sync_friend_baseline(&active_session, friends)?;
     let mut refreshed = HashMap::new();
     refreshed.insert(
         "usr_friend".to_string(),
@@ -1962,11 +1935,8 @@ fn emit_friend_log_changed_carries_the_active_baseline_scope() -> Result<()> {
             },
         },
     );
-    let refreshed_result =
-        runtime
-            .runtime()
-            .sync_friend_snapshot(active_session.clone(), Some(7), refreshed)?;
-    assert_eq!(refreshed_result.baseline_revision, 1);
+    let refreshed_result = runtime.sync_friend_baseline(&active_session, refreshed)?;
+    assert_eq!(refreshed_result.result.baseline_revision, 1);
     runtime.runtime().deps.event_bus.take_events_for_test();
 
     runtime.runtime().emit_friend_log_changed();

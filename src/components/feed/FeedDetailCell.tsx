@@ -1,4 +1,13 @@
 import { ArrowRightIcon } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+
+import {
+    LogFilterMenuItems,
+    type LogFilterCommands
+} from '@/components/data-table/LogFilterContextMenu';
+import { parseLocation } from '@/shared/utils/location';
+import { replaceBioSymbols } from '@/shared/utils/string';
+import { userStatusLabel } from '@/shared/utils/userStatus';
 
 import { AvatarInfoLine } from './FeedAvatarInfoLine';
 import { FeedLocationLink } from './FeedLocationLink';
@@ -7,6 +16,7 @@ import { FeedStatusBadge } from './FeedStatusBadge';
 import type { FeedLocationActionPayload, FeedRow } from './feedTypes';
 
 type FeedDetailCellProps = {
+    filterCommands?: LogFilterCommands;
     loadingHistoryKey?: string;
     locationClassName?: string;
     onNewInstance?(payload?: FeedLocationActionPayload): void;
@@ -15,12 +25,14 @@ type FeedDetailCellProps = {
 };
 
 function FeedDetailCell({
+    filterCommands,
     loadingHistoryKey = '',
     locationClassName = '',
     onNewInstance,
     onOpenPreviousInstances,
     row
 }: FeedDetailCellProps) {
+    const { t } = useTranslation();
     const type = row?.type;
 
     if (type === 'GPS' || type === 'Online' || type === 'Offline') {
@@ -28,6 +40,17 @@ function FeedDetailCell({
         return (
             <FeedLocationLink
                 className={locationClassName}
+                contextMenuExtraItems={
+                    filterCommands ? (
+                        <LogFilterMenuItems
+                            commands={filterCommands}
+                            target={{
+                                worldId: parseLocation(location).worldId,
+                                worldName: row?.worldName || ''
+                            }}
+                        />
+                    ) : undefined
+                }
                 disableTooltip
                 groupName={row?.groupName}
                 loadingHistoryKey={loadingHistoryKey}
@@ -43,9 +66,15 @@ function FeedDetailCell({
         if (row?.statusDescription === row?.previousStatusDescription) {
             return (
                 <div className="flex min-w-0 items-center gap-2 text-sm">
-                    <FeedStatusBadge status={row?.previousStatus} />
+                    <FeedStatusBadge
+                        status={row?.previousStatus}
+                        label={userStatusLabel(row?.previousStatus, t)}
+                    />
                     <ArrowRightIcon className="text-muted-foreground size-4 shrink-0" />
-                    <FeedStatusBadge status={row?.status} />
+                    <FeedStatusBadge
+                        status={row?.status}
+                        label={userStatusLabel(row?.status, t)}
+                    />
                 </div>
             );
         }
@@ -77,7 +106,7 @@ function FeedDetailCell({
     if (type === 'Bio') {
         return (
             <span className="block w-full min-w-0 truncate">
-                {row.bio || ''}
+                {replaceBioSymbols(row.bio)}
             </span>
         );
     }

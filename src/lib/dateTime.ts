@@ -119,6 +119,36 @@ export function formatScreenshotDateTime(
     );
 }
 
+export function formatScreenshotDay(value: number, locale?: string) {
+    const { dateIsoFormat, locale: appLocale } = useShellStore.getState();
+    if (dateIsoFormat) {
+        return formatIsoDateTime(value).slice(0, 10);
+    }
+    return formatDateTimeValue(
+        value,
+        { dateStyle: 'full' },
+        {
+            locale: normalizeDateLocale(locale || appLocale, 'en'),
+            fallback: '—'
+        }
+    );
+}
+
+export function formatScreenshotMonth(value: number, locale?: string) {
+    const { dateIsoFormat, locale: appLocale } = useShellStore.getState();
+    if (dateIsoFormat) {
+        return formatIsoDateTime(value).slice(0, 7);
+    }
+    return formatDateTimeValue(
+        value,
+        { year: 'numeric', month: 'short' },
+        {
+            locale: normalizeDateLocale(locale || appLocale, 'en'),
+            fallback: '—'
+        }
+    );
+}
+
 export function formatClock(
     value: unknown,
     preferences: DateTimeFormatPreferences & { includeSeconds?: boolean } = {}
@@ -134,6 +164,7 @@ export function formatRelativeTime(
     preferences: DateTimeFormatPreferences & {
         nowMs?: number;
         style?: Intl.RelativeTimeFormatStyle;
+        minUnit?: 'second' | 'minute';
     } = {}
 ) {
     return formatRelativeTimeWithPreferences(

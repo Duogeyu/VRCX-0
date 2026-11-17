@@ -214,18 +214,8 @@ impl Serialize for AppError {
 }
 
 impl specta::Type for AppError {
-    fn inline(
-        type_map: &mut specta::TypeCollection,
-        generics: specta::Generics,
-    ) -> specta::DataType {
-        AppErrorPayload::inline(type_map, generics)
-    }
-
-    fn reference(
-        type_map: &mut specta::TypeCollection,
-        generics: &[specta::DataType],
-    ) -> specta::datatype::reference::Reference {
-        AppErrorPayload::reference(type_map, generics)
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        AppErrorPayload::definition(types)
     }
 }
 
@@ -345,29 +335,7 @@ impl From<vrcx_0_application_core::Error> for AppError {
 impl From<vrcx_0_composition::Error> for AppError {
     fn from(value: vrcx_0_composition::Error) -> Self {
         match value {
-            vrcx_0_composition::Error::Database(message) => AppError::database(message, None),
-            vrcx_0_composition::Error::Sqlite { message, category } => {
-                AppError::database(message, category)
-            }
-            vrcx_0_composition::Error::Io(error) => AppError::Io(error),
-            vrcx_0_composition::Error::Json(error) => AppError::Json(error),
-            vrcx_0_composition::Error::PersistenceInvalidData(message) => {
-                AppError::PersistenceInvalidData(message)
-            }
-            vrcx_0_composition::Error::RegistryPolicyInvalid(message) => {
-                AppError::RegistryPolicyInvalid(message)
-            }
-            vrcx_0_composition::Error::WebClient(message) => AppError::WebClient(message),
-            vrcx_0_composition::Error::UpdateArtifactInvalid(message) => {
-                AppError::UpdateArtifactInvalid(message)
-            }
-            vrcx_0_composition::Error::VrchatApi {
-                status_code,
-                message,
-            } => AppError::VrchatApi {
-                status_code,
-                message,
-            },
+            vrcx_0_composition::Error::Application(error) => error.into(),
             vrcx_0_composition::Error::AuthInteractionRequired(reason) => {
                 AppError::AuthInteractionRequired(reason)
             }
@@ -378,7 +346,6 @@ impl From<vrcx_0_composition::Error> for AppError {
                 reason,
                 status_code,
             },
-            vrcx_0_composition::Error::Custom(message) => AppError::Custom(message),
         }
     }
 }

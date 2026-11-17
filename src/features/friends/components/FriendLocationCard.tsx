@@ -31,6 +31,7 @@ import { userImage } from '@/services/entityMediaService';
 import { normalizeUserStatus } from '@/shared/utils/friendStatus';
 import { normalizeLocationValue, parseLocation } from '@/shared/utils/location';
 import { normalizeString } from '@/shared/utils/string';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Avatar, AvatarFallback, AvatarImage } from '@/ui/shadcn/avatar';
 import { Button } from '@/ui/shadcn/button';
 import {
@@ -177,7 +178,6 @@ export function FriendLocationCard({
 
     const decorationHover = useDecorationHover();
     const recentlyOnline = useRecentlyOnline(normalizeString(friend.id));
-    const decorationActive = decorationHover.active || recentlyOnline;
     const iconFrameId = showAvatarFrame ? friend.iconFrame?.trim() : '';
     const nameplateId = showNameplate ? friend.nameplateEffect?.trim() : '';
     const avatarUrl = userImage(friend);
@@ -199,6 +199,8 @@ export function FriendLocationCard({
         : presenceTravelingTag(presence) || undefined;
     const isTraveling =
         travelingValue !== undefined && locationValue === 'traveling';
+    const decorationActive =
+        decorationHover.active || recentlyOnline || isTraveling;
     const resolvedDensityConfig = densityConfig || DEFAULT_CARD_DENSITY_CONFIG;
     const isDense = resolvedDensityConfig.layout === 'item';
     const resolvedWorldActionLabel =
@@ -253,7 +255,7 @@ export function FriendLocationCard({
                 {iconFrameId ? (
                     <ProfileAvatarFrame
                         templateId={iconFrameId}
-                        active={decorationActive || isTraveling}
+                        active={decorationActive}
                     />
                 ) : null}
                 <UserStatusDot
@@ -326,18 +328,19 @@ export function FriendLocationCard({
             onKeyDown={(event) => event.stopPropagation()}
         >
             <DropdownMenu>
-                <DropdownMenuTrigger
-                    render={
-                        <Button
-                            type="button"
-                            size="icon-xs"
-                            variant="secondary"
-                            aria-label={t('accessibility.more')}
-                        >
-                            <MoreHorizontalIcon />
-                        </Button>
-                    }
-                />
+                <HintTooltip label={t('accessibility.more')}>
+                    <DropdownMenuTrigger
+                        render={
+                            <Button
+                                type="button"
+                                size="icon-xs"
+                                variant="secondary"
+                            >
+                                <MoreHorizontalIcon />
+                            </Button>
+                        }
+                    />
+                </HintTooltip>
                 <DropdownMenuContent align="end" className="w-56">
                     <DropdownMenuGroup>
                         <DropdownMenuItem

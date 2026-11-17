@@ -1,14 +1,14 @@
 use futures_util::future::BoxFuture;
 
 use serde::Serialize;
-use vrcx_0_application_core::vrchat_api::VrchatApiResponse as HttpApiExecuteResponse;
-use vrcx_0_contracts::vrchat_login::VrchatLoginFailureKind;
+use vrcx_0_contracts::vrchat_api::VrchatResponse;
 pub use vrcx_0_core::TwoFactorMethod;
+use vrcx_0_vrchat_protocol::auth::login::VrchatLoginFailureKind;
 
 use crate::auth::{AuthenticatedRuntimeSession, SavedAuthSnapshot};
 use vrcx_0_application_core::Result;
 
-pub type LoginApiFuture<'a> = BoxFuture<'a, Result<HttpApiExecuteResponse>>;
+pub type LoginApiFuture<'a> = BoxFuture<'a, Result<VrchatResponse>>;
 
 pub enum LoginRemoteOperation {
     Config {
@@ -34,6 +34,13 @@ pub enum LoginRemoteOperation {
         endpoint: String,
         code: String,
     },
+    DeviceCode {
+        endpoint: String,
+    },
+    DeviceStatus {
+        endpoint: String,
+        device_code: String,
+    },
 }
 
 pub trait LoginApi: Send + Sync {
@@ -56,6 +63,8 @@ pub enum LoginFailureKind {
     MissingCredentials,
     SessionInvalidated,
     TwoFactorUnavailable,
+    DeviceCodeExpired,
+    DeviceDenied,
     Network,
     Other,
 }
@@ -88,6 +97,14 @@ pub enum LoginSessionState {
         #[specta(type = String)]
         mode: TwoFactorMethod,
         error: Option<String>,
+    },
+    DeviceApproval {
+        #[serde(rename = "attemptId")]
+        attempt_id: String,
+        #[serde(rename = "verificationUrl")]
+        verification_url: String,
+        #[serde(rename = "expiresAt")]
+        expires_at: i64,
     },
     Failed {
         reason: String,

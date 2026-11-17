@@ -10,6 +10,7 @@ import type {
     SearchActiveTab,
     SearchAvatarResult,
     SearchGroupResult,
+    SearchPageTab,
     SearchUserResult,
     SearchWorldResult,
     UserSearchRequest,
@@ -17,9 +18,8 @@ import type {
 } from './searchTypes';
 
 interface SearchPageState {
-    activeTab: SearchActiveTab;
+    activeTab: SearchPageTab;
     searchText: string;
-    searchUserByBio: boolean;
     searchUserSortByLastLoggedIn: boolean;
     selectedWorldCategory: string;
     includeCommunityLabs: boolean;
@@ -40,9 +40,8 @@ interface SearchPageState {
 
 function createSearchPageState(): SearchPageState {
     return {
-        activeTab: 'user',
+        activeTab: 'hot',
         searchText: '',
-        searchUserByBio: false,
         searchUserSortByLastLoggedIn: false,
         selectedWorldCategory: '',
         includeCommunityLabs: false,

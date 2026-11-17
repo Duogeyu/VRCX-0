@@ -10,14 +10,12 @@ use vrcx_0_application::social::{
     AvatarProviderConfig, AvatarReleaseStatus, UserDialogCountPage, UserDialogFavoriteGroupPage,
     UserDialogTabCountsFuture, UserDialogTabCountsSource, DEFAULT_AVATAR_PROVIDER,
 };
-use vrcx_0_application_core::{
-    vrchat_api::{VrchatApiRequest, VrchatScope},
-    Error, Result, WebClient,
-};
+use vrcx_0_application_core::{Error, Result, WebClient};
+use vrcx_0_contracts::vrchat_api::{VrchatRequest, VrchatScope};
 use vrcx_0_contracts::VrchatJsonResponse;
 use vrcx_0_integrations::external_api::{self, ExternalApiScope};
 use vrcx_0_persistence::{config, DatabaseService};
-use vrcx_0_vrchat_client::{
+use vrcx_0_vrchat_protocol::{
     avatars::{avatar_list_by_user_get_input, AvatarListByUserGetInput},
     favorites::{favorite_groups_get_input, favorite_worlds_get_input},
     groups::user_groups_get_input,
@@ -41,11 +39,7 @@ impl LocalUserDialogTabCountsSource {
         Self { db, web }
     }
 
-    async fn execute_vrchat_payload(
-        &self,
-        request: VrchatApiRequest,
-        source: &str,
-    ) -> Result<String> {
+    async fn execute_vrchat_payload(&self, request: VrchatRequest, source: &str) -> Result<String> {
         let response = self.web.execute_api(request, VrchatScope::Vrchat).await?;
         validate_vrchat_payload(response.status, &response.data, source)?;
         Ok(response.data)
@@ -55,17 +49,14 @@ impl LocalUserDialogTabCountsSource {
 impl UserDialogTabCountsSource for LocalUserDialogTabCountsSource {
     fn avatar_provider_config(&self) -> Result<AvatarProviderConfig> {
         Ok(AvatarProviderConfig {
-            enabled: config::get_bool(&self.db, AVATAR_PROVIDER_ENABLED_KEY, true)
-                .map_err(crate::map_persistence_error)?,
+            enabled: config::get_bool(&self.db, AVATAR_PROVIDER_ENABLED_KEY, true)?,
             providers: config::get_json(
                 &self.db,
                 AVATAR_PROVIDER_LIST_KEY,
                 serde_json::json!([DEFAULT_AVATAR_PROVIDER]),
-            )
-            .map_err(crate::map_persistence_error)?
+            )?
             .into(),
-            selected: config::get_string(&self.db, AVATAR_PROVIDER_SELECTED_KEY, "")
-                .map_err(crate::map_persistence_error)?,
+            selected: config::get_string(&self.db, AVATAR_PROVIDER_SELECTED_KEY, "")?,
         })
     }
 
@@ -206,14 +197,12 @@ impl UserDialogTabCountsSource for LocalUserDialogTabCountsSource {
                 query.append_pair("n", "5000");
             }
 
-            let mut vrcx_id = config::get_string(&self.db, VRCX_ID_KEY, "")
-                .map_err(crate::map_persistence_error)?
+            let mut vrcx_id = config::get_string(&self.db, VRCX_ID_KEY, "")?
                 .trim()
                 .to_string();
             if vrcx_id.is_empty() {
                 vrcx_id = Uuid::new_v4().to_string();
-                config::set_string(&self.db, VRCX_ID_KEY, &vrcx_id)
-                    .map_err(crate::map_persistence_error)?;
+                config::set_string(&self.db, VRCX_ID_KEY, &vrcx_id)?;
             }
             let input = external_api::avatar_search_get_input(url.as_str(), &vrcx_id);
             let request =

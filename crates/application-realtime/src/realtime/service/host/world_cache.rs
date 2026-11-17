@@ -75,7 +75,7 @@ impl RealtimeHostRuntime {
             self.deps.tasks.spawn(async move {
                 let world_name = runtime
                     .world_cache
-                    .resolve_name(&runtime.deps.web, &endpoint, &world_id)
+                    .resolve_name(&endpoint, &world_id)
                     .await
                     .filter(|name| is_meaningful_world_name(name));
                 runtime.resolve_pending_world_corrections(&world_id, world_name.as_deref());
@@ -123,12 +123,10 @@ impl RealtimeHostRuntime {
             self.emit_feed_patch(entry.id, fields);
             return;
         }
-        self.deps
-            .event_bus
-            .emit_realtime_entry_correction(RealtimeEntryCorrection {
-                stream: entry.stream,
-                id: entry.id,
-                fields,
-            });
+        self.deps.event_bus.emit(RealtimeEntryCorrection {
+            stream: entry.stream,
+            id: entry.id,
+            fields,
+        });
     }
 }

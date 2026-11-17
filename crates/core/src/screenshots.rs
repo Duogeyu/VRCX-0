@@ -99,6 +99,203 @@ pub struct FavoriteScreenshots {
     pub missing_count: u32,
 }
 
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ScreenshotPeopleMatch {
+    #[default]
+    All,
+    Any,
+}
+
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotFilter {
+    #[serde(default)]
+    pub people: Vec<String>,
+    #[serde(default)]
+    pub people_match: ScreenshotPeopleMatch,
+    #[serde(default)]
+    pub world_ids: Vec<String>,
+    #[serde(default)]
+    pub from_ms: Option<i64>,
+    #[serde(default)]
+    pub to_ms: Option<i64>,
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotQueryResult {
+    pub total: i64,
+    pub without_people: i64,
+    pub images: Vec<ScreenshotLibraryImage>,
+}
+
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotFacet {
+    pub id: String,
+    pub name: String,
+    pub count: i64,
+    pub last_captured_at_ms: i64,
+    pub cover_path: String,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ScreenshotShareCompression {
+    #[default]
+    High,
+    Standard,
+    Original,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareFields {
+    pub world: bool,
+    pub time: bool,
+    pub player_count: bool,
+    pub people: bool,
+    pub stay: bool,
+    pub spoiler: bool,
+    pub metadata: bool,
+    pub compression: ScreenshotShareCompression,
+    pub print: bool,
+}
+
+impl Default for ScreenshotShareFields {
+    fn default() -> Self {
+        Self {
+            world: true,
+            time: true,
+            player_count: true,
+            people: false,
+            stay: false,
+            spoiler: false,
+            metadata: false,
+            compression: ScreenshotShareCompression::High,
+            print: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareTarget {
+    pub id: String,
+    pub name: String,
+    pub url_hint: String,
+    pub fields: ScreenshotShareFields,
+    pub quick: bool,
+    pub invalid: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareTargetInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub url: Option<String>,
+    pub fields: ScreenshotShareFields,
+    pub quick: bool,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareProgress {
+    pub running: bool,
+    pub processed_files: u32,
+    pub total_files: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotStay {
+    pub ms: i64,
+    pub ongoing: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareFacts {
+    pub path: String,
+    pub world_id: Option<String>,
+    pub world_name: Option<String>,
+    pub world_author_name: Option<String>,
+    pub author_name: Option<String>,
+    pub captured_at_ms: i64,
+    pub people: Vec<String>,
+    pub player_count: Option<i64>,
+    pub stay: Option<ScreenshotStay>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareEmbedField {
+    pub name: String,
+    pub value: String,
+    pub inline: bool,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareEmbed {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub timestamp: Option<String>,
+    pub fields: Vec<ScreenshotShareEmbedField>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareMessage {
+    pub paths: Vec<String>,
+    pub content: String,
+    pub embed: Option<ScreenshotShareEmbed>,
+    pub spoiler: bool,
+    pub metadata: bool,
+    pub compression: ScreenshotShareCompression,
+    pub print_captions: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotPrintInput {
+    pub path: String,
+    pub caption: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareRecord {
+    pub id: String,
+    pub target_id: String,
+    pub target_name: String,
+    pub message_url: Option<String>,
+    pub sent_at: String,
+    pub file_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotShareSendResult {
+    pub records: Vec<ScreenshotShareRecord>,
+    pub error: Option<String>,
+    pub target_invalid: bool,
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotTimeWindow {
@@ -144,37 +341,6 @@ pub struct PlayerDetail {
     pub pos: Option<[f32; 3]>,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ScreenshotSearchResult {
-    pub file_path: String,
-    pub file_name: String,
-    pub file_size_bytes: i64,
-    pub creation_date: Option<String>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
-    pub metadata: ScreenshotMetadata,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScreenshotSearchType {
-    Username = 0,
-    UserId = 1,
-    WorldName = 2,
-    WorldId = 3,
-}
-
-impl ScreenshotSearchType {
-    pub fn from_i32(value: i32) -> Self {
-        match value {
-            1 => Self::UserId,
-            2 => Self::WorldName,
-            3 => Self::WorldId,
-            _ => Self::Username,
-        }
-    }
-}
-
 impl ScreenshotMetadata {
     pub fn just_error(source_file: &str, error: &str) -> Self {
         Self {
@@ -182,16 +348,6 @@ impl ScreenshotMetadata {
             error: Some(error.into()),
             ..Default::default()
         }
-    }
-
-    pub fn contains_player_id(&self, id: &str) -> bool {
-        self.players.iter().any(|p| p.id == id)
-    }
-
-    pub fn contains_player_name_lowercase(&self, lowercase_name: &str) -> bool {
-        self.players.iter().any(|p| {
-            crate::text::contains_lowercase_query_case_insensitive(&p.display_name, lowercase_name)
-        })
     }
 }
 

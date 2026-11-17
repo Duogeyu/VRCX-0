@@ -15,10 +15,11 @@ import {
     DATA_TABLE_METADATA_CELL_CLASS_NAME,
     DATA_TABLE_PRIMARY_CELL_CLASS_NAME
 } from '@/components/data-table/DataTableView';
-import { formatDateFilter } from '@/lib/dateTime';
+import { TimestampText } from '@/components/data-table/TimestampText';
 import { openWorldDialog } from '@/services/dialogService';
 import { openExternalLink } from '@/services/entityMediaService';
 import { openGameLogUser } from '@/services/gameLogUserDialogService';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Button } from '@/ui/shadcn/button';
 import { Spinner } from '@/ui/shadcn/spinner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
@@ -53,20 +54,11 @@ type UseGameLogColumnsOptions = {
 };
 
 function DateCell({ row }: { row: AppRow<GameLogRow> }) {
-    const createdAt = row.original?.created_at || '';
     return (
-        <Tooltip>
-            <TooltipTrigger
-                render={
-                    <span className="text-sm">
-                        {formatDateFilter(createdAt, 'short')}
-                    </span>
-                }
-            />
-            <TooltipContent>
-                {formatDateFilter(createdAt, 'long')}
-            </TooltipContent>
-        </Tooltip>
+        <TimestampText
+            value={row.original?.created_at || ''}
+            className="text-sm"
+        />
     );
 }
 
@@ -97,6 +89,7 @@ export function useGameLogColumns({
                 size: 140,
                 accessorFn: (row: GameLogRow) => row?.created_at || '',
                 meta: {
+                    label: t('table.gameLog.date'),
                     tableCellClassName: DATA_TABLE_METADATA_CELL_CLASS_NAME
                 },
                 header: ({ column }) => (
@@ -111,6 +104,7 @@ export function useGameLogColumns({
                 id: 'type',
                 size: 150,
                 accessorFn: (row: GameLogRow) => row?.type || '',
+                meta: { label: t('table.gameLog.type') },
                 header: ({ column }) => (
                     <SortButton
                         column={column}
@@ -164,6 +158,7 @@ export function useGameLogColumns({
                     row?.displayName || row?.userId || '',
                 enableSorting: false,
                 meta: {
+                    label: t('table.gameLog.user'),
                     tableCellClassName: DATA_TABLE_PRIMARY_CELL_CLASS_NAME
                 },
                 header: () => t('table.gameLog.user'),
@@ -208,7 +203,7 @@ export function useGameLogColumns({
             {
                 id: 'detail',
                 minSize: 150,
-                meta: { stretch: true },
+                meta: { label: t('table.gameLog.detail'), stretch: true },
                 accessorFn: (row: GameLogRow) => {
                     const detailValue = describeGameLogDetail(row);
                     return [detailValue.primary, detailValue.secondary]
@@ -358,6 +353,7 @@ export function useGameLogColumns({
                 maxSize: 90,
                 enableResizing: false,
                 meta: {
+                    label: t('table.gameLog.action'),
                     tableCellClassName: DATA_TABLE_CONTROL_CELL_CLASS_NAME
                 },
                 header: () => t('table.gameLog.action'),
@@ -377,56 +373,62 @@ export function useGameLogColumns({
                     return (
                         <div className="flex items-center justify-end gap-2">
                             {canDelete ? (
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    aria-label={t(
-                                        'view.game_log.modal.delete_game_log_row'
-                                    )}
-                                    className="text-muted-foreground hover:text-destructive size-6 p-0"
-                                    disabled={deletingGameLogKey === rowKey}
-                                    onClick={(event) => {
-                                        onDeleteRow(row.original, {
-                                            skipConfirm:
-                                                shiftHeld || event.shiftKey
-                                        });
-                                    }}
-                                >
-                                    {deletingGameLogKey === rowKey ? (
-                                        <Spinner data-icon="inline-start" />
-                                    ) : shiftHeld ? (
-                                        <XIcon
-                                            data-icon="inline-start"
-                                            className="text-destructive"
-                                        />
-                                    ) : (
-                                        <Trash2Icon data-icon="inline-start" />
-                                    )}
-                                </Button>
+                                <HintTooltip label={t('common.actions.delete')}>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="text-muted-foreground hover:text-destructive size-6 p-0"
+                                        disabled={deletingGameLogKey === rowKey}
+                                        onClick={(event) => {
+                                            onDeleteRow(row.original, {
+                                                skipConfirm:
+                                                    shiftHeld || event.shiftKey
+                                            });
+                                        }}
+                                    >
+                                        {deletingGameLogKey === rowKey ? (
+                                            <Spinner data-icon="inline-start" />
+                                        ) : shiftHeld ? (
+                                            <XIcon
+                                                data-icon="inline-start"
+                                                className="text-destructive"
+                                            />
+                                        ) : (
+                                            <Trash2Icon data-icon="inline-start" />
+                                        )}
+                                    </Button>
+                                </HintTooltip>
                             ) : null}
                             {canShowPrevious ? (
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    aria-label={t(
+                                <HintTooltip
+                                    label={t(
                                         'view.game_log.action.show_instance_history'
                                     )}
-                                    className="text-muted-foreground hover:text-foreground size-6 p-0"
-                                    disabled={
-                                        loadingPreviousInstancesKey === rowKey
-                                    }
-                                    onClick={() => {
-                                        onOpenPreviousInstances(row.original);
-                                    }}
                                 >
-                                    {loadingPreviousInstancesKey === rowKey ? (
-                                        <Spinner data-icon="inline-start" />
-                                    ) : (
-                                        <FileTextIcon data-icon="inline-start" />
-                                    )}
-                                </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="text-muted-foreground hover:text-foreground size-6 p-0"
+                                        disabled={
+                                            loadingPreviousInstancesKey ===
+                                            rowKey
+                                        }
+                                        onClick={() => {
+                                            onOpenPreviousInstances(
+                                                row.original
+                                            );
+                                        }}
+                                    >
+                                        {loadingPreviousInstancesKey ===
+                                        rowKey ? (
+                                            <Spinner data-icon="inline-start" />
+                                        ) : (
+                                            <FileTextIcon data-icon="inline-start" />
+                                        )}
+                                    </Button>
+                                </HintTooltip>
                             ) : null}
                         </div>
                     );

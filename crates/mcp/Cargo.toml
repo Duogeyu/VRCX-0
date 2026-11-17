@@ -7,12 +7,15 @@ description = "Local MCP server"
 
 [dependencies]
 axum = "0.8"
+base64 = { workspace = true }
 chrono = { workspace = true }
 compact_str = { workspace = true }
 getrandom = "0.4"
 http-body = "1"
-rmcp = { version = "=3.5.1", features = [
+percent-encoding = { workspace = true }
+rmcp = { version = "=3.9.0", features = [
     "client",
+    "elicitation",
     "server",
     "macros",
     "schemars",

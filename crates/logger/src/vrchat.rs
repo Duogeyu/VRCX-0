@@ -1,31 +1,38 @@
 use std::time::Duration;
 
-use serde_json::{json, Value};
-use vrcx_0_contracts::vrchat_api::{vrchat_response, VrchatResponse};
-use vrcx_0_contracts::vrchat_login::{
+use serde_json::Value;
+use vrcx_0_contracts::vrchat_api::VrchatRequest;
+use vrcx_0_contracts::vrchat_api::{vrchat_response, VrchatResponse, VrchatScope};
+use vrcx_0_core::json::JsonExt;
+use vrcx_0_core::vrchat_endpoints::{
+    VRCHAT_API_DEFAULT_ENDPOINT, VRCHAT_WEBSOCKET_DEFAULT_ENDPOINT,
+};
+use vrcx_0_core::TwoFactorMethod;
+use vrcx_0_logger_protocol::wire::SnapshotPayload;
+use vrcx_0_vrchat_client::realtime::{
+    auth_token_from_response, build_transport_url, connect_websocket, Error as RealtimeError,
+    RealtimeConnectionOptions, RealtimeWebSocketStream,
+};
+use vrcx_0_vrchat_client::web_client::WebClient;
+use vrcx_0_vrchat_protocol::auth::device_login::{
+    interpret_device_code_response, interpret_device_status_response, VrchatDeviceAuthorization,
+    VrchatDeviceStatus,
+};
+use vrcx_0_vrchat_protocol::auth::login::{
     interpret_cookie_probe_config_response, interpret_cookie_probe_current_user_response,
     interpret_login_config_response, interpret_login_response,
     interpret_two_factor_current_user_response, interpret_two_factor_verify_response,
     unsupported_two_factor_method, CookieProbeResult, VrchatLoginFailureKind, VrchatLoginStep,
     VrchatTwoFactorVerifyOutcome,
 };
-use vrcx_0_core::json::JsonExt;
-use vrcx_0_core::vrchat_endpoints::{
-    VRCHAT_API_DEFAULT_ENDPOINT, VRCHAT_WEBSOCKET_DEFAULT_ENDPOINT,
+use vrcx_0_vrchat_protocol::auth::{
+    config_get_input, current_user_get_input, device_code_input, device_status_input,
+    email_otp_verify_input, login_basic_input, logout_input, otp_verify_input, session_get_input,
+    totp_verify_input,
 };
-use vrcx_0_core::TwoFactorMethod;
-use vrcx_0_vrchat_client::auth::{
-    config_get_input, current_user_get_input, email_otp_verify_input, login_basic_input,
-    otp_verify_input, session_get_input, totp_verify_input,
-};
-use vrcx_0_vrchat_client::friends::friends_get_input;
-use vrcx_0_vrchat_client::http_api::{build_web_execute_request, ApiScope, HttpApiRequestInput};
-use vrcx_0_vrchat_client::realtime::{
-    auth_token_from_response, build_transport_url, connect_websocket, Error as RealtimeError,
-    RealtimeConnectionOptions, RealtimeWebSocketStream,
-};
-use vrcx_0_vrchat_client::users::profile_get_input;
-use vrcx_0_vrchat_client::web_client::WebClient;
+use vrcx_0_vrchat_protocol::friends::friends_get_input;
+use vrcx_0_vrchat_protocol::http_api::build_web_execute_request;
+use vrcx_0_vrchat_protocol::users::profile_get_input;
 
 use crate::app::LOGGER_VERSION;
 
@@ -155,6 +162,46 @@ impl Vrchat {
         )))
     }
 
+    pub async fn request_device_authorization(&self) -> Result<VrchatDeviceAuthorization, String> {
+        let config = self.execute(config_get_input(ENDPOINT.into())).await;
+        match transport_outcome(&config) {
+            Some(LoginOutcome::Network { reason }) => return Err(reason),
+            Some(LoginOutcome::RateLimited) => {
+                return Err("VRChat is rate limiting logins; try again later".into())
+            }
+            _ => {}
+        }
+        if let Some(VrchatLoginStep::Failed { reason, .. }) =
+            interpret_login_config_response(&config)
+        {
+            return Err(reason);
+        }
+        let response = self.execute(device_code_input(ENDPOINT.into())).await;
+        if response.status == NETWORK_STATUS {
+            return Err(response.data);
+        }
+        interpret_device_code_response(&response)
+    }
+
+    pub async fn device_status(&self, device_code: String) -> Option<VrchatDeviceStatus> {
+        let response = self
+            .execute(device_status_input(ENDPOINT.into(), device_code))
+            .await;
+        (response.status != NETWORK_STATUS).then(|| interpret_device_status_response(&response))
+    }
+
+    pub async fn logout(&self) {
+        self.execute(logout_input(ENDPOINT.into())).await;
+    }
+
+    pub async fn complete_device_login(&self) -> LoginOutcome {
+        let response = self.execute(current_user_get_input(ENDPOINT.into())).await;
+        if let Some(outcome) = transport_outcome(&response) {
+            return outcome;
+        }
+        login_outcome(interpret_login_response(&response))
+    }
+
     pub async fn probe(&self, expected_account_id: &str) -> ProbeOutcome {
         let config = self.execute(config_get_input(ENDPOINT.into())).await;
         if config.status == NETWORK_STATUS {
@@ -208,7 +255,7 @@ impl Vrchat {
         })
     }
 
-    pub async fn snapshot(&self) -> Result<Value, String> {
+    pub async fn snapshot(&self) -> Result<SnapshotPayload, String> {
         let user = self.execute(current_user_get_input(ENDPOINT.into())).await;
         if user.status != 200 {
             return Err(format!("current user request failed ({})", user.status));
@@ -217,11 +264,12 @@ impl Vrchat {
             .map_err(|error| format!("current user response: {error}"))?;
         let online_friends = self.friends(false).await?;
         let offline_friends = self.friends(true).await?;
-        Ok(json!({
-            "currentUser": current_user,
-            "onlineFriends": online_friends,
-            "offlineFriends": offline_friends,
-        }))
+        Ok(SnapshotPayload {
+            after_seq: None,
+            current_user,
+            online_friends,
+            offline_friends,
+        })
     }
 
     pub async fn profile(&self, user_id: &str) -> VrchatResponse {
@@ -271,15 +319,15 @@ impl Vrchat {
         Err("friends request kept being rate limited".into())
     }
 
-    async fn execute(&self, input: HttpApiRequestInput) -> VrchatResponse {
-        match build_web_execute_request(input, ApiScope::Vrchat) {
+    async fn execute(&self, input: VrchatRequest) -> VrchatResponse {
+        match build_web_execute_request(input, VrchatScope::Vrchat) {
             Ok(request) => response(self.web.execute(request).await),
             Err(error) => network_failure(error),
         }
     }
 
-    async fn execute_fresh(&self, input: HttpApiRequestInput) -> VrchatResponse {
-        match build_web_execute_request(input, ApiScope::Vrchat) {
+    async fn execute_fresh(&self, input: VrchatRequest) -> VrchatResponse {
+        match build_web_execute_request(input, VrchatScope::Vrchat) {
             Ok(request) => response(self.web.execute_fresh_standard(request).await),
             Err(error) => network_failure(error),
         }
@@ -353,7 +401,8 @@ fn probe_outcome(result: CookieProbeResult) -> ProbeOutcome {
 
 #[cfg(test)]
 mod tests {
-    use vrcx_0_contracts::vrchat_login::CookieProbeStage;
+    use serde_json::json;
+    use vrcx_0_vrchat_protocol::auth::login::CookieProbeStage;
 
     use super::*;
 

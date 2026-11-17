@@ -1,6 +1,6 @@
 <div align="center">
 
-# <img src="images/VRCX-0.png" alt="VRCX-0 Logo" width="25"> VRCX-0-Galaxies
+# <img src="images/brand/VRCX-0.png" alt="VRCX-0 Logo" width="25"> VRCX-0-Galaxies
 
 ### VRCX-0 포크: 더 빠르고 가벼우며 星遇同频 통합.
 
@@ -19,7 +19,7 @@
 
 Windows · macOS · Linux
 
-![VRCX-0](images/screenshot-user-dialog.webp)
+![VRCX-0](images/screenshots/user-dialog.webp)
 
 </div>
 
@@ -68,13 +68,13 @@ Authenticode 코드 서명이 포함된 자체 릴리스 파이프라인을 운�
 | **소셜 자동화** | 혼자 여부에 따라 상태 전환; 참가 요청 자동 응답  | + 시간 규칙, 우선순위가 있는 여러 상황 규칙, 종료 시 이전 상태로 복원                  |
 | **알림**        | 데스크톱·TTS·XSOverlay·OVR Toolkit·손목 오버레이 | + 데스크톱 오버레이, Discord 호환 Webhook, 방해 금지 모드; 모든 채널에서 이벤트별 필터 |
 | **VR 오버레이** | 브라우저 렌더링(100 MB 이상); OpenVR             | + 네이티브 렌더링(수십 MB); OpenXR(**WiVRn에서 실기기 테스트 완료**)                   |
-| 스크린샷        | 메타데이터 보기·검색                             | + 그리드 보기, 일괄 관리, ZIP 내보내기                                                 |
+| 스크린샷        | 메타데이터 보기·검색                             | + 그리드 보기, 즐겨찾기, 일괄 관리, ZIP 내보내기                                       |
 | 아바타 상세     | 성능 등급과 파일 크기                            | + 상세 성능 지표를 플랫폼별 상한과 비교                                                |
 | 백업            | VRChat 레지스트리 설정                           | + 데이터베이스 정기 백업, 원클릭 복원                                                  |
 | 친구 위치       | 같은 인스턴스별로 묶어 표시                      | + 월드 보기                                                                            |
 | 그룹 관리       | 공개 설정은 하나씩                               | + 일괄 탈퇴·일괄 공개 설정; 플레이어 목록에 그룹 역할 표시                             |
 | 테마            | 내장 테마, 커스텀 CSS 파일                       | + 커뮤니티 테마, 배경 이미지, 앱 내 CSS 편집, 강조색                                   |
-| 게임 로그       | 모든 계정의 기록이 한데 섞임                     | 계정별로 따로 저장                                                                     |
+| 여러 계정       | 모든 계정의 게임 로그가 한데 섞임                | 게임 로그를 계정별로 따로 저장; 다른 계정으로 VRChat을 플레이해도 서로 영향 없음       |
 
 VRCX의 나머지 기능은 VRCX-0에도 그대로 있습니다.
 

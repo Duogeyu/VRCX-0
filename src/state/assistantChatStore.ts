@@ -1,12 +1,14 @@
 import { create } from 'zustand';
 
 import type {
+    AssistantChoiceRequestEvent,
     AssistantDeltaEvent,
     AssistantDoneEvent,
     AssistantErrorEvent,
     AssistantToolCallEvent,
     AssistantToolResultEvent,
     AssistantTurnEntitiesEvent,
+    AssistantDraft,
     Entity,
     SessionSummary,
     UIMessage
@@ -22,7 +24,9 @@ interface AssistantChatState {
     surfacedEntitiesBySession: Record<string, Entity[]>;
     entityPanelOpenBySession: Record<string, boolean>;
     busySessions: Record<string, boolean>;
+    assistantDraft: AssistantDraft | null;
     setOpen: (open: boolean) => void;
+    startAssistantDraft: (draft: AssistantDraft) => void;
     setEntityPanelOpen: (open: boolean) => void;
     setSessions: (sessions: SessionSummary[]) => void;
     setActiveSession: (sessionId: string | null) => void;
@@ -36,6 +40,12 @@ interface AssistantChatState {
     applyDelta: (event: AssistantDeltaEvent) => void;
     applyToolCall: (event: AssistantToolCallEvent) => void;
     applyToolResult: (event: AssistantToolResultEvent) => void;
+    applyChoiceRequest: (event: AssistantChoiceRequestEvent) => void;
+    resolveChoice: (
+        sessionId: string,
+        choiceId: string,
+        userId: string | null
+    ) => void;
     applyTurnEntities: (event: AssistantTurnEntitiesEvent) => void;
     applyDone: (event: AssistantDoneEvent) => void;
     applyError: (event: AssistantErrorEvent) => void;
@@ -51,6 +61,7 @@ type AssistantChatData = Pick<
     | 'surfacedEntitiesBySession'
     | 'entityPanelOpenBySession'
     | 'busySessions'
+    | 'assistantDraft'
 >;
 
 const initialState: AssistantChatData = {
@@ -61,7 +72,8 @@ const initialState: AssistantChatData = {
     messagesBySession: {},
     surfacedEntitiesBySession: {},
     entityPanelOpenBySession: {},
-    busySessions: {}
+    busySessions: {},
+    assistantDraft: null
 };
 
 function markSessionIdle(
@@ -134,7 +146,8 @@ function foldTranscript(messages: Message[], running: boolean): UIMessage[] {
                     args: message.toolCall.arguments,
                     status: 'pending',
                     summary: '',
-                    entities: []
+                    entities: [],
+                    charts: []
                 });
                 break;
             case 'tool_result': {
@@ -148,7 +161,9 @@ function foldTranscript(messages: Message[], running: boolean): UIMessage[] {
                               ...call,
                               status: result.ok ? 'done' : 'error',
                               summary: result.summary,
-                              entities: result.entities
+                              entities: result.entities,
+                              charts: result.charts ?? [],
+                              screenshots: result.screenshots
                           }
                         : call
                 );
@@ -240,6 +255,9 @@ function withAssistantMessage(
 export const useAssistantChatStore = create<AssistantChatState>((set) => ({
     ...initialState,
 
+    startAssistantDraft: (draft) =>
+        set({ open: true, activeSessionId: null, assistantDraft: draft }),
+
     setOpen: (open) =>
         set((state) => {
             if (open) {
@@ -278,7 +296,8 @@ export const useAssistantChatStore = create<AssistantChatState>((set) => ({
                 : {}
         ),
     setSessions: (sessions) => set({ sessions }),
-    setActiveSession: (activeSessionId) => set({ activeSessionId }),
+    setActiveSession: (activeSessionId) =>
+        set({ activeSessionId, assistantDraft: null }),
     evictSessionData: (sessionId) =>
         set((state) => {
             if (getBusySessionIds(state).has(sessionId)) {
@@ -403,7 +422,8 @@ export const useAssistantChatStore = create<AssistantChatState>((set) => ({
                             args: event.args,
                             status: 'pending',
                             summary: '',
-                            entities: []
+                            entities: [],
+                            charts: []
                         }
                     ];
                     return message;
@@ -421,12 +441,57 @@ export const useAssistantChatStore = create<AssistantChatState>((set) => ({
                                   ...call,
                                   status: event.ok ? 'done' : 'error',
                                   summary: event.summary,
-                                  entities: event.entities
+                                  entities: event.entities,
+                                  charts: event.charts,
+                                  screenshots: event.screenshots
                               }
                             : call
                     );
                     return message;
                 })
+            )
+        ),
+
+    applyChoiceRequest: (event) =>
+        set((state) =>
+            updateMessages(state, event.sessionId, (messages) =>
+                withAssistantMessage(messages, event.turnId, (message) => {
+                    message.choices = [
+                        ...(message.choices ?? []),
+                        {
+                            id: event.choiceId,
+                            sessionId: event.sessionId,
+                            query: event.query,
+                            candidates: event.candidates,
+                            status: 'pending'
+                        }
+                    ];
+                    return message;
+                })
+            )
+        ),
+
+    resolveChoice: (sessionId, choiceId, userId) =>
+        set((state) =>
+            updateMessages(state, sessionId, (messages) =>
+                messages.map((message) =>
+                    message.choices?.some((choice) => choice.id === choiceId)
+                        ? {
+                              ...message,
+                              choices: message.choices.map((choice) =>
+                                  choice.id === choiceId
+                                      ? {
+                                            ...choice,
+                                            status: userId
+                                                ? 'picked'
+                                                : 'skipped',
+                                            pickedUserId: userId ?? undefined
+                                        }
+                                      : choice
+                              )
+                          }
+                        : message
+                )
             )
         ),
 

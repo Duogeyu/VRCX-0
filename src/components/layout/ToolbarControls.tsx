@@ -12,6 +12,7 @@ import {
 import { Fragment, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { isImeComposing } from '@/components/keyboard/keyboardShortcutGuards';
 import { cn } from '@/lib/utils';
 import { Button } from '@/ui/shadcn/button';
 import {
@@ -111,7 +112,10 @@ export function ToolbarSearch({
                 onChange={(event) => onValueChange(event.target.value)}
                 onBlur={commitOnBlur ? onCommit : undefined}
                 onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
+                    if (
+                        event.key === 'Enter' &&
+                        !isImeComposing(event.nativeEvent)
+                    ) {
                         onCommit?.();
                     }
                 }}
@@ -148,6 +152,7 @@ export type ToolbarSegmentOption<TValue extends string> = {
     label: string;
     count?: number;
     icon?: LucideIcon;
+    dimmed?: boolean;
 };
 
 export function ToolbarTabs<TValue extends string>({
@@ -160,7 +165,14 @@ export function ToolbarTabs<TValue extends string>({
             {options.map((option) => {
                 const Icon = option.icon;
                 return (
-                    <TabsTrigger key={option.value} value={option.value}>
+                    <TabsTrigger
+                        key={option.value}
+                        value={option.value}
+                        className={cn(
+                            option.dimmed &&
+                                'not-data-active:not-hover:opacity-50'
+                        )}
+                    >
                         {Icon ? <Icon data-icon="inline-start" /> : null}
                         {option.label}
                         {option.count === undefined ? null : (

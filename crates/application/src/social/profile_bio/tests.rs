@@ -3,13 +3,13 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use vrcx_0_application_core::vrchat_api::{VrchatApiRequest, VrchatApiResponse, VrchatScope};
 use vrcx_0_application_core::{CallRecorder, Result, ScriptedResults};
 use vrcx_0_application_realtime::test_support::{
     feed_lookup_input, runtime_with_active_session, seed_friend_baseline, TestDir,
     TestRealtimeHostRuntime,
 };
 use vrcx_0_contracts::feed::{FeedFilter, FeedRowOutput, FeedRowsQueryInput};
+use vrcx_0_contracts::vrchat_api::{VrchatRequest, VrchatResponse, VrchatScope};
 use vrcx_0_core::OwnerId;
 
 use crate::remote::{VrchatRequestFuture, VrchatRequestPort};
@@ -65,38 +65,31 @@ impl ProfileBioStore for MemoryProfileBioStore {
     }
 }
 
-struct ProfileRequests;
-
-impl ProfileBioRemoteRequests for ProfileRequests {
-    fn profile(&self, endpoint: String, user_id: String) -> Result<VrchatApiRequest> {
-        Ok(VrchatApiRequest {
-            path: Some(format!("{endpoint} profile/{user_id}")),
-            ..VrchatApiRequest::default()
-        })
-    }
-}
-
 struct ScriptedRequestPort {
-    responses: ScriptedResults<VrchatApiResponse>,
+    responses: ScriptedResults<VrchatResponse>,
     requests: CallRecorder<String>,
 }
 
 impl VrchatRequestPort for ScriptedRequestPort {
-    fn send(&self, input: VrchatApiRequest, _scope: VrchatScope) -> VrchatRequestFuture<'_> {
-        self.requests.record(input.path.unwrap_or_default());
+    fn send(&self, input: VrchatRequest, _scope: VrchatScope) -> VrchatRequestFuture<'_> {
+        self.requests.record(format!(
+            "{} {}",
+            input.endpoint.unwrap_or_default(),
+            input.path.unwrap_or_default()
+        ));
         let response = self.responses.next();
         Box::pin(async move { Ok(response) })
     }
 }
 
-fn response(status: i32, body: serde_json::Value) -> VrchatApiResponse {
-    VrchatApiResponse {
+fn response(status: i32, body: serde_json::Value) -> VrchatResponse {
+    VrchatResponse {
         status,
         data: body.to_string(),
     }
 }
 
-fn profile_response(user_id: &str, bio: &str) -> VrchatApiResponse {
+fn profile_response(user_id: &str, bio: &str) -> VrchatResponse {
     response(
         200,
         json!({ "id": user_id, "displayName": "Friend", "bio": bio }),
@@ -108,6 +101,7 @@ fn observation(bio: &str) -> ProfileBioObservation {
         user_id: "usr_friend".into(),
         display_name: "Friend".into(),
         bio: bio.into(),
+        bio_links: Vec::new(),
     }
 }
 
@@ -141,7 +135,20 @@ fn observation_parses_profiles_and_rejects_payloads_without_a_bio() {
             user_id: "usr_friend".into(),
             display_name: String::new(),
             bio: String::new(),
+            bio_links: Vec::new(),
         })
+    );
+    assert_eq!(
+        ProfileBioObservation::from_profile(&json!({
+            "id": "usr_friend",
+            "bio": "hello",
+            "bioLinks": [" https://a.example ", "", 3, "https://b.example"]
+        }))
+        .map(|observation| observation.bio_links),
+        Some(vec![
+            "https://a.example".to_string(),
+            "https://b.example".to_string()
+        ])
     );
     assert!(ProfileBioObservation::from_profile(&json!({ "id": "usr_friend" })).is_none());
     assert!(ProfileBioObservation::from_profile(&json!({ "id": "grp_x", "bio": "b" })).is_none());
@@ -165,6 +172,7 @@ fn first_observation_only_records_a_baseline() -> Result<()> {
         store.last_seen(&owner, "usr_friend")?,
         Some(ProfileBioRecord {
             bio: "hello".into(),
+            bio_links: Vec::new(),
             checked_at: "2026-09-18T00:00:00.000Z".into(),
         })
     );
@@ -181,6 +189,7 @@ fn changed_bio_writes_a_feed_row_and_moves_the_baseline() -> Result<()> {
         "usr_friend",
         &ProfileBioRecord {
             bio: "old".into(),
+            bio_links: Vec::new(),
             checked_at: "2026-09-17T00:00:00.000Z".into(),
         },
     )?;
@@ -189,13 +198,20 @@ fn changed_bio_writes_a_feed_row_and_moves_the_baseline() -> Result<()> {
         &store,
         runtime.runtime(),
         &owner,
-        &observation("old"),
+        &ProfileBioObservation {
+            bio_links: vec!["https://a.example".into()],
+            ..observation("old")
+        },
         "2026-09-18T00:00:00.000Z",
     )?;
     assert_eq!(unchanged, ProfileBioOutcome::Unchanged);
     assert_eq!(
-        store.last_seen(&owner, "usr_friend")?.unwrap().checked_at,
-        "2026-09-18T00:00:00.000Z"
+        store.last_seen(&owner, "usr_friend")?,
+        Some(ProfileBioRecord {
+            bio: "old".into(),
+            bio_links: vec!["https://a.example".into()],
+            checked_at: "2026-09-18T00:00:00.000Z".into(),
+        })
     );
     assert!(bio_rows(&runtime, &owner).is_empty());
 
@@ -223,6 +239,7 @@ fn changed_bio_writes_a_feed_row_and_moves_the_baseline() -> Result<()> {
         store.last_seen(&owner, "usr_friend")?,
         Some(ProfileBioRecord {
             bio: "new".into(),
+            bio_links: Vec::new(),
             checked_at: "2026-09-18T01:00:00.000Z".into(),
         })
     );
@@ -236,6 +253,7 @@ fn changed_bio_keeps_the_old_baseline_when_the_feed_cannot_be_published() -> Res
     let store = MemoryProfileBioStore::default();
     let old = ProfileBioRecord {
         bio: "old".into(),
+        bio_links: Vec::new(),
         checked_at: "2026-09-17T00:00:00.000Z".into(),
     };
     store.record(&owner, "usr_friend", &old)?;
@@ -258,7 +276,7 @@ fn profile_responses_are_observed_only_for_current_friends() -> Result<()> {
     let (_dir, runtime, owner) = runtime_with_friend("profile-bio-response")?;
     let store = MemoryProfileBioStore::default();
     let now = "2026-09-18T00:00:00.000Z";
-    let observe = |response: &VrchatApiResponse| {
+    let observe = |response: &VrchatResponse| {
         observe_profile_response(&store, runtime.runtime(), &owner, response, now)
     };
 
@@ -323,7 +341,6 @@ async fn scan_checks_the_next_stale_friend_and_pauses_when_vrchat_pushes_back() 
     let pacer = ProfileBioScanPacer::default();
     let deps = ProfileBioScanDeps {
         store: &store,
-        remote_requests: &ProfileRequests,
         remote: &remote,
         realtime: runtime.runtime(),
         pacer: &pacer,
@@ -353,12 +370,13 @@ async fn scan_checks_the_next_stale_friend_and_pauses_when_vrchat_pushes_back() 
     );
     assert_eq!(
         remote.requests.snapshot(),
-        ["https://api.vrchat.cloud/api/1 profile/usr_friend".to_string()]
+        ["https://api.vrchat.cloud/api/1 profile/usr%5Ffriend".to_string()]
     );
     assert_eq!(
         store.last_seen(&owner, "usr_friend")?,
         Some(ProfileBioRecord {
             bio: "hello".into(),
+            bio_links: Vec::new(),
             checked_at: iso_millis(resumed),
         })
     );
@@ -385,6 +403,7 @@ async fn scan_checks_the_next_stale_friend_and_pauses_when_vrchat_pushes_back() 
         store.last_seen(&owner, "usr_friend")?,
         Some(ProfileBioRecord {
             bio: "hello".into(),
+            bio_links: Vec::new(),
             checked_at: iso_millis(later),
         })
     );

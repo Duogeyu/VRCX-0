@@ -1,3 +1,5 @@
+import type { TFunction } from 'i18next';
+
 import {
     NOTIFICATION_TYPES,
     type NotificationRow
@@ -12,6 +14,7 @@ import {
     isNotificationExpired,
     isUnseenNotification
 } from '@/shared/utils/notificationSeen';
+import { isRecord } from '@/shared/utils/record';
 
 const NOTIFICATION_TYPE_LABEL_PREFIX = 'view.notification.filters.';
 const NOTIFICATION_TYPE_LABEL_KEY_OVERRIDES: Readonly<Record<string, string>> =
@@ -75,7 +78,23 @@ export type NotificationViewModel = {
 
 export type NotificationViewModelOptions = {
     unknownLabel?: string;
+    t: TFunction;
 };
+
+export function getNotificationBodyText(
+    notification: NotificationRow | null | undefined,
+    t: TFunction
+): string {
+    if (notification?.type === 'instance.closed') {
+        return '';
+    }
+    const messageKey = notification?.details?.messageKey;
+    if (typeof messageKey === 'string' && messageKey) {
+        const params = notification?.details?.messageParams;
+        return String(t(messageKey, isRecord(params) ? params : {}));
+    }
+    return text(notification?.message);
+}
 
 const BROADCAST_TYPES = new Set<string>([
     'group.announcement',
@@ -348,8 +367,9 @@ function inviteBody(notification: NotificationRow): string {
 
 export function toNotificationViewModel(
     notification: NotificationRow,
-    { unknownLabel = '' }: NotificationViewModelOptions = {}
+    { unknownLabel = '', t }: NotificationViewModelOptions
 ): NotificationViewModel {
+    const body = getNotificationBodyText(notification, t);
     const type = text(notification.type);
     const base = {
         id: text(notification.id),
@@ -366,7 +386,7 @@ export function toNotificationViewModel(
             template: 'fallback',
             actor,
             headline: '',
-            body: firstText(notification.message, notification.title),
+            body: firstText(body, notification.title),
             context: null,
             emoji: null,
             media: '',
@@ -385,7 +405,7 @@ export function toNotificationViewModel(
                 notification.data?.announcementTitle,
                 notification.data?.title
             ),
-            body: text(notification.message),
+            body,
             context: null,
             emoji: null,
             media: hasBanner ? rawImageUrl(notification) : '',
@@ -416,10 +436,7 @@ export function toNotificationViewModel(
             template: 'compact',
             actor,
             headline: '',
-            body:
-                type === 'boop'
-                    ? boopBody(notification, emoji)
-                    : text(notification.message),
+            body: type === 'boop' ? boopBody(notification, emoji) : body,
             context: buildContext(notification, true),
             emoji,
             media: '',
@@ -437,7 +454,7 @@ export function toNotificationViewModel(
         template: 'compact',
         actor,
         headline: '',
-        body: text(notification.message),
+        body,
         context: buildContext(notification, true),
         emoji: null,
         media: '',

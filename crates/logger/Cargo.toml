@@ -1,6 +1,6 @@
 [package]
 name = "vrcx-0-logger"
-version = "2.33.0"
+version = "2.34.0"
 edition = "2021"
 license.workspace = true
 description = "Self-hosted recorder that keeps VRChat realtime frames while the desktop app is offline"
@@ -33,10 +33,13 @@ vrcx-0-contracts = { path = "../contracts" }
 vrcx-0-core = { path = "../core" }
 vrcx-0-logger-protocol = { path = "../logger-protocol", features = ["server"] }
 vrcx-0-vrchat-client = { path = "../vrchat-client" }
+vrcx-0-vrchat-protocol = { path = "../vrchat-protocol" }
 
 [target.'cfg(windows)'.dependencies]
 getrandom = "0.4"
-slint = { workspace = true, features = ["backend-winit", "software-renderer-systemfonts"] }
+png = "0.18"
+slint ={ workspace = true, features = ["backend-winit", "software-renderer-systemfonts"] }
+tray-icon = { version = "0.26", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [dev-dependencies]

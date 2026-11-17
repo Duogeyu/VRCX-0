@@ -9,19 +9,23 @@ import worldProfileRepository from '@/repositories/worldProfileRepository';
 import { toast } from '@/services/toastService';
 import { isAvatarSearchQueryLongEnough } from '@/shared/utils/avatarSearchQuery';
 
+import {
+    DEFAULT_SEARCH_PAGE_SIZE,
+    type SearchPageSizes
+} from './searchPageSizes';
 import { useSearchPageField, useSearchPageStore } from './searchPageStore';
 import {
     buildAvatarSearchRequest,
     buildGroupSearchRequest,
     buildUserSearchRequest,
-    buildWorldSearchRequest,
-    SEARCH_PAGE_SIZE as PAGE_SIZE
+    buildWorldSearchRequest
 } from './searchRequests';
 import { dedupeById } from './searchResults';
 import type {
     AvatarSearchRequest,
     GroupSearchRequest,
     SearchActiveTab,
+    SearchPageTab,
     SearchWorldCategory,
     UserSearchRequest,
     WorldSearchRequest
@@ -32,23 +36,25 @@ export function useSearchResults({
     activeTab,
     avatarProviderEnabled,
     includeCommunityLabs,
+    pageSizes,
     searchText,
-    searchUserByBio,
     searchUserSortByLastLoggedIn,
     selectedAvatarProvider,
     selectedWorldCategory,
+    setPageSize,
     setSearchText,
     setSelectedWorldCategory,
     worldCategories
 }: {
-    activeTab: SearchActiveTab;
+    activeTab: SearchPageTab;
     avatarProviderEnabled: boolean;
     includeCommunityLabs: boolean;
+    pageSizes: SearchPageSizes;
     searchText: string;
-    searchUserByBio: boolean;
     searchUserSortByLastLoggedIn: boolean;
     selectedAvatarProvider: string;
     selectedWorldCategory: string;
+    setPageSize: (tab: SearchActiveTab, pageSize: number) => void;
     setSearchText: (value: string) => void;
     setSelectedWorldCategory: (value: string) => void;
     worldCategories: SearchWorldCategory[];
@@ -233,8 +239,8 @@ export function useSearchResults({
             runUserSearch(
                 buildUserSearchRequest(
                     searchText,
-                    searchUserByBio,
-                    searchUserSortByLastLoggedIn
+                    searchUserSortByLastLoggedIn,
+                    pageSizes.user
                 )
             );
             return;
@@ -249,14 +255,17 @@ export function useSearchResults({
                 buildWorldSearchRequest(
                     searchText,
                     category,
-                    includeCommunityLabs
+                    includeCommunityLabs,
+                    pageSizes.world
                 )
             );
             return;
         }
 
         if (activeTab === 'group') {
-            runGroupSearch(buildGroupSearchRequest(searchText));
+            runGroupSearch(
+                buildGroupSearchRequest(searchText, pageSizes.group)
+            );
             return;
         }
 
@@ -283,12 +292,12 @@ export function useSearchResults({
         activeTab,
         avatarProviderEnabled,
         includeCommunityLabs,
+        pageSizes,
         runAvatarSearch,
         runGroupSearch,
         runUserSearch,
         runWorldSearch,
         searchText,
-        searchUserByBio,
         searchUserSortByLastLoggedIn,
         selectedAvatarProvider,
         selectedWorldCategory,
@@ -361,12 +370,14 @@ export function useSearchResults({
                 buildWorldSearchRequest(
                     searchText,
                     category,
-                    includeCommunityLabs
+                    includeCommunityLabs,
+                    pageSizes.world
                 )
             );
         },
         [
             includeCommunityLabs,
+            pageSizes.world,
             runWorldSearch,
             searchText,
             setSelectedWorldCategory,
@@ -374,8 +385,48 @@ export function useSearchResults({
         ]
     );
 
-    const pagination = useSearchPagination({
+    const handlePageSizeChange = useCallback(
+        (pageSize: number) => {
+            if (activeTab === 'hot') {
+                return;
+            }
+            setPageSize(activeTab, pageSize);
+            if (activeTab === 'user' && userRequest) {
+                runUserSearch({
+                    ...userRequest,
+                    params: { ...userRequest.params, n: pageSize, offset: 0 }
+                });
+            } else if (activeTab === 'world' && worldRequest) {
+                runWorldSearch({
+                    ...worldRequest,
+                    params: { ...worldRequest.params, n: pageSize, offset: 0 }
+                });
+            } else if (activeTab === 'group' && groupRequest) {
+                runGroupSearch({
+                    ...groupRequest,
+                    params: { ...groupRequest.params, n: pageSize, offset: 0 }
+                });
+            } else if (activeTab === 'avatar' && avatarRequest) {
+                setAvatarRequest({ ...avatarRequest, offset: 0 });
+            }
+        },
+        [
+            activeTab,
+            avatarRequest,
+            groupRequest,
+            runGroupSearch,
+            runUserSearch,
+            runWorldSearch,
+            setAvatarRequest,
+            setPageSize,
+            userRequest,
+            worldRequest
+        ]
+    );
+
+    const tabPagination = useSearchPagination({
         activeTab,
+        avatarPageSize: pageSizes.avatar,
         avatarRequest,
         avatarResults,
         groupRequest,
@@ -393,10 +444,18 @@ export function useSearchResults({
         worldRequest,
         worldResults
     });
+    const pagination = {
+        ...tabPagination,
+        pageSize:
+            activeTab === 'hot'
+                ? DEFAULT_SEARCH_PAGE_SIZE
+                : pageSizes[activeTab],
+        onPageSizeChange: handlePageSizeChange
+    };
     const avatarOffset = avatarRequest?.offset ?? 0;
     const avatarPageResults = avatarResults.slice(
         avatarOffset,
-        avatarOffset + PAGE_SIZE
+        avatarOffset + pageSizes.avatar
     );
 
     return {

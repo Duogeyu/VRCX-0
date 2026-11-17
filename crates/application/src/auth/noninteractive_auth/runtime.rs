@@ -2,21 +2,23 @@ use futures_util::future::BoxFuture;
 
 use std::sync::Arc;
 
-use vrcx_0_application_core::vrchat_api::VrchatApiResponse;
 use vrcx_0_application_core::Result;
+use vrcx_0_contracts::vrchat_api::VrchatResponse;
+
+use vrcx_0_vrchat_protocol::auth::login::auth_response_error_message;
 
 use super::{
-    auth_response_error_message, parse_current_user_response, AuthenticatedRuntimeSession,
-    CookieSessionProbe, NonInteractiveAuthError,
+    parse_current_user_response, AuthenticatedRuntimeSession, CookieSessionProbe,
+    NonInteractiveAuthError,
 };
 use crate::auth::{
     LoginSuccessRecordInput, LogoutRecordInput, SavedAuthAutoLoginStatus, SavedAuthSnapshot,
-    SavedCredentialLoginStartInput, SavedCredentialSessionData,
+    SavedCredentialLoginStartInput, SavedCredentialRecordMode, SavedCredentialSessionData,
 };
 
 pub type NonInteractiveAuthProbeFuture<'a> =
     BoxFuture<'a, std::result::Result<CookieSessionProbe, NonInteractiveAuthError>>;
-pub type NonInteractiveAuthResponseFuture<'a> = BoxFuture<'a, Result<VrchatApiResponse>>;
+pub type NonInteractiveAuthResponseFuture<'a> = BoxFuture<'a, Result<VrchatResponse>>;
 
 pub trait NonInteractiveAuthActions: Send + Sync {
     fn clear_vrchat_config_snapshot(&self);
@@ -163,13 +165,12 @@ impl NonInteractiveAuthRuntime {
         }
 
         let fallback_available = snapshot.auto_login_status == SavedAuthAutoLoginStatus::Available
-            && snapshot
-                .saved_credentials_list
-                .iter()
-                .any(|credential| credential.user.id == user_id);
+            && snapshot.saved_credentials_list.iter().any(|credential| {
+                credential.user.id == user_id && credential.has_login_credentials
+            });
         if !fallback_available {
-            return Err(NonInteractiveAuthError::Failed(
-                "Saved credentials are not available for headless login.".into(),
+            return Err(NonInteractiveAuthError::InteractionRequired(
+                "The VRChat session expired and this account has no saved password; sign in again with a password or QR code.".into(),
             ));
         }
 
@@ -213,7 +214,7 @@ impl NonInteractiveAuthRuntime {
                 })
                 .into(),
                 stored_login_params: None,
-                save_credentials: false,
+                record: SavedCredentialRecordMode::ExistingOnly,
             })
             .map_err(|error| NonInteractiveAuthError::Failed(error.to_string()))
     }
@@ -251,7 +252,7 @@ mod tests {
         snapshot: SavedAuthSnapshot,
         session_data: Option<SavedCredentialSessionData>,
         probes: Mutex<VecDeque<std::result::Result<CookieSessionProbe, NonInteractiveAuthError>>>,
-        response: Mutex<Option<Result<VrchatApiResponse>>>,
+        response: Mutex<Option<Result<VrchatResponse>>>,
         events: Mutex<Vec<String>>,
     }
 
@@ -361,7 +362,7 @@ mod tests {
         }
 
         fn record_login_success(&self, input: LoginSuccessRecordInput) -> Result<()> {
-            assert!(!input.save_credentials);
+            assert_eq!(input.record, SavedCredentialRecordMode::ExistingOnly);
             self.events.lock().unwrap().push("record_success".into());
             Ok(())
         }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use vrcx_0_application_core::ConfigStore;
 
 use crate::{ActivityDelivery, ActivitySink, ActivitySnapshot};
 use vrcx_0_application_core::{
@@ -11,7 +12,7 @@ use super::preferences::{load_webhook_preferences, NotificationWebhookPreference
 use super::webhook::{discord_webhook_url_with_wait, wait_for_webhook_stop};
 use super::webhook_delivery::{WebhookDeliveryChannel, WebhookDeliveryMonitor};
 use super::{
-    load_notification_locale, render_delivery, send_json_webhook_with_retry, NotificationConfig,
+    load_notification_locale, render_delivery, send_json_webhook_with_retry, unresolved_group_id,
     NotificationResolver, NotificationWebhookFormat, NotificationWebhookTransport,
 };
 
@@ -28,7 +29,7 @@ fn select_notification_webhook_format(
 
 pub struct NotificationWebhookSink {
     session: HostSessionRuntime,
-    config: Arc<dyn NotificationConfig>,
+    config: Arc<dyn ConfigStore>,
     diagnostics: RuntimeDiagnostics,
     monitor: WebhookDeliveryMonitor,
     queue: tokio::sync::mpsc::Sender<NotificationWebhookJob>,
@@ -51,7 +52,7 @@ struct NotificationWebhookWorkerDeps {
 
 pub struct NotificationWebhookSinkDeps {
     pub session: HostSessionRuntime,
-    pub config: Arc<dyn NotificationConfig>,
+    pub config: Arc<dyn ConfigStore>,
     pub resolver: Arc<NotificationResolver>,
     pub webhook_transport: Arc<dyn NotificationWebhookTransport>,
     pub diagnostics: RuntimeDiagnostics,
@@ -147,6 +148,15 @@ async fn deliver_notification_webhook(
     deps: &NotificationWebhookWorkerDeps,
     mut job: NotificationWebhookJob,
 ) {
+    if let Some(group_id) = unresolved_group_id(&job.delivery.entry.content) {
+        if let Some(group_name) = deps
+            .resolver
+            .group_name(&job.vrchat_endpoint, &group_id)
+            .await
+        {
+            job.delivery.entry.content.group_name = group_name;
+        }
+    }
     if let Some((world_name, display_location)) = deps
         .resolver
         .world_name(&job.vrchat_endpoint, &job.delivery)

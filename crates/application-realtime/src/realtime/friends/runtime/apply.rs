@@ -1,5 +1,5 @@
+use crate::FriendProjectionPatch;
 use serde_json::{json, Value};
-use vrcx_0_application_core::FriendProjectionPatch;
 use vrcx_0_contracts::realtime::FriendLogDelete;
 use vrcx_0_core::derived_keys;
 use vrcx_0_core::files::extract_file_id;
@@ -89,7 +89,7 @@ pub(super) fn apply_friend_event(
 fn new_output(state: &RealtimeFriendState) -> Option<RealtimeFriendOutput> {
     let roster = state.roster.as_ref()?;
     Some(RealtimeFriendOutput::new(
-        OwnerId::new(roster.current_user_id.clone()),
+        OwnerId::new(roster.session.user_id.clone()),
         roster.generation,
         roster.baseline_revision,
     ))

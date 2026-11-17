@@ -1,21 +1,64 @@
 import { useEffect, useMemo } from 'react';
 
 import { useAppTable } from '@/components/data-table/appTable';
+import type { LogFilterCommands } from '@/components/data-table/LogFilterContextMenu';
 import { sortTableRowsByDateAndType } from '@/components/data-table/sortRowsByDateAndType';
+import { useShiftKeyHeld } from '@/components/keyboard/useShiftKeyHeld';
 import { useRuntimeStore } from '@/state/runtimeStore';
 
 import { useGameLogColumns } from './components/GameLogColumns';
+import { resolveGameLogFilterType } from './gameLogFilterCommands';
 import { GAME_LOG_SESSION_LIMIT_MAX } from './gameLogTypes';
 import { useGameLogAnnotations } from './useGameLogAnnotations';
 import { useGameLogFilters } from './useGameLogFilters';
 import { useGameLogPreviousInstancesDialog } from './useGameLogPreviousInstancesDialog';
 import { useGameLogRowActions } from './useGameLogRowActions';
 import { useGameLogRows } from './useGameLogRows';
-import { useGameLogShiftKey } from './useGameLogShiftKey';
 import { useGameLogTableState } from './useGameLogTableState';
 
 export function useGameLogPageController() {
     const filters = useGameLogFilters();
+    const {
+        applySearch,
+        availableFilterTypes,
+        queryFilterTypes,
+        setActiveSelectedTypes
+    } = filters;
+    const rowFilterCommands = useMemo<LogFilterCommands>(() => {
+        const toFilterType = (type: string) =>
+            availableFilterTypes.find(
+                (filterType) => filterType === resolveGameLogFilterType(type)
+            ) ?? null;
+        const currentTypes = queryFilterTypes.length
+            ? queryFilterTypes
+            : availableFilterTypes;
+        return {
+            onlyUser: (userId) => applySearch(userId),
+            canFilterType: (type) => toFilterType(type) !== null,
+            onlyType: (type) => {
+                const filterType = toFilterType(type);
+                if (filterType) {
+                    setActiveSelectedTypes([filterType]);
+                }
+            },
+            canExcludeType: (type) =>
+                currentTypes.some(
+                    (filterType) => filterType !== toFilterType(type)
+                ),
+            excludeType: (type) =>
+                setActiveSelectedTypes(
+                    currentTypes.filter(
+                        (filterType) => filterType !== toFilterType(type)
+                    )
+                ),
+            onlyWorld: (worldId) => applySearch(worldId)
+        };
+    }, [
+        applySearch,
+        availableFilterTypes,
+        queryFilterTypes,
+        setActiveSelectedTypes
+    ]);
     const tableState = useGameLogTableState({
         deferredSearchQuery: filters.deferredSearchQuery,
         sessionDateFrom: filters.sessionDateFrom,
@@ -54,7 +97,7 @@ export function useGameLogPageController() {
         removeRowByKey: rowsState.removeRowByKey
     });
     const previousInstancesDialog = useGameLogPreviousInstancesDialog();
-    const shiftHeld = useGameLogShiftKey();
+    const shiftHeld = useShiftKeyHeld();
     const columns = useGameLogColumns({
         deletingGameLogKey: rowActions.deletingGameLogKey,
         loadingPreviousInstancesKey: previousInstancesDialog.loadingKey,
@@ -94,11 +137,21 @@ export function useGameLogPageController() {
         }
     });
 
+    const queryFilterTypesKey = filters.queryFilterTypes.join(',');
+
     useEffect(() => {
         setPagination((current) =>
             current.pageIndex === 0 ? current : { ...current, pageIndex: 0 }
         );
-    }, [rowsState.rows, sorting, annotations.affinity, setPagination]);
+    }, [
+        filters.deferredSearchQuery,
+        filters.favoritesOnly,
+        filters.refreshToken,
+        filters.viewMode,
+        queryFilterTypesKey,
+        sorting,
+        setPagination
+    ]);
 
     useEffect(() => {
         const maxPageIndex = Math.max(
@@ -142,6 +195,7 @@ export function useGameLogPageController() {
     return {
         annotations,
         filters,
+        rowFilterCommands,
         isError,
         isGameRunning,
         isLoading,

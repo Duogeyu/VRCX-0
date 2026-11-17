@@ -8,6 +8,7 @@ use vrcx_0_core::screenshots::{
     ScreenshotFolderInfo, ScreenshotFolderTree, ScreenshotLibraryImage,
     ScreenshotLibraryScanStatus, ScreenshotMetadata, ScreenshotTimeWindow, ScreenshotWindowImages,
 };
+use vrcx_0_core::time::now_unix_seconds;
 
 use crate::{Error, Result};
 
@@ -75,6 +76,7 @@ impl MetadataCacheDb {
     pub fn new(db_path: &Path) -> Result<Self> {
         let mut conn = Connection::open(db_path)
             .map_err(|error| Error::sqlite_with_context("open cache db", error))?;
+        filter::register_functions(&conn)?;
         conn.execute_batch(
             "PRAGMA locking_mode=NORMAL;
              PRAGMA busy_timeout=5000;
@@ -968,12 +970,7 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn now_unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
+mod filter;
 
 #[cfg(test)]
 mod tests;

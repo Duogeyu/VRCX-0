@@ -20,7 +20,7 @@ pub use query::{
     get_last_game_log_location, get_location_before_or_at, get_previous_instances_by_group_id,
     get_previous_instances_by_world_id, get_session_events_for_range,
     get_session_location_segments, get_session_location_segments_by_date_range,
-    get_session_player_duration_rows, get_user_id_from_display_name,
+    get_session_player_duration_rows, get_user_id_from_display_name, get_visit_span_at,
 };
 pub use tables::ensure_game_log_tables;
 pub use types::{
@@ -28,10 +28,11 @@ pub use types::{
     GameLogJoinLeaveSnapshot, GameLogLocationEntry, GameLogLocationTimeUpdate,
     GameLogPortalSpawnEntry, GameLogPreviousInstanceGroupOutput,
     GameLogPreviousInstanceWorldOutput, GameLogResourceLoadEntry, GameLogVideoPlayEntry,
-    GameLogWriteBatch, GameLogWriteKind, PreviousInstanceEventRow, SessionEventRow,
-    SessionLocationSegmentRow, SessionPlayerDurationRow,
+    GameLogVisitSpan, GameLogWriteBatch, GameLogWriteKind, PreviousInstanceEventRow,
+    SessionEventRow, SessionLocationSegmentRow, SessionPlayerDurationRow,
 };
 pub use vrcx_0_contracts::game_log_query::{
     GameLogAllUserStatsOutput, GameLogQuery, GameLogQueryOutput, GameLogRowOutput,
 };
 pub use write::{fill_location_group_name, write_batch};
+pub(crate) use write::{insert_game_log_location, update_game_log_location_time};

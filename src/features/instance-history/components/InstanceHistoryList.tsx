@@ -16,6 +16,7 @@ import type { InstanceHistorySortKey } from '@/features/instance-history/instanc
 import type { InstanceHistoryMode } from '@/features/instance-history/instanceHistoryDayMode';
 import { formatClock, formatDateFilter, formatDateTime } from '@/lib/dateTime';
 import { cn } from '@/lib/utils';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Button } from '@/ui/shadcn/button';
 
 const HEADER_ENTRY_HEIGHT = 28;
@@ -36,7 +37,7 @@ function rowTimestamp(row: InstanceHistoryEntryRow): unknown {
 }
 
 function dayLabel(row: InstanceHistoryEntryRow): string {
-    return formatDateFilter(rowTimestamp(row), 'date');
+    return formatDateFilter(rowTimestamp(row), 'weekdayDate');
 }
 
 function monthLabel(row: InstanceHistoryEntryRow): string {
@@ -110,7 +111,7 @@ export function InstanceHistoryRow({
             )}
         >
             {selected ? (
-                <span className="bg-primary absolute inset-y-1.5 left-0 w-0.5 rounded-full" />
+                <span className="bg-foreground/60 absolute inset-y-1.5 left-0 w-0.5 rounded-full" />
             ) : null}
             <button
                 type="button"
@@ -159,16 +160,17 @@ export function InstanceHistoryRow({
                     showRefresh={false}
                     showInstanceInfo={false}
                 />
-                <Button
-                    type="button"
-                    size="icon-sm"
-                    variant="outline"
-                    disabled={!location}
-                    aria-label={t('common.actions.delete')}
-                    onClick={() => onDeleteRow(row)}
-                >
-                    <Trash2Icon data-icon="icon" />
-                </Button>
+                <HintTooltip label={t('common.actions.delete')}>
+                    <Button
+                        type="button"
+                        size="icon-sm"
+                        variant="outline"
+                        disabled={!location}
+                        onClick={() => onDeleteRow(row)}
+                    >
+                        <Trash2Icon data-icon="icon" />
+                    </Button>
+                </HintTooltip>
             </div>
         </div>
     );

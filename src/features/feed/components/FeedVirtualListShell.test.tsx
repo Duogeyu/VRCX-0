@@ -9,6 +9,7 @@ import type {
     FeedRow,
     FeedTableInstance
 } from '@/components/feed/feedTypes';
+import { formatDateFilter } from '@/lib/dateTime';
 
 vi.mock('@/components/feed/FeedDetailCell', () => ({
     FeedDetailCell: () => <span>detail</span>
@@ -26,9 +27,7 @@ vi.mock('@/state/preferencesStore', () => ({
 
 vi.mock('./FeedTableParts', () => ({
     FeedExpandedRow: () => <div>expanded detail</div>,
-    FeedUserLink: () => <button type="button">user</button>,
-    formatTimestampLong: () => 'long time',
-    formatTimestampParts: () => ({ date: 'time', time: '' })
+    FeedUserLink: () => <button type="button">user</button>
 }));
 
 import { FeedVirtualListShell } from './FeedVirtualListShell';
@@ -58,12 +57,19 @@ const row: FeedRow = {
 };
 
 const table = {
-    getColumn: () => ({ getSize: () => 120 }),
+    getColumn: (id: string) => ({ id, getSize: () => 120 }),
     getHeaderGroups: () => [{ headers: [] }]
 } as unknown as FeedTableInstance;
 
+const onlyType = vi.fn();
+
 const props = {
     actions,
+    emptyFilterModel: {
+        hasActiveFilters: false,
+        onClearFilters: () => undefined
+    },
+    filterCommands: { onlyType },
     favoritesOnly: false,
     friendLogNamesById: {},
     hasMore: false,
@@ -91,7 +97,47 @@ describe('FeedVirtualListShell', () => {
         const summary = view.container.querySelector(
             '[data-feed-list-summary]'
         );
-        expect(summary?.textContent).toContain('timeusertypedetail');
+        expect(summary?.textContent).toMatch(/:\d{2}usertypedetail$/);
+    });
+
+    it('marks only earlier days with a heading and shows the clock per row', () => {
+        const now = new Date();
+        const yesterday = new Date(now);
+        yesterday.setDate(now.getDate() - 1);
+        const todayRow: FeedRow = {
+            ...row,
+            created_at: now.toISOString()
+        };
+        const yesterdayRow: FeedRow = {
+            ...row,
+            rowId: 2,
+            created_at: yesterday.toISOString()
+        };
+        const view = render(
+            <FeedVirtualListShell
+                {...props}
+                rows={[todayRow, yesterdayRow]}
+                sourceRows={[todayRow, yesterdayRow]}
+            />
+        );
+
+        const todayLabel = formatDateFilter(now.toISOString(), 'weekdayDate');
+        const yesterdayLabel = formatDateFilter(
+            yesterday.toISOString(),
+            'weekdayDate'
+        );
+        expect(screen.queryByText(todayLabel)).toBeNull();
+        const text = view.container.textContent ?? '';
+        expect(text.indexOf(yesterdayLabel)).toBeGreaterThan(
+            text.indexOf('user')
+        );
+        const summaries = view.container.querySelectorAll(
+            '[data-feed-list-summary]'
+        );
+        expect(summaries).toHaveLength(2);
+        expect(summaries[0]?.textContent).toMatch(
+            /^\d{1,2}:\d{2}(\s?[AP]M)?user/
+        );
     });
 
     it('renders static labels instead of sortable headers', () => {
@@ -151,6 +197,19 @@ describe('FeedVirtualListShell', () => {
         expect(screen.queryByText('expanded detail')).toBeNull();
     });
 
+    it('expands an expandable row when its blank area is clicked', () => {
+        const view = render(<FeedVirtualListShell {...props} />);
+        const summary = view.container.querySelector(
+            '[data-feed-list-summary]'
+        );
+        if (!summary) {
+            throw new Error('missing summary row');
+        }
+
+        fireEvent.click(summary);
+        expect(screen.getByText('expanded detail')).not.toBeNull();
+    });
+
     it('reloads the latest window after newer rows were discarded', () => {
         const onReloadLatest = vi.fn();
         render(
@@ -167,5 +226,53 @@ describe('FeedVirtualListShell', () => {
             })
         );
         expect(onReloadLatest).toHaveBeenCalledOnce();
+    });
+
+    it('tells a feed with no history apart from one emptied by filters', () => {
+        const onClearFilters = vi.fn();
+        const view = render(
+            <FeedVirtualListShell {...props} rows={[]} sourceRows={[]} />
+        );
+        expect(screen.getByText('empty_state.feed_title')).not.toBeNull();
+        expect(screen.queryByRole('button')).toBeNull();
+
+        view.rerender(
+            <FeedVirtualListShell
+                {...props}
+                emptyFilterModel={{ hasActiveFilters: true, onClearFilters }}
+                rows={[]}
+                sourceRows={[]}
+            />
+        );
+        expect(
+            screen.getByText(
+                'view.feed.empty.no_feed_rows_match_the_current_filters'
+            )
+        ).not.toBeNull();
+        fireEvent.click(
+            screen.getByRole('button', {
+                name: 'empty_state.clear_search_and_filters'
+            })
+        );
+        expect(onClearFilters).toHaveBeenCalledOnce();
+    });
+
+    it('offers type filters from the row context menu', async () => {
+        const view = render(<FeedVirtualListShell {...props} />);
+        const summary = view.container.querySelector(
+            '[data-feed-list-summary]'
+        );
+        if (!summary) {
+            throw new Error('missing summary row');
+        }
+
+        fireEvent.contextMenu(summary);
+        fireEvent.click(
+            await screen.findByRole('menuitem', {
+                name: 'table.filter_action.only_type'
+            })
+        );
+
+        expect(onlyType).toHaveBeenCalledWith('Status');
     });
 });

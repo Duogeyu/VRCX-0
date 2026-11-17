@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use vrcx_0_contracts::game_log::GameLogWriteBatch;
+use vrcx_0_contracts::game_log::GameLogVideoPlayName;
 use vrcx_0_core::game_log_parser::{parse_authenticated_user, parse_log_line_header};
 use vrcx_0_core::vrchat_log_reader::parse_output_log_file_timestamp;
 use vrcx_0_core::OwnerId;
@@ -11,7 +11,8 @@ use vrcx_0_core::OwnerId;
 use crate::game_log::video::{normalize_video_input, video_play_entry};
 use crate::game_log::{GameLogIngestEngine, GameLogIngestOptions, GameLogSideEffect};
 use crate::game_log_parser::{parse_log, GameLogEvent, GameLogParseSink, LogContext, LogReader};
-use crate::{GameStateStore, Result};
+use crate::{GameLogWriter, PlayerDirectoryLookup, Result};
+use vrcx_0_application_core::ConfigStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -60,7 +61,9 @@ pub fn inspect_game_log_import_file(
 }
 
 pub fn import_game_log_file(
-    store: &dyn GameStateStore,
+    writer: &dyn GameLogWriter,
+    player_directory: &dyn PlayerDirectoryLookup,
+    config: &dyn ConfigStore,
     owner: &OwnerId,
     path: &Path,
     consent: GameLogImportConsent,
@@ -84,20 +87,34 @@ pub fn import_game_log_file(
     let output = GameLogIngestEngine::default().ingest_events(
         &events,
         GameLogIngestOptions {
-            log_resource_load: store.get_bool("logResourceLoad", false)?,
+            log_resource_load: config.get_bool("logResourceLoad", false)?,
         },
     );
     let mut batch = output.batch;
-    let location_time_updates = std::mem::take(&mut batch.location_time_updates);
     for side_effect in output.side_effects {
-        let GameLogSideEffect::Video(mut input) = side_effect else {
-            continue;
+        let mut input = match side_effect {
+            GameLogSideEffect::Video(input) => input,
+            GameLogSideEffect::VideoDetails {
+                created_at,
+                video_url,
+                video_name,
+                ..
+            } if !video_name.is_empty() => {
+                batch.video_play_names.push(GameLogVideoPlayName {
+                    created_at,
+                    video_url,
+                    video_name,
+                });
+                continue;
+            }
+            _ => continue,
         };
         if normalize_video_input(&mut input).is_none() {
             continue;
         }
         if input.user_id.is_empty() && !input.display_name.is_empty() {
-            input.user_id = store.user_id_from_display_name(owner, &input.display_name)?;
+            input.user_id =
+                player_directory.user_id_from_display_name(owner, &input.display_name)?;
         }
         batch.video_plays.push(video_play_entry(&input));
     }
@@ -105,17 +122,8 @@ pub fn import_game_log_file(
     let inserted_count = if batch.is_empty() {
         0
     } else {
-        store.write_game_log(owner, &batch)?
+        writer.write_game_log(owner, &batch)?.inserted
     };
-    if !location_time_updates.is_empty() {
-        store.write_game_log(
-            owner,
-            &GameLogWriteBatch {
-                location_time_updates,
-                ..Default::default()
-            },
-        )?;
-    }
 
     file.imported = true;
     file.inserted_count = u32::try_from(inserted_count).unwrap_or(u32::MAX);

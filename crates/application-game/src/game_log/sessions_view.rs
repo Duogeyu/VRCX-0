@@ -117,6 +117,7 @@ pub struct GameLogSessionDto {
     pub group_name: String,
     pub duration: Option<i64>,
     pub player_duration_rows: Vec<GameLogSessionPlayerDurationRowDto>,
+    pub remote: bool,
     pub events: Vec<GameLogSessionEventDto>,
 }
 
@@ -177,6 +178,7 @@ impl GameLogSessionDto {
             group_name: segment.group_name,
             duration: segment.duration,
             player_duration_rows,
+            remote: segment.remote,
             events: segment.events.into_iter().map(Into::into).collect(),
         }
     }
@@ -271,7 +273,7 @@ fn build_location_inputs(rows: &[SessionLocationSegmentRow]) -> Vec<SessionLocat
 }
 
 fn load_session_events(
-    store: &dyn crate::GameStateStore,
+    store: &dyn crate::GameLogSessionQueries,
     owner_user_id: &OwnerId,
     locations: &[SessionLocationInput],
     favorite_user_ids: &HashSet<String>,
@@ -478,7 +480,7 @@ fn filter_sessions(
 }
 
 pub fn game_log_sessions_query(
-    store: &dyn crate::GameStateStore,
+    store: &dyn crate::GameLogSessionQueries,
     owner_user_id: &OwnerId,
     input: GameLogSessionsQueryInput,
 ) -> Result<Vec<GameLogSessionDto>> {

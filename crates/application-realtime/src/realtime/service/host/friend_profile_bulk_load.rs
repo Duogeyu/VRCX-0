@@ -3,9 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::join_all;
-use tokio::time::Instant;
+use tokio::sync::watch;
 
-use vrcx_0_application_core::{Error, Result};
+use vrcx_0_application_core::{
+    BackendRuntimeStatusPublisher, Error, RateLimitBackoff, RequestPacer, Result, RuntimeAuthScope,
+};
 pub use vrcx_0_application_core::{FriendProfileBulkLoadStatus, FriendProfileLoadStatusPayload};
 use vrcx_0_core::friends::FriendRecord;
 use vrcx_0_core::vrchat_endpoints::normalize_vrchat_api_endpoint;
@@ -15,43 +17,14 @@ use crate::realtime::{
 };
 
 use super::state::ActiveRealtimeContext;
-use super::{RealtimeHostRuntime, RealtimeStopRequest};
+use super::{RealtimeHostRuntime, RealtimeHostRuntimeDeps, RealtimeStopRequest};
 
-const FRIEND_PROFILE_BULK_LOAD_MAX_RETRIES: u32 = 4;
-const FRIEND_PROFILE_BULK_LOAD_BASE_DELAY: Duration = Duration::from_millis(500);
+const FRIEND_PROFILE_BULK_LOAD_BACKOFF: RateLimitBackoff =
+    RateLimitBackoff::new(Duration::from_millis(500), 4);
 #[cfg(test)]
 pub(super) const FRIEND_PROFILE_BULK_LOAD_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 pub(super) const FRIEND_PROFILE_BULK_LOAD_CONCURRENCY: usize = 3;
 pub(super) const FRIEND_PROFILE_BULK_LOAD_REQUEST_SPACING: Duration = Duration::from_millis(333);
-
-pub(super) struct FriendProfileBulkLoadPacer {
-    next_slot: tokio::sync::Mutex<Option<Instant>>,
-}
-
-impl FriendProfileBulkLoadPacer {
-    pub(super) fn new() -> Self {
-        Self {
-            next_slot: tokio::sync::Mutex::new(None),
-        }
-    }
-
-    pub(super) async fn acquire_slot(&self) {
-        let slot = {
-            let mut next_slot = self.next_slot.lock().await;
-            let now = Instant::now();
-            let slot = next_slot.map(|at| at.max(now)).unwrap_or(now);
-            *next_slot = Some(slot + FRIEND_PROFILE_BULK_LOAD_REQUEST_SPACING);
-            slot
-        };
-        tokio::time::sleep_until(slot).await;
-    }
-
-    pub(super) async fn delay_next_slots(&self, delay: Duration) {
-        let mut next_slot = self.next_slot.lock().await;
-        let resume_at = Instant::now() + delay;
-        *next_slot = Some(next_slot.map(|at| at.max(resume_at)).unwrap_or(resume_at));
-    }
-}
 
 pub(super) struct FriendProfileBulkLoadInitialProgress {
     pub(super) total: u32,
@@ -169,16 +142,48 @@ fn friend_missing_date_joined(friend: &FriendRecord) -> bool {
         .is_none_or(|value| value.trim().is_empty())
 }
 
-pub(super) fn friend_profile_bulk_load_backoff_delay(attempt: u32) -> Duration {
-    FRIEND_PROFILE_BULK_LOAD_BASE_DELAY.saturating_mul(1u32 << attempt.min(16))
+pub(super) struct FriendProfileBulkLoader {
+    state: Mutex<FriendProfileBulkLoadState>,
+    cancel_tx: watch::Sender<u64>,
+    auth_scope: RuntimeAuthScope,
+    backend_status: BackendRuntimeStatusPublisher,
 }
 
 impl RealtimeHostRuntime {
     pub fn start_friend_profile_bulk_load(
         self: &Arc<Self>,
     ) -> Result<FriendProfileLoadStatusPayload> {
+        self.friend_profile_bulk
+            .start_friend_profile_bulk_load(self)
+    }
+
+    pub fn cancel_friend_profile_bulk_load(&self) -> Result<FriendProfileLoadStatusPayload> {
+        self.friend_profile_bulk.cancel_friend_profile_bulk_load()
+    }
+
+    #[cfg(test)]
+    pub fn friend_profile_bulk_load_status(&self) -> FriendProfileLoadStatusPayload {
+        self.friend_profile_bulk.friend_profile_bulk_load_status()
+    }
+}
+
+impl FriendProfileBulkLoader {
+    pub(super) fn new(deps: &RealtimeHostRuntimeDeps) -> Self {
+        let (cancel_tx, _) = watch::channel(0);
+        Self {
+            state: Mutex::new(FriendProfileBulkLoadState::default()),
+            cancel_tx,
+            auth_scope: deps.auth_scope.clone(),
+            backend_status: deps.backend_status.clone(),
+        }
+    }
+
+    fn start_friend_profile_bulk_load(
+        &self,
+        host: &Arc<RealtimeHostRuntime>,
+    ) -> Result<FriendProfileLoadStatusPayload> {
         let active = {
-            let state = self
+            let state = host
                 .state
                 .lock()
                 .map_err(|error| Error::Custom(format!("realtime state lock: {error}")))?;
@@ -196,13 +201,13 @@ impl RealtimeHostRuntime {
                 )
             })?;
         let (targets, run_id, spawn_worker, stale_run_id) = {
-            let mut bulk = self.friend_profile_bulk_load.lock().map_err(|error| {
+            let mut bulk = self.state.lock().map_err(|error| {
                 Error::Custom(format!("friend profile bulk load lock: {error}"))
             })?;
             if is_active_bulk_load_status(bulk.status) && bulk.owner.as_ref() == Some(&owner) {
                 return Ok(bulk.payload());
             }
-            let snapshot = self.friends.snapshot().filter(|snapshot| {
+            let snapshot = host.friends.snapshot().filter(|snapshot| {
                 snapshot.generation == active.generation
                     && snapshot.current_user_id == active.session.user_id
             });
@@ -238,24 +243,24 @@ impl RealtimeHostRuntime {
         };
 
         if let Some(stale_run_id) = stale_run_id {
-            self.friend_profile_bulk_cancel_tx
-                .send_replace(stale_run_id);
+            self.cancel_tx.send_replace(stale_run_id);
         }
         let payload = self.emit_friend_profile_bulk_load_status();
         if spawn_worker {
-            let runtime = Arc::clone(self);
-            self.deps.tasks.spawn(async move {
+            let runtime = Arc::clone(host);
+            host.deps.tasks.spawn(async move {
                 runtime
-                    .run_friend_profile_bulk_load(run_id, owner, targets)
+                    .friend_profile_bulk
+                    .run_friend_profile_bulk_load(&runtime, run_id, owner, targets)
                     .await;
             });
         }
         Ok(payload)
     }
 
-    pub fn cancel_friend_profile_bulk_load(&self) -> Result<FriendProfileLoadStatusPayload> {
+    fn cancel_friend_profile_bulk_load(&self) -> Result<FriendProfileLoadStatusPayload> {
         let cancelled_run_id = {
-            let mut bulk = self.friend_profile_bulk_load.lock().map_err(|error| {
+            let mut bulk = self.state.lock().map_err(|error| {
                 Error::Custom(format!("friend profile bulk load lock: {error}"))
             })?;
             if bulk.status == FriendProfileBulkLoadStatus::Running {
@@ -266,7 +271,7 @@ impl RealtimeHostRuntime {
             }
         };
         if let Some(run_id) = cancelled_run_id {
-            self.friend_profile_bulk_cancel_tx.send_replace(run_id);
+            self.cancel_tx.send_replace(run_id);
         }
         Ok(self.emit_friend_profile_bulk_load_status())
     }
@@ -282,7 +287,7 @@ impl RealtimeHostRuntime {
         &self,
         session: &RealtimeSessionContext,
     ) {
-        let scope = self.deps.auth_scope.snapshot();
+        let scope = self.auth_scope.snapshot();
         self.cancel_friend_profile_bulk_load_if(|owner| {
             !owner.matches_session(session) || !owner.matches_auth_scope(&scope)
         });
@@ -300,7 +305,7 @@ impl RealtimeHostRuntime {
         should_cancel: impl FnOnce(&FriendProfileBulkLoadOwner) -> bool,
     ) {
         let cancelled_run_id = {
-            let Ok(mut bulk) = self.friend_profile_bulk_load.lock() else {
+            let Ok(mut bulk) = self.state.lock() else {
                 return;
             };
             if !is_active_bulk_load_status(bulk.status)
@@ -312,14 +317,13 @@ impl RealtimeHostRuntime {
             bulk.finished_at = Some(chrono::Utc::now().to_rfc3339());
             bulk.run_id
         };
-        self.friend_profile_bulk_cancel_tx
-            .send_replace(cancelled_run_id);
+        self.cancel_tx.send_replace(cancelled_run_id);
         self.emit_friend_profile_bulk_load_status();
     }
 
     #[cfg(test)]
-    pub fn friend_profile_bulk_load_status(&self) -> FriendProfileLoadStatusPayload {
-        self.friend_profile_bulk_load
+    fn friend_profile_bulk_load_status(&self) -> FriendProfileLoadStatusPayload {
+        self.state
             .lock()
             .map(|bulk| bulk.payload())
             .unwrap_or_default()
@@ -327,13 +331,12 @@ impl RealtimeHostRuntime {
 
     fn emit_friend_profile_bulk_load_status(&self) -> FriendProfileLoadStatusPayload {
         let payload = {
-            let Ok(bulk) = self.friend_profile_bulk_load.lock() else {
+            let Ok(bulk) = self.state.lock() else {
                 return FriendProfileBulkLoadState::default().payload();
             };
             bulk.payload()
         };
-        self.deps
-            .backend_status
+        self.backend_status
             .publish_friend_profile_load_status(payload.clone());
         payload
     }
@@ -342,7 +345,7 @@ impl RealtimeHostRuntime {
         &self,
         active: &ActiveRealtimeContext,
     ) -> Option<FriendProfileBulkLoadOwner> {
-        let scope = self.deps.auth_scope.snapshot();
+        let scope = self.auth_scope.snapshot();
         let endpoint = normalize_vrchat_api_endpoint(Some(&active.session.endpoint));
         (scope.active
             && scope.current_user_id == active.session.user_id
@@ -358,7 +361,7 @@ impl RealtimeHostRuntime {
         &self,
         owner: &FriendProfileBulkLoadOwner,
     ) -> bool {
-        owner.matches_auth_scope(&self.deps.auth_scope.snapshot())
+        owner.matches_auth_scope(&self.auth_scope.snapshot())
     }
 
     fn friend_profile_bulk_load_is_current(
@@ -366,11 +369,11 @@ impl RealtimeHostRuntime {
         run_id: u64,
         owner: &FriendProfileBulkLoadOwner,
     ) -> bool {
-        if *self.friend_profile_bulk_cancel_tx.borrow() == run_id {
+        if *self.cancel_tx.borrow() == run_id {
             return false;
         }
         let bulk_current = self
-            .friend_profile_bulk_load
+            .state
             .lock()
             .map(|bulk| {
                 bulk.run_id == run_id
@@ -383,9 +386,10 @@ impl RealtimeHostRuntime {
 
     fn friend_profile_bulk_load_active_context(
         &self,
+        host: &RealtimeHostRuntime,
         owner: &FriendProfileBulkLoadOwner,
     ) -> Option<ActiveRealtimeContext> {
-        self.state.lock().ok().and_then(|state| {
+        host.state.lock().ok().and_then(|state| {
             state
                 .connection
                 .active_context
@@ -397,12 +401,13 @@ impl RealtimeHostRuntime {
 
     fn friend_profile_bulk_load_transport_is_current(
         &self,
+        host: &RealtimeHostRuntime,
         active: &ActiveRealtimeContext,
     ) -> bool {
-        self.state
+        host.state
             .lock()
             .map(|state| {
-                self.is_message_current_locked(
+                host.is_message_current_locked(
                     &state,
                     active.generation,
                     active.session_generation,
@@ -414,6 +419,7 @@ impl RealtimeHostRuntime {
 
     async fn wait_for_friend_profile_bulk_load_transport(
         &self,
+        host: &RealtimeHostRuntime,
         run_id: u64,
         owner: &FriendProfileBulkLoadOwner,
         cancel_rx: &mut tokio::sync::watch::Receiver<u64>,
@@ -423,7 +429,7 @@ impl RealtimeHostRuntime {
             if !self.friend_profile_bulk_load_is_current(run_id, owner) {
                 return None;
             }
-            if let Some(active) = self.friend_profile_bulk_load_active_context(owner) {
+            if let Some(active) = self.friend_profile_bulk_load_active_context(host, owner) {
                 return Some(active);
             }
             tokio::select! {
@@ -439,31 +445,38 @@ impl RealtimeHostRuntime {
     }
 
     async fn load_friend_profile_bulk_item(
-        self: &Arc<Self>,
+        host: &Arc<RealtimeHostRuntime>,
         run_id: u64,
         owner: &FriendProfileBulkLoadOwner,
         user_id: &str,
-        pacer: &FriendProfileBulkLoadPacer,
+        pacer: &RequestPacer,
         cancel_rx: &mut tokio::sync::watch::Receiver<u64>,
         transport_rx: &mut tokio::sync::watch::Receiver<u64>,
     ) -> Option<FriendProfileBulkLoadItemOutcome> {
+        let loader = &host.friend_profile_bulk;
         let mut attempt = 0u32;
         loop {
-            let active = self
-                .wait_for_friend_profile_bulk_load_transport(run_id, owner, cancel_rx, transport_rx)
+            let active = loader
+                .wait_for_friend_profile_bulk_load_transport(
+                    host,
+                    run_id,
+                    owner,
+                    cancel_rx,
+                    transport_rx,
+                )
                 .await?;
             tokio::select! {
                 biased;
                 _ = wait_for_friend_profile_bulk_load_cancel(run_id, cancel_rx) => return None,
                 _ = pacer.acquire_slot() => {}
             }
-            if !self.friend_profile_bulk_load_is_current(run_id, owner) {
+            if !loader.friend_profile_bulk_load_is_current(run_id, owner) {
                 return None;
             }
             let response = tokio::select! {
                 biased;
                 _ = wait_for_friend_profile_bulk_load_cancel(run_id, cancel_rx) => return None,
-                response = self.get_user_via_cache_with_options(
+                response = host.get_user_via_cache_with_options(
                     owner.endpoint.clone(),
                     user_id.to_string(),
                     UserQueryOptions {
@@ -472,11 +485,11 @@ impl RealtimeHostRuntime {
                     },
                 ) => response,
             };
-            if !self.friend_profile_bulk_load_is_current(run_id, owner) {
+            if !loader.friend_profile_bulk_load_is_current(run_id, owner) {
                 return None;
             }
-            if !self.friend_profile_bulk_load_transport_is_current(&active) {
-                self.invalidate_user_query_cache(&owner.endpoint, user_id)
+            if !loader.friend_profile_bulk_load_transport_is_current(host, &active) {
+                host.invalidate_user_query_cache(&owner.endpoint, user_id)
                     .await;
                 continue;
             }
@@ -485,9 +498,10 @@ impl RealtimeHostRuntime {
                     return Some(FriendProfileBulkLoadItemOutcome::Loaded);
                 }
                 Ok(response)
-                    if response.status == 429 && attempt < FRIEND_PROFILE_BULK_LOAD_MAX_RETRIES =>
+                    if response.status == 429
+                        && attempt < FRIEND_PROFILE_BULK_LOAD_BACKOFF.max_retries() =>
                 {
-                    let delay = friend_profile_bulk_load_backoff_delay(attempt);
+                    let delay = FRIEND_PROFILE_BULK_LOAD_BACKOFF.delay(attempt);
                     attempt += 1;
                     pacer.delay_next_slots(delay).await;
                     tokio::select! {
@@ -496,7 +510,7 @@ impl RealtimeHostRuntime {
                         _ = transport_rx.changed() => continue,
                         _ = tokio::time::sleep(delay) => {}
                     }
-                    if !self.friend_profile_bulk_load_is_current(run_id, owner) {
+                    if !loader.friend_profile_bulk_load_is_current(run_id, owner) {
                         return None;
                     }
                 }
@@ -515,7 +529,7 @@ impl RealtimeHostRuntime {
             return false;
         }
         {
-            let Ok(mut bulk) = self.friend_profile_bulk_load.lock() else {
+            let Ok(mut bulk) = self.state.lock() else {
                 return false;
             };
             if bulk.run_id != run_id || bulk.status != FriendProfileBulkLoadStatus::Running {
@@ -536,29 +550,32 @@ impl RealtimeHostRuntime {
     }
 
     async fn run_friend_profile_bulk_load(
-        self: Arc<Self>,
+        &self,
+        host: &Arc<RealtimeHostRuntime>,
         run_id: u64,
         owner: FriendProfileBulkLoadOwner,
         targets: Vec<String>,
     ) {
         let queue = Mutex::new(VecDeque::from(targets));
-        let pacer = FriendProfileBulkLoadPacer::new();
-        let workers = (0..FRIEND_PROFILE_BULK_LOAD_CONCURRENCY)
-            .map(|_| self.run_friend_profile_bulk_load_worker(run_id, &owner, &queue, &pacer));
+        let pacer = RequestPacer::new(FRIEND_PROFILE_BULK_LOAD_REQUEST_SPACING);
+        let workers = (0..FRIEND_PROFILE_BULK_LOAD_CONCURRENCY).map(|_| {
+            self.run_friend_profile_bulk_load_worker(host, run_id, &owner, &queue, &pacer)
+        });
         join_all(workers).await;
 
         self.finish_friend_profile_bulk_load(run_id, &owner);
     }
 
     async fn run_friend_profile_bulk_load_worker(
-        self: &Arc<Self>,
+        &self,
+        host: &Arc<RealtimeHostRuntime>,
         run_id: u64,
         owner: &FriendProfileBulkLoadOwner,
         queue: &Mutex<VecDeque<String>>,
-        pacer: &FriendProfileBulkLoadPacer,
+        pacer: &RequestPacer,
     ) {
-        let mut cancel_rx = self.friend_profile_bulk_cancel_tx.subscribe();
-        let mut transport_rx = self.cancel_tx.subscribe();
+        let mut cancel_rx = self.cancel_tx.subscribe();
+        let mut transport_rx = host.cancel_tx.subscribe();
         loop {
             if !self.friend_profile_bulk_load_is_current(run_id, owner) {
                 return;
@@ -570,16 +587,16 @@ impl RealtimeHostRuntime {
             else {
                 return;
             };
-            let Some(outcome) = self
-                .load_friend_profile_bulk_item(
-                    run_id,
-                    owner,
-                    &user_id,
-                    pacer,
-                    &mut cancel_rx,
-                    &mut transport_rx,
-                )
-                .await
+            let Some(outcome) = Self::load_friend_profile_bulk_item(
+                host,
+                run_id,
+                owner,
+                &user_id,
+                pacer,
+                &mut cancel_rx,
+                &mut transport_rx,
+            )
+            .await
             else {
                 return;
             };
@@ -592,7 +609,7 @@ impl RealtimeHostRuntime {
     fn finish_friend_profile_bulk_load(&self, run_id: u64, owner: &FriendProfileBulkLoadOwner) {
         let owner_current = self.friend_profile_bulk_load_owner_is_current(owner);
         {
-            let Ok(mut bulk) = self.friend_profile_bulk_load.lock() else {
+            let Ok(mut bulk) = self.state.lock() else {
                 return;
             };
             if bulk.run_id != run_id {
@@ -616,7 +633,29 @@ impl RealtimeHostRuntime {
 #[cfg(test)]
 impl RealtimeHostRuntime {
     pub(super) fn test_force_friend_profile_bulk_load_running(&self, run_id: u64, total: u32) {
-        let active = self
+        self.friend_profile_bulk
+            .test_force_friend_profile_bulk_load_running(self, run_id, total);
+    }
+
+    pub(super) fn test_friend_profile_bulk_load_record_progress(
+        &self,
+        run_id: u64,
+        outcome: FriendProfileBulkLoadItemOutcome,
+    ) -> bool {
+        self.friend_profile_bulk
+            .test_friend_profile_bulk_load_record_progress(run_id, outcome)
+    }
+}
+
+#[cfg(test)]
+impl FriendProfileBulkLoader {
+    fn test_force_friend_profile_bulk_load_running(
+        &self,
+        host: &RealtimeHostRuntime,
+        run_id: u64,
+        total: u32,
+    ) {
+        let active = host
             .state
             .lock()
             .unwrap()
@@ -627,7 +666,7 @@ impl RealtimeHostRuntime {
         let owner = self
             .friend_profile_bulk_load_owner(&active)
             .expect("test runtime should have an active auth scope");
-        let mut bulk = self.friend_profile_bulk_load.lock().unwrap();
+        let mut bulk = self.state.lock().unwrap();
         bulk.run_id = run_id;
         bulk.status = FriendProfileBulkLoadStatus::Running;
         bulk.owner = Some(owner);
@@ -635,12 +674,12 @@ impl RealtimeHostRuntime {
         bulk.started_at = chrono::Utc::now().to_rfc3339();
     }
 
-    pub(super) fn test_friend_profile_bulk_load_record_progress(
+    fn test_friend_profile_bulk_load_record_progress(
         &self,
         run_id: u64,
         outcome: FriendProfileBulkLoadItemOutcome,
     ) -> bool {
-        let Some(owner) = self.friend_profile_bulk_load.lock().unwrap().owner.clone() else {
+        let Some(owner) = self.state.lock().unwrap().owner.clone() else {
             return false;
         };
         self.friend_profile_bulk_load_record_progress(run_id, &owner, outcome)

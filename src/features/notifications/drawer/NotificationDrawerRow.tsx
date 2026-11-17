@@ -7,6 +7,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useMinuteNowMs } from '@/lib/useMinuteNowMs';
 import { cn } from '@/lib/utils';
 import type { NotificationRow } from '@/repositories/notificationPersistenceRepository';
 import { getDismissResponse } from '@/shared/utils/notificationResponse';
@@ -14,6 +15,7 @@ import {
     selectMarkAllSeenRowState,
     useVrcNotificationStore
 } from '@/state/vrcNotificationStore';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Badge } from '@/ui/shadcn/badge';
 import { Button } from '@/ui/shadcn/button';
 import {
@@ -36,6 +38,7 @@ import {
     NotificationPersonAvatar
 } from '../components/NotificationRowParts';
 import { NotificationText } from '../components/NotificationText';
+import { useNotificationActionPending } from '../notificationActionPending';
 import {
     formatNotificationTime,
     getNotificationMessage,
@@ -95,18 +98,22 @@ export function NotificationDrawerRow({
     isUnseen,
     currentUserId,
     canInviteFromCurrentLocation,
-    handlers
+    handlers,
+    nested = false
 }: {
     canInviteFromCurrentLocation: boolean;
     currentUserId?: string;
     handlers: NotificationDrawerHandlers;
     isUnseen: boolean;
+    nested?: boolean;
     notification: NotificationRow;
 }) {
     const { t } = useTranslation();
-    const rawMessage = String(getNotificationMessage(notification) || '');
+    const actionPending = useNotificationActionPending(notification);
+    const rawMessage = String(getNotificationMessage(notification, t) || '');
     const typeLabel = getNotificationTypeLabel(notification, t);
-    const relativeTime = getNotificationRelativeTime(notification);
+    const nowMs = useMinuteNowMs();
+    const relativeTime = getNotificationRelativeTime(notification, nowMs);
     const absoluteTime =
         getNotificationAbsoluteTime(notification) ||
         formatNotificationTime(notification);
@@ -117,8 +124,8 @@ export function NotificationDrawerRow({
     const isQueueReady = notification?.type === 'group.queueReady';
     const showAvatar = usesAvatar(notification);
     const view = useMemo(
-        () => toNotificationViewModel(notification),
-        [notification]
+        () => toNotificationViewModel(notification, { t }),
+        [notification, t]
     );
     const isBroadcast = view.template === 'broadcast';
     const senderName = isBroadcast
@@ -158,6 +165,7 @@ export function NotificationDrawerRow({
     const showDelete = Boolean(shouldShowDeleteLog(notification));
     const hasMenu =
         showMenuMarkRead || overflowActions.length > 0 || showDelete;
+    const moreActionsLabel = t('side_panel.notification_center.more_actions');
 
     const countdownMs = useExpiryCountdown(
         notification?.expiresAt,
@@ -209,7 +217,7 @@ export function NotificationDrawerRow({
                                             )}
                                         </TooltipContent>
                                     </Tooltip>
-                                ) : showUnreadDot ? (
+                                ) : showUnreadDot && !nested ? (
                                     <span className="bg-primary size-2 rounded-full">
                                         <span className="sr-only">
                                             {t('view.notification.feed.unread')}
@@ -267,6 +275,15 @@ export function NotificationDrawerRow({
                                         <span className="text-muted-foreground shrink-0 text-xs">
                                             · {typeLabel}
                                         </span>
+                                    ) : !senderName ? (
+                                        <span
+                                            className={cn(
+                                                'min-w-0 truncate text-sm',
+                                                showUnreadDot && 'font-medium'
+                                            )}
+                                        >
+                                            {typeLabel}
+                                        </span>
                                     ) : (
                                         <Badge
                                             className={cn(
@@ -298,20 +315,21 @@ export function NotificationDrawerRow({
                                 >
                                     {hasMenu ? (
                                         <DropdownMenu>
-                                            <DropdownMenuTrigger
-                                                render={
-                                                    <Button
-                                                        type="button"
-                                                        variant="ghost"
-                                                        size="icon-xs"
-                                                        aria-label={t(
-                                                            'side_panel.notification_center.more_actions'
-                                                        )}
-                                                    >
-                                                        <MoreHorizontalIcon data-icon="icon" />
-                                                    </Button>
-                                                }
-                                            />
+                                            <HintTooltip
+                                                label={moreActionsLabel}
+                                            >
+                                                <DropdownMenuTrigger
+                                                    render={
+                                                        <Button
+                                                            type="button"
+                                                            variant="ghost"
+                                                            size="icon-xs"
+                                                        >
+                                                            <MoreHorizontalIcon data-icon="icon" />
+                                                        </Button>
+                                                    }
+                                                />
+                                            </HintTooltip>
                                             <DropdownMenuContent
                                                 align="end"
                                                 className="w-56"
@@ -454,11 +472,18 @@ export function NotificationDrawerRow({
                                     {isQueueReady ||
                                     inlineActions.length > 0 ? (
                                         <div
+                                            aria-busy={
+                                                actionPending || undefined
+                                            }
                                             className={cn(
                                                 'flex shrink-0 items-center gap-1.5',
-                                                NOTIFICATION_ROW_HOVER_REVEAL
+                                                !actionPending &&
+                                                    NOTIFICATION_ROW_HOVER_REVEAL
                                             )}
                                         >
+                                            {actionPending ? (
+                                                <Spinner className="text-muted-foreground size-3.5" />
+                                            ) : null}
                                             {isQueueReady ? (
                                                 <Button
                                                     type="button"
@@ -491,6 +516,7 @@ export function NotificationDrawerRow({
                                                     type="button"
                                                     size="xs"
                                                     variant="ghost"
+                                                    disabled={actionPending}
                                                     onClick={action.onClick}
                                                 >
                                                     {action.label}

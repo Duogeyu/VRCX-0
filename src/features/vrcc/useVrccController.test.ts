@@ -1039,19 +1039,18 @@ describe('useVrccController', () => {
         );
 
         let failWeek: (error: unknown) => void = () => {};
-        mocks.boards.mockImplementation(
-            (_limit: number, sort: string | null) =>
-                sort === 'week'
-                    ? new Promise((_resolve, reject) => {
-                          failWeek = reject;
-                      })
-                    : Promise.resolve({
-                          board: 'maps',
-                          sort: sort ?? 'top',
-                          min: 1,
-                          maps: [],
-                          at: 1
-                      })
+        mocks.boards.mockImplementation((_limit: number, sort: string | null) =>
+            sort === 'week'
+                ? new Promise((_resolve, reject) => {
+                      failWeek = reject;
+                  })
+                : Promise.resolve({
+                      board: 'maps',
+                      sort: sort ?? 'top',
+                      min: 1,
+                      maps: [],
+                      at: 1
+                  })
         );
         act(() => result.current.setBoardSort('week'));
         act(() => result.current.setBoardSort('new'));

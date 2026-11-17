@@ -1,9 +1,10 @@
 use std::sync::Mutex;
 
 use serde_json::json;
-use vrcx_0_application_core::vrchat_api::{VrchatApiRequest, VrchatApiResponse};
 use vrcx_0_application_realtime::test_support::runtime_with_active_session;
 use vrcx_0_application_realtime::{RealtimeWsMessagePayload, SyntheticFriendEventOutcome};
+use vrcx_0_contracts::vrchat_api::VrchatRequest;
+use vrcx_0_contracts::vrchat_api::VrchatResponse;
 
 use super::*;
 use crate::remote::VrchatRequestFuture;
@@ -56,35 +57,19 @@ impl MutualGraphStore for RecordingStore {
     }
 }
 
-struct MutualRequests;
-
-impl MutualGraphRemoteRequests for MutualRequests {
-    fn mutual_friends(
-        &self,
-        endpoint: String,
-        user_id: String,
-        _n: i32,
-        _offset: i32,
-    ) -> Result<VrchatApiRequest> {
-        Ok(VrchatApiRequest {
-            endpoint: Some(endpoint),
-            path: Some(format!("users/{user_id}/mutuals/friends")),
-            ..Default::default()
-        })
-    }
-}
-
 struct ResponsePort<F> {
     status: i32,
     rows: Value,
     before_response: F,
+    sent: Mutex<Vec<VrchatRequest>>,
 }
 
 impl<F: Fn() + Send + Sync> VrchatRequestPort for ResponsePort<F> {
-    fn send(&self, _input: VrchatApiRequest, _scope: VrchatScope) -> VrchatRequestFuture<'_> {
+    fn send(&self, input: VrchatRequest, _scope: VrchatScope) -> VrchatRequestFuture<'_> {
+        self.sent.lock().unwrap().push(input);
         Box::pin(async {
             (self.before_response)();
-            Ok(VrchatApiResponse {
+            Ok(VrchatResponse {
                 status: self.status,
                 data: self.rows.to_string(),
             })
@@ -95,16 +80,15 @@ impl<F: Fn() + Send + Sync> VrchatRequestPort for ResponsePort<F> {
 #[tokio::test]
 async fn non_friend_and_pending_request_lists_only_backfill_after_friend_add() -> Result<()> {
     let (_dir, runtime, session) = runtime_with_active_session("mutual-list-pending")?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(session.clone(), Some(7), HashMap::new())?;
+    runtime.sync_friend_baseline(&session, HashMap::new())?;
     let store = RecordingStore::default();
     let remote = ResponsePort {
         status: 200,
         rows: json!([{ "id": "usr_mutual", "displayName": "Mutual" }]),
         before_response: || {},
+        sent: Mutex::default(),
     };
-    let deps = MutualGraphRequestDeps::new(&store, &MutualRequests, &remote, runtime.auth_scope());
+    let deps = MutualGraphRequestDeps::new(&store, &remote, runtime.auth_scope());
 
     for pending in [false, true] {
         runtime.runtime().record_user_profile(
@@ -125,6 +109,13 @@ async fn non_friend_and_pending_request_lists_only_backfill_after_friend_add() -
         )
         .await?;
         assert_eq!(result.rows, vec![RawJson::from(remote.rows[0].clone())]);
+        let sent = remote.sent.lock().unwrap().pop().unwrap();
+        assert_eq!(sent.method.as_deref(), Some("GET"));
+        assert_eq!(
+            sent.path.as_deref(),
+            Some("users/usr%5Ftarget/mutuals/friends")
+        );
+        assert_eq!(sent.endpoint.as_deref(), Some(session.endpoint.as_str()));
         assert!(!result.persisted);
         assert!(store.commits.lock().unwrap().is_empty());
     }
@@ -165,17 +156,16 @@ async fn non_friend_and_pending_request_lists_only_backfill_after_friend_add() -
 #[tokio::test]
 async fn empty_non_friend_list_does_not_create_an_isolated_node() -> Result<()> {
     let (_dir, runtime, session) = runtime_with_active_session("mutual-list-empty")?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(session, Some(7), HashMap::new())?;
+    runtime.sync_friend_baseline(&session, HashMap::new())?;
     let store = RecordingStore::default();
     let remote = ResponsePort {
         status: 200,
         rows: json!([]),
         before_response: || {},
+        sent: Mutex::default(),
     };
     let result = get_user_mutual_friends_list(
-        MutualGraphRequestDeps::new(&store, &MutualRequests, &remote, runtime.auth_scope()),
+        MutualGraphRequestDeps::new(&store, &remote, runtime.auth_scope()),
         runtime.runtime(),
         UserMutualFriendsListInput {
             user_id: "usr_target".into(),
@@ -193,9 +183,7 @@ async fn unavailable_lists_only_update_opt_out_metadata_for_current_friends() ->
     for status in [403, 404] {
         for is_friend in [false, true] {
             let (_dir, runtime, session) = runtime_with_active_session("mutual-list-opt-out")?;
-            runtime
-                .runtime()
-                .sync_friend_snapshot(session.clone(), Some(7), HashMap::new())?;
+            runtime.sync_friend_baseline(&session, HashMap::new())?;
             if is_friend {
                 assert_eq!(
                     runtime.runtime().apply_synthetic_trusted_friend_add(
@@ -213,9 +201,10 @@ async fn unavailable_lists_only_update_opt_out_metadata_for_current_friends() ->
                 status,
                 rows: json!({}),
                 before_response: || {},
+                sent: Mutex::default(),
             };
             let result = get_user_mutual_friends_list(
-                MutualGraphRequestDeps::new(&store, &MutualRequests, &remote, runtime.auth_scope()),
+                MutualGraphRequestDeps::new(&store, &remote, runtime.auth_scope()),
                 runtime.runtime(),
                 UserMutualFriendsListInput {
                     user_id: "usr_target".into(),
@@ -246,9 +235,7 @@ async fn unavailable_lists_only_update_opt_out_metadata_for_current_friends() ->
 #[tokio::test]
 async fn friend_removed_during_list_request_is_not_backfilled() -> Result<()> {
     let (_dir, runtime, session) = runtime_with_active_session("mutual-list-unfriend")?;
-    runtime
-        .runtime()
-        .sync_friend_snapshot(session.clone(), Some(7), HashMap::new())?;
+    runtime.sync_friend_baseline(&session, HashMap::new())?;
     assert_eq!(
         runtime.runtime().apply_synthetic_trusted_friend_add(
             &OwnerId::new(&session.user_id),
@@ -274,9 +261,10 @@ async fn friend_removed_during_list_request_is_not_backfilled() -> Result<()> {
                 SyntheticFriendEventOutcome::Applied
             );
         },
+        sent: Mutex::default(),
     };
     let result = get_user_mutual_friends_list(
-        MutualGraphRequestDeps::new(&store, &MutualRequests, &remote, runtime.auth_scope()),
+        MutualGraphRequestDeps::new(&store, &remote, runtime.auth_scope()),
         runtime.runtime(),
         UserMutualFriendsListInput {
             user_id: "usr_target".into(),

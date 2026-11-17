@@ -34,6 +34,24 @@ describe('AssistantMessage', () => {
         expect(html).toContain('Who was online last night?');
     });
 
+    it('shows a mentioned friend by name without the id link', () => {
+        const html = renderToStaticMarkup(
+            <AssistantMessage
+                thinkingLabel="Thinking…"
+                message={{
+                    id: 'user_2',
+                    role: 'user',
+                    text: 'When is [@Alice](vrcx-0://user/open?id=usr_a) online?',
+                    streaming: false,
+                    toolCalls: []
+                }}
+            />
+        );
+
+        expect(html).toContain('@Alice</button>');
+        expect(html).not.toContain('vrcx-0://');
+    });
+
     it('renders a completed assistant response as Markdown', () => {
         const html = renderToStaticMarkup(
             <AssistantMessage
@@ -41,6 +59,19 @@ describe('AssistantMessage', () => {
                 message={assistantMessage({
                     text: '**Three friends** were online.',
                     streaming: false
+                })}
+            />
+        );
+
+        expect(html).toContain('>Three friends</strong>');
+    });
+
+    it('renders a streaming assistant response as Markdown', () => {
+        const html = renderToStaticMarkup(
+            <AssistantMessage
+                thinkingLabel="Thinking…"
+                message={assistantMessage({
+                    text: '**Three friends** were onl'
                 })}
             />
         );
@@ -61,7 +92,8 @@ describe('AssistantMessage', () => {
                             args: '{}',
                             status: 'pending',
                             summary: '',
-                            entities: []
+                            entities: [],
+                            charts: []
                         }
                     ]
                 })}
@@ -90,7 +122,8 @@ describe('AssistantMessage', () => {
                             args: '{}',
                             status: 'done',
                             summary: 'Found 3 friends.',
-                            entities: []
+                            entities: [],
+                            charts: []
                         }
                     ]
                 })}

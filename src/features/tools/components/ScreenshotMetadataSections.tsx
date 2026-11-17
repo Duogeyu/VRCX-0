@@ -1,18 +1,10 @@
 import {
-    ArrowLeftIcon,
     ArrowRightIcon,
-    CopyIcon,
-    FolderOpenIcon,
+    InfoIcon,
     LayoutGridIcon,
-    ListFilterIcon,
     ListIcon,
-    PanelRightCloseIcon,
-    PanelRightOpenIcon,
-    StarIcon,
-    Trash2Icon,
-    UploadIcon,
-    UsersIcon,
-    XIcon
+    SparklesIcon,
+    UsersIcon
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -25,45 +17,41 @@ import {
     DataTableHeaderRow,
     DataTableRow
 } from '@/components/data-table/DataTableView';
-import { KeyboardShortcut } from '@/components/keyboard/KeyboardShortcut';
+import { DateRangeFilter } from '@/components/date-range-filter/DateRangeFilter';
 import { PageToolbar, PageToolbarRow } from '@/components/layout/PageScaffold';
 import {
-    ToolbarSearch,
     ToolbarSegmented,
     ToolbarStatus,
-    ToolbarViews,
-    toolbarSearchScopeTrigger
+    ToolbarViews
 } from '@/components/layout/ToolbarControls';
-import { cn } from '@/lib/utils';
+import type {
+    ScreenshotFacet,
+    ScreenshotPeopleMatch
+} from '@/platform/tauri/bindings';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Button } from '@/ui/shadcn/button';
-import {
-    Card,
-    CardContent,
-    CardDescription,
-    CardHeader,
-    CardTitle
-} from '@/ui/shadcn/card';
-import {
-    DropdownMenu,
-    DropdownMenuCheckboxItem,
-    DropdownMenuContent,
-    DropdownMenuGroup,
-    DropdownMenuTrigger
-} from '@/ui/shadcn/dropdown-menu';
 import { Table, TableBody, TableHeader } from '@/ui/shadcn/table';
-import { Tooltip } from '@/ui/shadcn/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
 
 import {
-    SCREENSHOT_METADATA_SEARCH_TYPES,
-    type NormalizedScreenshotMetadata,
-    type ScreenshotMetadataSearchType,
     type ScreenshotSearchRow,
+    type ScreenshotSearchScope,
     type ScreenshotSearchSort
 } from '../screenshotMetadataValues';
 import type { ScreenshotSearchLayout } from '../useScreenshotMetadataSearch';
-import { EmptyState, SearchSortHead } from './ScreenshotMetadataParts';
+import { SearchSortHead } from './ScreenshotMetadataParts';
+import { ScreenshotSearchBox } from './ScreenshotSearchBox';
 
-export { ScreenshotMetadataDetailsCard } from './ScreenshotMetadataDetailsCard';
+const PEOPLE_MATCH_OPTIONS = [
+    {
+        value: 'all',
+        labelKey: 'dialog.screenshot_metadata.people_match_all'
+    },
+    {
+        value: 'any',
+        labelKey: 'dialog.screenshot_metadata.people_match_any'
+    }
+] as const;
 
 const SEARCH_LAYOUT_OPTIONS = [
     {
@@ -78,146 +66,44 @@ const SEARCH_LAYOUT_OPTIONS = [
     }
 ] as const;
 
-export function ScreenshotDetailActions({
-    metadata,
-    isVrcPlusSupporter,
-    isUploadingScreenshot,
-    isDeletingMetadata,
-    isDeletingFile,
-    onBackToGallery,
-    onOpenFolder,
-    onCopyImage,
-    onUpload,
-    onDelete,
-    onDeleteFile,
-    isFavorite,
-    onToggleFavorite
-}: {
-    metadata: NormalizedScreenshotMetadata | null;
-    isVrcPlusSupporter: boolean;
-    isUploadingScreenshot: boolean;
-    isDeletingMetadata: boolean;
-    isDeletingFile: boolean;
-    onBackToGallery: () => void;
-    onOpenFolder: () => void;
-    onCopyImage: () => void;
-    onUpload: () => void;
-    onDelete: () => void;
-    onDeleteFile: () => void;
-    isFavorite: boolean;
-    onToggleFavorite: () => void;
-}) {
-    const { t } = useTranslation();
-
-    return (
-        <div className="mb-2 flex flex-wrap gap-2">
-            <Button variant="ghost" size="sm" onClick={onBackToGallery}>
-                <ArrowLeftIcon data-icon="inline-start" />
-                {t('dialog.screenshot_metadata.gallery')}
-            </Button>
-            <Button
-                variant="outline"
-                size="sm"
-                disabled={!metadata?.filePath}
-                aria-pressed={isFavorite}
-                onClick={onToggleFavorite}
-            >
-                <StarIcon
-                    data-icon="inline-start"
-                    className={cn(isFavorite && 'fill-current text-amber-400')}
-                />
-                {t(
-                    isFavorite
-                        ? 'dialog.screenshot_metadata.unfavorite'
-                        : 'dialog.screenshot_metadata.favorite'
-                )}
-            </Button>
-            <Button
-                variant="outline"
-                size="sm"
-                disabled={!metadata?.filePath}
-                onClick={onOpenFolder}
-            >
-                <FolderOpenIcon data-icon="inline-start" />
-                {t('dialog.screenshot_metadata.open_folder')}
-            </Button>
-            <Button
-                variant="outline"
-                size="sm"
-                disabled={!metadata?.filePath}
-                onClick={onCopyImage}
-            >
-                <CopyIcon data-icon="inline-start" />
-                {t('dialog.screenshot_metadata.copy_image')}
-            </Button>
-            <Button
-                variant="outline"
-                size="sm"
-                disabled={
-                    !metadata?.filePath ||
-                    !isVrcPlusSupporter ||
-                    isUploadingScreenshot
-                }
-                onClick={onUpload}
-            >
-                <UploadIcon data-icon="inline-start" />
-                {t('dialog.screenshot_metadata.upload')}
-            </Button>
-            <Button
-                variant="outline"
-                size="sm"
-                disabled={!metadata?.filePath || isDeletingMetadata}
-                onClick={onDelete}
-            >
-                <Trash2Icon data-icon="inline-start" />
-                {t('dialog.screenshot_metadata.delete_metadata')}
-            </Button>
-            <Button
-                variant="destructive"
-                size="sm"
-                disabled={!metadata?.filePath || isDeletingFile}
-                onClick={onDeleteFile}
-            >
-                <Trash2Icon data-icon="inline-start" />
-                {t('dialog.screenshot_metadata.delete_file')}
-            </Button>
-        </div>
-    );
-}
-
 export function ScreenshotSearchToolbar({
-    searchQuery,
-    searchType,
+    scope,
+    draft,
+    peopleFacets,
+    worldFacets,
+    isSearching,
     searchLayout,
     showResultControls,
     searchRowsCount,
-    searchNavigationCount,
-    selectedPathIndex,
-    onSearchQueryChange,
-    onSearchTypeChange,
-    onSearch,
+    withoutPeopleCount,
+    onDraftChange,
+    onScopeChange,
+    onCommitText,
+    onDateRangeChange,
+    onPeopleMatchChange,
     onSearchLayoutChange,
-    onClearSearch
+    onClearSearch,
+    onAskAssistant
 }: {
-    searchQuery: string;
-    searchType: ScreenshotMetadataSearchType['value'];
+    scope: ScreenshotSearchScope;
+    draft: string;
+    peopleFacets: ScreenshotFacet[];
+    worldFacets: ScreenshotFacet[];
+    isSearching: boolean;
     searchLayout: ScreenshotSearchLayout;
     showResultControls: boolean;
     searchRowsCount: number;
-    searchNavigationCount: number;
-    selectedPathIndex: number;
-    onSearchQueryChange: (value: string) => void;
-    onSearchTypeChange: (value: string | null) => void;
-    onSearch: () => void;
+    withoutPeopleCount: number;
+    onDraftChange: (value: string) => void;
+    onScopeChange: (people: string[], worlds: string[]) => void;
+    onCommitText: () => void;
+    onDateRangeChange: (from: string, to: string) => void;
+    onPeopleMatchChange: (value: ScreenshotPeopleMatch) => void;
     onSearchLayoutChange: (layout: ScreenshotSearchLayout) => void;
     onClearSearch: () => void;
+    onAskAssistant: () => void;
 }) {
     const { t } = useTranslation();
-    const activeSearchTypeLabel = t(
-        SCREENSHOT_METADATA_SEARCH_TYPES.find(
-            (type) => type.value === searchType
-        )?.labelKey || 'dialog.screenshot_metadata.search_type_placeholder'
-    );
 
     return (
         <PageToolbar>
@@ -225,15 +111,22 @@ export function ScreenshotSearchToolbar({
                 <ToolbarViews className="min-w-0 flex-wrap">
                     {showResultControls ? (
                         <>
-                            {searchRowsCount > 0 ? (
-                                <ToolbarStatus>
-                                    {t(
-                                        'dialog.screenshot_metadata.result_count',
-                                        {
-                                            count: searchRowsCount
-                                        }
+                            <ToolbarStatus>
+                                {t('dialog.screenshot_metadata.result_count', {
+                                    count: searchRowsCount
+                                })}
+                            </ToolbarStatus>
+                            {scope.people.length > 1 ? (
+                                <ToolbarSegmented
+                                    value={scope.peopleMatch}
+                                    onValueChange={onPeopleMatchChange}
+                                    options={PEOPLE_MATCH_OPTIONS.map(
+                                        (option) => ({
+                                            value: option.value,
+                                            label: t(option.labelKey)
+                                        })
                                     )}
-                                </ToolbarStatus>
+                                />
                             ) : null}
                             <ToolbarSegmented
                                 iconOnly
@@ -247,81 +140,82 @@ export function ScreenshotSearchToolbar({
                                     })
                                 )}
                             />
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                onClick={onClearSearch}
-                            >
-                                <XIcon data-icon="inline-start" />
-                                {t('dialog.screenshot_metadata.clear_search')}
-                            </Button>
+                            {withoutPeopleCount > 0 ? (
+                                <Tooltip>
+                                    <TooltipTrigger
+                                        render={
+                                            <span className="text-muted-foreground inline-flex cursor-help items-center gap-1 text-xs">
+                                                <InfoIcon className="size-3.5" />
+                                                {t(
+                                                    'dialog.screenshot_metadata.without_people',
+                                                    {
+                                                        count: withoutPeopleCount
+                                                    }
+                                                )}
+                                            </span>
+                                        }
+                                    />
+                                    <TooltipContent className="max-w-64">
+                                        {t(
+                                            'dialog.screenshot_metadata.without_people_hint'
+                                        )}
+                                    </TooltipContent>
+                                </Tooltip>
+                            ) : null}
                         </>
-                    ) : searchNavigationCount && selectedPathIndex >= 0 ? (
-                        <ToolbarStatus>
-                            {selectedPathIndex + 1}/{searchNavigationCount}
-                        </ToolbarStatus>
                     ) : null}
                 </ToolbarViews>
 
-                <ToolbarSearch
-                    value={searchQuery}
-                    onValueChange={onSearchQueryChange}
-                    onCommit={onSearch}
+                <ScreenshotSearchBox
+                    people={scope.people}
+                    worlds={scope.worlds}
+                    peopleFacets={peopleFacets}
+                    worldFacets={worldFacets}
+                    draft={draft}
+                    isSearching={isSearching}
+                    onDraftChange={onDraftChange}
+                    onScopeChange={onScopeChange}
+                    onCommitText={onCommitText}
                     onClear={onClearSearch}
-                    commitOnBlur={false}
-                    placeholder={t('dialog.screenshot_metadata.search_in', {
-                        scope: activeSearchTypeLabel
-                    })}
-                    trailing={
-                        <DropdownMenu>
-                            <Tooltip>
-                                <DropdownMenuTrigger
-                                    render={toolbarSearchScopeTrigger({
-                                        active: true,
-                                        icon: ListFilterIcon,
-                                        label: activeSearchTypeLabel
-                                    })}
-                                />
-                            </Tooltip>
-                            <DropdownMenuContent align="end" className="w-48">
-                                <DropdownMenuGroup>
-                                    {SCREENSHOT_METADATA_SEARCH_TYPES.map(
-                                        (type) => (
-                                            <DropdownMenuCheckboxItem
-                                                key={type.value}
-                                                checked={
-                                                    type.value === searchType
-                                                }
-                                                onCheckedChange={() =>
-                                                    onSearchTypeChange(
-                                                        type.value
-                                                    )
-                                                }
-                                            >
-                                                {t(type.labelKey)}
-                                            </DropdownMenuCheckboxItem>
-                                        )
-                                    )}
-                                </DropdownMenuGroup>
-                            </DropdownMenuContent>
-                        </DropdownMenu>
+                    dateFilter={
+                        <DateRangeFilter
+                            label={t('dialog.screenshot_metadata.date_range')}
+                            dateFrom={scope.dateFrom}
+                            dateTo={scope.dateTo}
+                            onChange={onDateRangeChange}
+                        />
                     }
                 />
+                <Tooltip>
+                    <TooltipTrigger
+                        render={
+                            <Button
+                                type="button"
+                                size="icon-xs"
+                                variant="outline"
+                                aria-label={t('assistant.title')}
+                                onClick={onAskAssistant}
+                            >
+                                <SparklesIcon data-icon="inline-start" />
+                            </Button>
+                        }
+                    />
+                    <TooltipContent>{t('assistant.title')}</TooltipContent>
+                </Tooltip>
             </PageToolbarRow>
         </PageToolbar>
     );
 }
 
 export function ScreenshotMetadataResultsTable({
-    currentSearchType,
+    showMatch,
     searchSort,
     sortedSearchRows,
     selectedPath,
     onToggleSearchSort,
     onOpenResult
 }: {
-    currentSearchType: ScreenshotMetadataSearchType;
+    showMatch: boolean;
     searchSort: ScreenshotSearchSort;
     sortedSearchRows: ScreenshotSearchRow[];
     selectedPath: string;
@@ -353,7 +247,7 @@ export function ScreenshotMetadataResultsTable({
                                 onToggle={onToggleSearchSort}
                             />
                         </DataTableHead>
-                        {currentSearchType.index <= 1 ? (
+                        {showMatch ? (
                             <DataTableHead>
                                 <SearchSortHead
                                     label={t(
@@ -406,7 +300,7 @@ export function ScreenshotMetadataResultsTable({
                         >
                             <DataTableCell>{row.dateLabel}</DataTableCell>
                             <DataTableCell>{row.world}</DataTableCell>
-                            {currentSearchType.index <= 1 ? (
+                            {showMatch ? (
                                 <DataTableCell>{row.match}</DataTableCell>
                             ) : null}
                             <DataTableCell>{row.author}</DataTableCell>
@@ -422,132 +316,21 @@ export function ScreenshotMetadataResultsTable({
                             <DataTableCell
                                 className={`${DATA_TABLE_CONTROL_CELL_CLASS_NAME} text-right`}
                             >
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon-sm"
-                                    aria-label={t('common.actions.open')}
-                                    onClick={() => onOpenResult(row)}
-                                >
-                                    <ArrowRightIcon data-icon="inline-start" />
-                                </Button>
+                                <HintTooltip label={t('common.actions.open')}>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon-sm"
+                                        onClick={() => onOpenResult(row)}
+                                    >
+                                        <ArrowRightIcon data-icon="inline-start" />
+                                    </Button>
+                                </HintTooltip>
                             </DataTableCell>
                         </DataTableRow>
                     ))}
                 </TableBody>
             </Table>
         </div>
-    );
-}
-
-export function ScreenshotMetadataPreviewCard({
-    metadata,
-    imageUrl,
-    isMetadataLoading,
-    canNavigatePrev,
-    canNavigateNext,
-    isDetailsVisible,
-    onNavigatePrev,
-    onNavigateNext,
-    onToggleDetails,
-    onImagePreview
-}: {
-    metadata: NormalizedScreenshotMetadata | null;
-    imageUrl: string;
-    isMetadataLoading: boolean;
-    canNavigatePrev: boolean;
-    canNavigateNext: boolean;
-    isDetailsVisible: boolean;
-    onNavigatePrev: () => void;
-    onNavigateNext: () => void;
-    onToggleDetails: () => void;
-    onImagePreview: () => void;
-}) {
-    const { t } = useTranslation();
-
-    return (
-        <Card className="flex min-h-0 flex-col">
-            <CardHeader>
-                <div className="flex items-center justify-between gap-4">
-                    <div className="flex flex-col gap-1">
-                        <CardTitle>{t('view.tools.action.preview')}</CardTitle>
-                        <CardDescription>
-                            {metadata?.fileName ||
-                                t('dialog.screenshot_metadata.drag')}
-                        </CardDescription>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={!canNavigatePrev}
-                            onClick={onNavigatePrev}
-                        >
-                            <ArrowLeftIcon data-icon="inline-start" />
-                            {t('view.tools.label.prev')}
-                            <KeyboardShortcut keys="ArrowLeft" />
-                        </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={!canNavigateNext}
-                            onClick={onNavigateNext}
-                        >
-                            {t('table.pagination.next')}
-                            <KeyboardShortcut keys="ArrowRight" />
-                            <ArrowRightIcon data-icon="inline-end" />
-                        </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={onToggleDetails}
-                        >
-                            {isDetailsVisible ? (
-                                <PanelRightCloseIcon data-icon="inline-start" />
-                            ) : (
-                                <PanelRightOpenIcon data-icon="inline-start" />
-                            )}
-                            {t(
-                                isDetailsVisible
-                                    ? 'dialog.screenshot_metadata.hide_details'
-                                    : 'dialog.screenshot_metadata.show_details'
-                            )}
-                            <KeyboardShortcut keys="I" />
-                        </Button>
-                    </div>
-                </div>
-            </CardHeader>
-            <CardContent className="flex min-h-0 flex-1 items-center justify-center">
-                {isMetadataLoading && !imageUrl ? (
-                    <EmptyState
-                        loading
-                        title={t('view.tools.loading.loading_screenshot')}
-                        description={t(
-                            'view.tools.loading.fetching_embedded_metadata_and_file_details'
-                        )}
-                    />
-                ) : imageUrl ? (
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        className="h-auto w-full p-0"
-                        onClick={onImagePreview}
-                    >
-                        <img
-                            src={imageUrl}
-                            alt={metadata?.fileName || 'Screenshot preview'}
-                            className="max-h-[70vh] w-full rounded-lg object-contain transition-none"
-                        />
-                    </Button>
-                ) : (
-                    <EmptyState
-                        title={t('dialog.screenshot_metadata.drag')}
-                        description={t(
-                            'view.tools.description.browse_for_a_screenshot_load_the_latest_screenshot_or_run_a_metadata_search'
-                        )}
-                    />
-                )}
-            </CardContent>
-        </Card>
     );
 }

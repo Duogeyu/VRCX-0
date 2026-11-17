@@ -1,5 +1,5 @@
-use crate::common::{insert_or_ignore_sql, DbWriteTarget, ParamsBuilder};
-use crate::database::DatabaseService;
+use crate::common::{affected_count, insert_or_ignore_sql, DbWriteTarget, ParamsBuilder};
+use crate::database::{DatabaseService, DatabaseWriteTransaction};
 use crate::ownership::{owner_id_get_or_insert, OwnerId, OwnerRowId};
 use crate::Error;
 
@@ -7,7 +7,8 @@ use super::schema::*;
 use super::tables::ensure_game_log_tables_on;
 use super::types::{
     GameLogEventEntry, GameLogExternalEntry, GameLogJoinLeaveEntry, GameLogLocationEntry,
-    GameLogPortalSpawnEntry, GameLogResourceLoadEntry, GameLogVideoPlayEntry, GameLogWriteBatch,
+    GameLogLocationTimeUpdate, GameLogPortalSpawnEntry, GameLogResourceLoadEntry,
+    GameLogVideoPlayEntry, GameLogWriteBatch, GameLogWriteCount,
 };
 
 fn update_location_time_sql() -> String {
@@ -284,9 +285,9 @@ pub fn write_batch(
     db: &DatabaseService,
     owner_user_id: &OwnerId,
     batch: &GameLogWriteBatch,
-) -> Result<u64, Error> {
+) -> Result<GameLogWriteCount, Error> {
     if batch.is_empty() {
-        return Ok(0);
+        return Ok(GameLogWriteCount::default());
     }
 
     super::tables::ensure_game_log_tables(db)?;
@@ -296,12 +297,13 @@ pub fn write_batch(
     let owner_id = owner_id_get_or_insert(db, owner_user_id)?;
     db.write_transaction(|tx| {
         ensure_game_log_tables_on(tx)?;
-        let mut affected = 0_u64;
+        let mut inserted = 0_u64;
+        let mut location_times_updated = 0_u64;
         for entry in &batch.locations {
-            affected = affected.saturating_add(insert_location_on(tx, owner_id, entry)?);
+            inserted = inserted.saturating_add(insert_location_on(tx, owner_id, entry)?);
         }
         for update in &batch.location_time_updates {
-            affected = affected.saturating_add(update_location_time_on(
+            location_times_updated = location_times_updated.saturating_add(update_location_time_on(
                 tx,
                 owner_id,
                 &update.created_at,
@@ -309,22 +311,36 @@ pub fn write_batch(
             )?);
         }
         for entry in &batch.join_leave {
-            affected = affected.saturating_add(insert_join_leave_on(tx, owner_id, entry)?);
+            inserted = inserted.saturating_add(insert_join_leave_on(tx, owner_id, entry)?);
         }
         for entry in &batch.portal_spawns {
-            affected = affected.saturating_add(insert_portal_spawn_on(tx, owner_id, entry)?);
+            inserted = inserted.saturating_add(insert_portal_spawn_on(tx, owner_id, entry)?);
         }
         for entry in &batch.video_plays {
-            affected = affected.saturating_add(insert_video_play_on(tx, owner_id, entry)?);
+            inserted = inserted.saturating_add(insert_video_play_on(tx, owner_id, entry)?);
+        }
+        let mut video_names_updated = 0_u64;
+        for entry in &batch.video_play_names {
+            video_names_updated = video_names_updated.saturating_add(
+                tx.execute_non_query(
+                    &format!("UPDATE {TABLE_VIDEO_PLAY} SET {COL_VIDEO_NAME} = @{COL_VIDEO_NAME} WHERE {COL_CREATED_AT} = @{COL_CREATED_AT} AND {COL_VIDEO_URL} = @{COL_VIDEO_URL}"),
+                    &ParamsBuilder::new()
+                        .set(COL_CREATED_AT, entry.created_at.clone())
+                        .set(COL_VIDEO_URL, entry.video_url.clone())
+                        .set(COL_VIDEO_NAME, entry.video_name.clone())
+                        .build(),
+                )
+                .map(affected_count)?,
+            );
         }
         for entry in &batch.resource_loads {
-            affected = affected.saturating_add(insert_resource_load_on(tx, owner_id, entry)?);
+            inserted = inserted.saturating_add(insert_resource_load_on(tx, owner_id, entry)?);
         }
         for entry in &batch.events {
-            affected = affected.saturating_add(insert_event_on(tx, owner_id, entry)?);
+            inserted = inserted.saturating_add(insert_event_on(tx, owner_id, entry)?);
         }
         for entry in &batch.externals {
-            affected = affected.saturating_add(insert_external_on(tx, owner_id, entry)?);
+            inserted = inserted.saturating_add(insert_external_on(tx, owner_id, entry)?);
         }
         if let Some(checkpoint) = &batch.replay_checkpoint {
             tx.execute_non_query(
@@ -335,7 +351,11 @@ pub fn write_batch(
                     .build(),
             )?;
         }
-        Ok(affected)
+        Ok(GameLogWriteCount {
+            inserted,
+            location_times_updated,
+            video_names_updated,
+        })
     })
 }
 
@@ -365,8 +385,38 @@ pub fn fill_location_group_name(
     .map(affected_count)
 }
 
-fn affected_count(count: i64) -> u64 {
-    count.max(0) as u64
+pub(crate) fn insert_game_log_location(
+    tx: &mut DatabaseWriteTransaction<'_>,
+    owner_id: OwnerRowId,
+    entry: &GameLogLocationEntry,
+) -> Result<u64, Error> {
+    if entry.location.trim().is_empty() {
+        return Ok(0);
+    }
+    tx.execute_non_query(
+        "INSERT OR IGNORE INTO gamelog_location (created_at, location, world_id, world_name, time, group_name, owner_id) VALUES (@created_at, @location, @world_id, @world_name, @time, @group_name, @owner_id)",
+        &ParamsBuilder::new()
+            .set("created_at", entry.created_at.clone())
+            .set("location", entry.location.clone())
+            .set("world_id", entry.world_id.clone())
+            .set("world_name", entry.world_name.clone())
+            .set("time", entry.time)
+            .set("group_name", entry.group_name.clone())
+            .set("owner_id", owner_id)
+            .build(),
+    )
+    .map(affected_count)
+}
+
+pub(crate) fn update_game_log_location_time(
+    tx: &mut DatabaseWriteTransaction<'_>,
+    owner_id: OwnerRowId,
+    update: &GameLogLocationTimeUpdate,
+) -> Result<u64, Error> {
+    if update.created_at.trim().is_empty() || update.time < 0 {
+        return Ok(0);
+    }
+    update_location_time_on(tx, owner_id, &update.created_at, update.time)
 }
 
 #[cfg(test)]

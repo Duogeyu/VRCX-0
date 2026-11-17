@@ -1,24 +1,17 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+
+use serde_json::Value;
 
 use vrcx_0_application::social::{MutualGraphFetchStartInput, MutualGraphFetchStatus};
 use vrcx_0_contracts::feed::{FeedRowOutput, FeedRowsQueryInput};
 use vrcx_0_contracts::social_aggregates as social;
 use vrcx_0_contracts::FavoriteRow;
+use vrcx_0_core::screenshots::{ScreenshotFacet, ScreenshotFilter, ScreenshotQueryResult};
 use vrcx_0_core::FavoriteEntityKind;
 use vrcx_0_core::OwnerId;
-
-pub trait McpConfigPort: Send + Sync {
-    fn get_bool(&self, key: &str, default: bool) -> vrcx_0_application_core::Result<bool>;
-
-    fn set_bool(&self, key: &str, value: bool) -> vrcx_0_application_core::Result<()>;
-
-    fn get_string(&self, key: &str, default: &str) -> vrcx_0_application_core::Result<String>;
-
-    fn set_string(&self, key: &str, value: &str) -> vrcx_0_application_core::Result<()>;
-}
-
-pub type McpConfig = Arc<dyn McpConfigPort>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpPlaySpan {
@@ -48,6 +41,20 @@ pub trait McpActivityQueryPort: Send + Sync {
         owner_user_id: &OwnerId,
         input: social::TopVisitedWorldsInput,
     ) -> vrcx_0_application_core::Result<Vec<social::TopVisitedWorldRow>>;
+
+    fn world_visit_history(
+        &self,
+        owner_user_id: &OwnerId,
+        world_id: &str,
+        recent_limit: i64,
+    ) -> vrcx_0_application_core::Result<social::WorldVisitHistory>;
+
+    fn find_visited_worlds(
+        &self,
+        owner_user_id: &OwnerId,
+        name: &str,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<social::VisitedWorldMatch>>;
 
     fn fading_friends(
         &self,
@@ -231,6 +238,46 @@ pub trait McpMutualGraphPort: Send + Sync {
 
 pub type McpMutualGraph = Arc<dyn McpMutualGraphPort>;
 
+pub type McpFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait McpWorldLookupPort: Send + Sync {
+    fn world(
+        &self,
+        world_id: String,
+    ) -> McpFuture<'_, vrcx_0_application_core::Result<Option<Value>>>;
+}
+
+pub type McpWorldLookup = Arc<dyn McpWorldLookupPort>;
+
+pub trait McpScreenshotQueryPort: Send + Sync {
+    fn query(
+        &self,
+        filter: &ScreenshotFilter,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<ScreenshotQueryResult>;
+
+    fn people(
+        &self,
+        filter: &ScreenshotFilter,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<ScreenshotFacet>>;
+
+    fn worlds(
+        &self,
+        filter: &ScreenshotFilter,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<ScreenshotFacet>>;
+
+    fn months(
+        &self,
+        filter: &ScreenshotFilter,
+        utc_offset_minutes: i64,
+        limit: i64,
+    ) -> vrcx_0_application_core::Result<Vec<ScreenshotFacet>>;
+}
+
+pub type McpScreenshotQueries = Arc<dyn McpScreenshotQueryPort>;
+
 pub type McpInterruptCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
 pub trait McpFeedQueryPort: Send + Sync {
@@ -242,3 +289,15 @@ pub trait McpFeedQueryPort: Send + Sync {
 }
 
 pub type McpFeedQueries = Arc<dyn McpFeedQueryPort>;
+
+pub trait McpChatboxPort: Send + Sync {
+    fn state(&self) -> vrcx_0_application_core::Result<Value>;
+
+    fn update_config(&self, config: Value) -> vrcx_0_application_core::Result<Value>;
+
+    fn send(&self, text: String) -> vrcx_0_application_core::Result<Value>;
+
+    fn set_afk(&self, afk: bool) -> vrcx_0_application_core::Result<Value>;
+}
+
+pub type McpChatbox = Arc<dyn McpChatboxPort>;

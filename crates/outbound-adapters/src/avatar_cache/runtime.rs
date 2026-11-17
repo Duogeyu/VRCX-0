@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use moka::sync::Cache;
 use serde_json::Value;
+use vrcx_0_contracts::vrchat_api::VrchatScope;
 use vrcx_0_core::vrchat_json::AvatarJson;
 use vrcx_0_persistence::avatars::{
     avatar_cache_existing_ids, avatar_cache_find_by_file_id, avatar_cache_get, avatar_cache_upsert,
@@ -11,8 +12,8 @@ use vrcx_0_persistence::avatars::{
 };
 use vrcx_0_persistence::cache_entities::CacheEntityInput;
 use vrcx_0_persistence::DatabaseService;
-use vrcx_0_vrchat_client::avatars::avatar_get_input;
-use vrcx_0_vrchat_client::http_api::{normalize_vrchat_api_endpoint, ApiScope};
+use vrcx_0_vrchat_protocol::avatars::avatar_get_input;
+use vrcx_0_vrchat_protocol::http_api::normalize_vrchat_api_endpoint;
 
 use vrcx_0_application_core::WebClient;
 
@@ -22,6 +23,7 @@ pub struct AvatarCache {
     working: Cache<AvatarCacheKey, Arc<AvatarCacheEntry>>,
     db: Arc<DatabaseService>,
     inflight: Mutex<HashMap<AvatarCacheKey, Weak<tokio::sync::Mutex<()>>>>,
+    web: Arc<WebClient>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -37,7 +39,12 @@ struct AvatarCacheEntry {
 }
 
 impl AvatarCache {
-    pub fn new(db: Arc<DatabaseService>, capacity: u64, working_ttl: Duration) -> Self {
+    pub fn new(
+        db: Arc<DatabaseService>,
+        web: Arc<WebClient>,
+        capacity: u64,
+        working_ttl: Duration,
+    ) -> Self {
         let capacity = capacity.max(1);
         Self {
             working: Cache::builder()
@@ -46,11 +53,8 @@ impl AvatarCache {
                 .build(),
             db,
             inflight: Mutex::new(HashMap::new()),
+            web,
         }
-    }
-
-    pub fn clear_working(&self) {
-        self.working.invalidate_all();
     }
 
     pub fn invalidate(&self, user_id: &str, endpoint: &str, avatar_id: &str) {
@@ -71,9 +75,7 @@ impl AvatarCache {
         if let Some(entry) = self.working.get(&key) {
             return Ok(Some(entry.summary.clone()));
         }
-        let Some(summary) = avatar_cache_get(self.db.as_ref(), key.avatar_id.clone())
-            .map_err(crate::map_persistence_error)?
-        else {
+        let Some(summary) = avatar_cache_get(self.db.as_ref(), key.avatar_id.clone())? else {
             return Ok(None);
         };
         if !is_meaningful_summary(&summary) {
@@ -92,9 +94,7 @@ impl AvatarCache {
         let Some(file_id) = extract_file_id(image_url) else {
             return Ok(None);
         };
-        let Some(summary) = avatar_cache_find_by_file_id(self.db.as_ref(), &file_id)
-            .map_err(crate::map_persistence_error)?
-        else {
+        let Some(summary) = avatar_cache_find_by_file_id(self.db.as_ref(), &file_id)? else {
             return Ok(None);
         };
         if !is_meaningful_summary(&summary) {
@@ -131,8 +131,7 @@ impl AvatarCache {
     }
 
     pub fn existing_summary_ids(&self, avatar_ids: &[String]) -> crate::Result<Vec<String>> {
-        avatar_cache_existing_ids(self.db.as_ref(), avatar_ids)
-            .map_err(crate::map_persistence_error)
+        avatar_cache_existing_ids(self.db.as_ref(), avatar_ids).map_err(crate::Error::from)
     }
 
     pub fn store_summaries(
@@ -145,8 +144,7 @@ impl AvatarCache {
             .iter()
             .filter_map(|entry| entry.id.as_str().map(str::to_string))
             .collect::<Vec<_>>();
-        let stored = avatar_cache_upsert_many(self.db.as_ref(), entries)
-            .map_err(crate::map_persistence_error)?;
+        let stored = avatar_cache_upsert_many(self.db.as_ref(), entries)?;
         for avatar_id in avatar_ids {
             self.invalidate(user_id, endpoint, &avatar_id);
         }
@@ -155,7 +153,6 @@ impl AvatarCache {
 
     pub async fn resolve(
         &self,
-        web: &WebClient,
         user_id: &str,
         endpoint: &str,
         avatar_id: &str,
@@ -188,19 +185,14 @@ impl AvatarCache {
                 }
             }
         }
-        self.fetch_avatar(web, &key).await.map(Some)
+        self.fetch_avatar(&key).await.map(Some)
     }
 
-    async fn fetch_avatar(
-        &self,
-        web: &WebClient,
-        key: &AvatarCacheKey,
-    ) -> crate::Result<Arc<Value>> {
-        let (_, request) = avatar_get_input(key.endpoint.clone(), key.avatar_id.clone())
-            .map_err(crate::map_http_api_error)?;
+    async fn fetch_avatar(&self, key: &AvatarCacheKey) -> crate::Result<Arc<Value>> {
+        let (_, request) = avatar_get_input(key.endpoint.clone(), key.avatar_id.clone())?;
         let response = tokio::time::timeout(
             AVATAR_RESOLVE_FETCH_TIMEOUT,
-            web.execute_api(request, ApiScope::Vrchat),
+            self.web.execute_api(request, VrchatScope::Vrchat),
         )
         .await
         .map_err(|_| {
@@ -279,10 +271,6 @@ impl AvatarCache {
 
 #[async_trait::async_trait]
 impl vrcx_0_application_core::AvatarCachePort for AvatarCache {
-    fn clear_working(&self) {
-        AvatarCache::clear_working(self);
-    }
-
     fn invalidate(&self, user_id: &str, endpoint: &str, avatar_id: &str) {
         AvatarCache::invalidate(self, user_id, endpoint, avatar_id);
     }
@@ -329,14 +317,13 @@ impl vrcx_0_application_core::AvatarCachePort for AvatarCache {
 
     async fn resolve(
         &self,
-        web: &WebClient,
         user_id: &str,
         endpoint: &str,
         avatar_id: &str,
         full: bool,
         fresh: bool,
     ) -> crate::Result<Option<Arc<Value>>> {
-        AvatarCache::resolve(self, web, user_id, endpoint, avatar_id, full, fresh).await
+        AvatarCache::resolve(self, user_id, endpoint, avatar_id, full, fresh).await
     }
 }
 

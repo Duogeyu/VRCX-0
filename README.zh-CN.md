@@ -1,6 +1,6 @@
 <div align="center">
 
-# <img src="images/VRCX-0.png" alt="VRCX-0 Logo" width="25"> VRCX-0-Galaxies
+# <img src="images/brand/VRCX-0.png" alt="VRCX-0 Logo" width="25"> VRCX-0-Galaxies
 
 ### VRCX-0 的分支版本：更快、更轻，并集成「星遇同频」。
 
@@ -19,7 +19,7 @@
 
 Windows · macOS · Linux
 
-![VRCX-0](images/screenshot-user-dialog.webp)
+![VRCX-0](images/screenshots/user-dialog.webp)
 
 </div>
 
@@ -67,13 +67,13 @@ Authenticode 代码签名的发布链路。除此之外与上游 VRCX-0 保持�
 | **社交自动化** | 按是否独处切换状态；自动回复加入请求           | + 定时规则、多条情境规则与优先级、结束后恢复原状态                |
 | **通知**       | 桌面、语音、XSOverlay、OVR Toolkit、腕部悬浮层 | + 桌面叠加界面、Discord Webhook、勿扰模式；所有通道按事件独立筛选 |
 | **VR 悬浮层**  | 浏览器渲染（100 MB+）；OpenVR                  | + 原生渲染（几十 MB）；OpenXR（**WiVRn 实测通过**）               |
-| 截图           | 查看和搜索元数据                               | + 网格视图、批量管理、ZIP 导出                                    |
+| 截图           | 查看和搜索元数据                               | + 网格视图、收藏、批量管理、ZIP 导出                              |
 | 模型详情       | 性能等级、文件大小                             | + 完整性能指标，对照各平台上限                                    |
 | 备份           | VRChat 注册表设置                              | + 数据库定时备份、一键恢复                                        |
 | 好友位置       | 按同一房间分组                                 | + 世界视图                                                        |
 | 群组管理       | 逐个设置可见性                                 | + 批量退出、批量设置可见性；玩家列表显示群组身份组                |
 | 主题           | 内置主题、自定义 CSS 文件                      | + 社区主题、背景图片、应用内 CSS 编辑、强调色                     |
-| 游戏日志       | 多账号记录混合                                 | 按账号分开存储                                                    |
+| 多账号         | 多账号游戏日志混在一起                         | 游戏日志按账号分开存储；用另一个账号玩 VRChat 时互不影响          |
 
 VRCX 的其他功能，VRCX-0 同样具备。
 

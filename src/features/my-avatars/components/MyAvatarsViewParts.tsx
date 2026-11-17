@@ -26,6 +26,7 @@ import { FadeInImage } from '@/components/media/FadeInImage';
 import { cn } from '@/lib/utils';
 import { openAvatarDialog } from '@/services/dialogService';
 import { getAvailablePlatforms } from '@/shared/utils/avatarPlatform';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Badge } from '@/ui/shadcn/badge';
 import { Button } from '@/ui/shadcn/button';
 import {
@@ -69,6 +70,7 @@ import {
 import type {
     MyAvatarActionHandler,
     MyAvatarRow,
+    MyAvatarTag,
     MyAvatarsGridDensity,
     MyAvatarsPlatformFilter,
     MyAvatarsReleaseStatusFilter
@@ -196,6 +198,21 @@ export function MyAvatarNameCell({
 
     return (
         <div className="flex min-w-0 items-center gap-1.5">
+            <span className="bg-muted mr-1 flex aspect-[4/3] h-[calc(var(--vrcx-0-table-row-height)-1rem)] shrink-0 items-center justify-center overflow-hidden rounded-sm">
+                {thumbnailUrl ? (
+                    <FadeInImage
+                        src={thumbnailUrl}
+                        alt=""
+                        className="size-full object-cover"
+                        loading="lazy"
+                    />
+                ) : (
+                    <PersonStandingIcon
+                        aria-hidden="true"
+                        className="text-muted-foreground size-3.5"
+                    />
+                )}
+            </span>
             <HoverCard>
                 <HoverCardTrigger
                     delay={400}
@@ -244,6 +261,56 @@ export function MyAvatarNameCell({
     );
 }
 
+export function MyAvatarTagList({
+    tags = []
+}: {
+    tags?: readonly MyAvatarTag[];
+}) {
+    if (!tags.length) {
+        return null;
+    }
+    const visibleTags = tags.slice(0, 2);
+    const hiddenTags = tags.slice(visibleTags.length);
+
+    return (
+        <div className="flex min-w-0 items-center gap-1 overflow-hidden">
+            {visibleTags.map((entry) => (
+                <Badge
+                    key={entry.tag}
+                    variant="secondary"
+                    className={cn(
+                        MY_AVATAR_TAG_BADGE_CLASS_NAME,
+                        'max-w-24 min-w-0 shrink truncate'
+                    )}
+                    style={resolveMyAvatarTagBadgeStyle(entry)}
+                >
+                    {entry.tag}
+                </Badge>
+            ))}
+            {hiddenTags.length ? (
+                <Tooltip>
+                    <TooltipTrigger
+                        render={
+                            <Badge
+                                variant="outline"
+                                className={cn(
+                                    MY_AVATAR_TAG_BADGE_CLASS_NAME,
+                                    'shrink-0 tabular-nums'
+                                )}
+                            >
+                                +{hiddenTags.length}
+                            </Badge>
+                        }
+                    />
+                    <TooltipContent>
+                        {hiddenTags.map((entry) => entry.tag).join(', ')}
+                    </TooltipContent>
+                </Tooltip>
+            ) : null}
+        </div>
+    );
+}
+
 export function MyAvatarsEmptyState({
     title,
     description,
@@ -274,30 +341,30 @@ export function AvatarActionsDropdown({
     const { t } = useTranslation();
 
     const disabled = resolveMyAvatarActionDisabled(avatar, isUpdating);
+    const avatarActionsLabel = t('view.my_avatars.action.open_avatar_actions');
 
     return (
         <DropdownMenu>
-            <DropdownMenuTrigger
-                render={
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={t(
-                            'view.my_avatars.action.open_avatar_actions'
-                        )}
-                        disabled={isUpdating}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => event.stopPropagation()}
-                    >
-                        {isUpdating ? (
-                            <Spinner data-icon="inline-start" />
-                        ) : (
-                            <MoreHorizontalIcon data-icon="inline-start" />
-                        )}
-                    </Button>
-                }
-            />
+            <HintTooltip label={avatarActionsLabel}>
+                <DropdownMenuTrigger
+                    render={
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            disabled={isUpdating}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                        >
+                            {isUpdating ? (
+                                <Spinner data-icon="inline-start" />
+                            ) : (
+                                <MoreHorizontalIcon data-icon="inline-start" />
+                            )}
+                        </Button>
+                    }
+                />
+            </HintTooltip>
             <DropdownMenuContent
                 align="end"
                 className="bg-popover! w-max max-w-[90vw] min-w-52"

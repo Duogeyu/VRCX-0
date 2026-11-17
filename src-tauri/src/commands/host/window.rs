@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt as _;
@@ -10,7 +10,67 @@ use crate::error::AppError;
 use crate::state::AppState;
 use vrcx_0_runtime_host_desktop::AutostartPlatform;
 
+#[cfg(not(windows))]
 const TRAY_ICON_DEFAULT: &[u8] = include_bytes!("../../../icons/icon.png");
+#[cfg(not(windows))]
+const TRAY_ICON_NOTIFY: &[u8] = include_bytes!("../../../icons/icon_notify.png");
+
+#[cfg(windows)]
+type SizedTrayIcon = (i32, &'static [u8], &'static [u8]);
+
+#[cfg(windows)]
+const TRAY_ICONS_BY_SIZE: [SizedTrayIcon; 4] = [
+    (
+        16,
+        include_bytes!("../../../icons/tray/tray-16.png"),
+        include_bytes!("../../../icons/tray/tray-notify-16.png"),
+    ),
+    (
+        20,
+        include_bytes!("../../../icons/tray/tray-20.png"),
+        include_bytes!("../../../icons/tray/tray-notify-20.png"),
+    ),
+    (
+        24,
+        include_bytes!("../../../icons/tray/tray-24.png"),
+        include_bytes!("../../../icons/tray/tray-notify-24.png"),
+    ),
+    (
+        28,
+        include_bytes!("../../../icons/tray/tray-28.png"),
+        include_bytes!("../../../icons/tray/tray-notify-28.png"),
+    ),
+];
+
+#[cfg(windows)]
+fn tray_icon_for_size(target: i32) -> &'static SizedTrayIcon {
+    TRAY_ICONS_BY_SIZE
+        .iter()
+        .find(|(size, ..)| *size >= target)
+        .unwrap_or(&TRAY_ICONS_BY_SIZE[TRAY_ICONS_BY_SIZE.len() - 1])
+}
+
+#[cfg(windows)]
+fn tray_icon_bytes(notify: bool) -> &'static [u8] {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+    // SAFETY: GetSystemMetrics has no preconditions and only reads a system-wide metric.
+    let target = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    let (_, default, notify_icon) = tray_icon_for_size(target);
+    if notify {
+        notify_icon
+    } else {
+        default
+    }
+}
+
+#[cfg(not(windows))]
+fn tray_icon_bytes(notify: bool) -> &'static [u8] {
+    if notify {
+        TRAY_ICON_NOTIFY
+    } else {
+        TRAY_ICON_DEFAULT
+    }
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -46,19 +106,18 @@ pub async fn app__suspend_sidebar_auto_hide(
 ) -> Result<(), AppError> {
     crate::bootstrap::sidebar_auto_hide::set_suspended(app_handle, suspended).await
 }
-const TRAY_ICON_NOTIFY: &[u8] = include_bytes!("../../../icons/icon_notify.png");
 static APPLICATION_EXIT_STARTED: AtomicBool = AtomicBool::new(false);
 static TRAY_ICON_DEFAULT_IMAGE: OnceLock<Option<tauri::image::Image<'static>>> = OnceLock::new();
 static TRAY_ICON_NOTIFY_IMAGE: OnceLock<Option<tauri::image::Image<'static>>> = OnceLock::new();
 
 pub(crate) fn tray_icon_image(notify: bool) -> Option<&'static tauri::image::Image<'static>> {
-    let (cache, bytes) = if notify {
-        (&TRAY_ICON_NOTIFY_IMAGE, TRAY_ICON_NOTIFY)
+    let cache = if notify {
+        &TRAY_ICON_NOTIFY_IMAGE
     } else {
-        (&TRAY_ICON_DEFAULT_IMAGE, TRAY_ICON_DEFAULT)
+        &TRAY_ICON_DEFAULT_IMAGE
     };
     cache
-        .get_or_init(|| tauri::image::Image::from_bytes(bytes).ok())
+        .get_or_init(|| tauri::image::Image::from_bytes(tray_icon_bytes(notify)).ok())
         .as_ref()
 }
 
@@ -131,19 +190,10 @@ pub(crate) fn stop_runtime_services(app_handle: &AppHandle) {
 
 fn flush_before_task_shutdown(state: &AppState) {
     let runtime_host = state.runtime_host();
-    let flush = async {
+    crate::bootstrap::block_on_runtime_task(async {
         runtime_host.shutdown_telemetry_flush().await;
         runtime_host.leave_feed_logger().await;
-    };
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(flush));
-        }
-        Ok(_) => {}
-        Err(_) => {
-            tauri::async_runtime::block_on(flush);
-        }
-    }
+    });
 }
 
 #[tauri::command]
@@ -164,6 +214,17 @@ pub fn app__set_tray_icon_notification(state: State<'_, AppState>, notify: Optio
         .set_frontend_tray_notification(notify.unwrap_or(false));
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TrayTooltipState {
+    notify: bool,
+    realtime_interrupted: bool,
+}
+
+static TRAY_TOOLTIP_STATE: Mutex<TrayTooltipState> = Mutex::new(TrayTooltipState {
+    notify: false,
+    realtime_interrupted: false,
+});
+
 pub(crate) fn set_tray_icon_notification(app_handle: &AppHandle, notify: bool) {
     if let Some(tray) = app_handle.tray_by_id("main") {
         if let Some(icon) = tray_icon_image(notify) {
@@ -173,13 +234,55 @@ pub(crate) fn set_tray_icon_notification(app_handle: &AppHandle, notify: bool) {
                 icon.height(),
             )));
         }
-        let tooltip = if notify {
-            "VRCX-0 (new notification)"
-        } else {
-            "VRCX-0"
-        };
-        let _ = tray.set_tooltip(Some(tooltip));
     }
+    let state = update_tray_tooltip_state(|state| state.notify = notify).0;
+    apply_tray_tooltip(app_handle, state);
+}
+
+pub(crate) fn set_tray_realtime_interrupted(app_handle: &AppHandle, interrupted: bool) {
+    let (state, changed) =
+        update_tray_tooltip_state(|state| state.realtime_interrupted = interrupted);
+    if changed {
+        apply_tray_tooltip(app_handle, state);
+    }
+}
+
+pub(crate) fn refresh_tray_tooltip(app_handle: &AppHandle) {
+    apply_tray_tooltip(app_handle, update_tray_tooltip_state(|_| {}).0);
+}
+
+fn update_tray_tooltip_state(
+    update: impl FnOnce(&mut TrayTooltipState),
+) -> (TrayTooltipState, bool) {
+    let mut state = TRAY_TOOLTIP_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = *state;
+    update(&mut state);
+    (*state, *state != previous)
+}
+
+fn apply_tray_tooltip(app_handle: &AppHandle, state: TrayTooltipState) {
+    use tauri::Manager;
+
+    let Some(tray) = app_handle.tray_by_id("main") else {
+        return;
+    };
+    let base = if state.notify {
+        "VRCX-0 (new notification)"
+    } else {
+        "VRCX-0"
+    };
+    let realtime_label = state
+        .realtime_interrupted
+        .then(|| app_handle.try_state::<AppState>())
+        .flatten()
+        .map(|app_state| crate::bootstrap::tray_realtime_reconnecting_label(&app_state));
+    let tooltip = match realtime_label {
+        Some(label) => format!("{base} — {label}"),
+        None => base.to_string(),
+    };
+    let _ = tray.set_tooltip(Some(tooltip));
 }
 
 #[cfg(windows)]
@@ -378,6 +481,37 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::{request_application_exit_with, tray_icon_image};
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tray_icon_picks_the_smallest_size_that_covers_the_target() {
+        use super::tray_icon_for_size;
+
+        for (target, expected) in [
+            (8, 16),
+            (16, 16),
+            (18, 20),
+            (20, 20),
+            (24, 24),
+            (28, 28),
+            (32, 28),
+        ] {
+            assert_eq!(tray_icon_for_size(target).0, expected);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sized_tray_icons_match_their_declared_sizes() {
+        use super::TRAY_ICONS_BY_SIZE;
+
+        for (size, default, notify) in TRAY_ICONS_BY_SIZE {
+            for bytes in [default, notify] {
+                let image = tauri::image::Image::from_bytes(bytes).unwrap();
+                assert_eq!((image.width(), image.height()), (size as u32, size as u32));
+            }
+        }
+    }
 
     #[test]
     fn tray_icon_images_are_decoded_once_and_reused() {

@@ -13,11 +13,14 @@ use serde::{Deserialize, Serialize};
 use vrcx_0_application_core::RuntimeVrchatAuthFailurePayload;
 
 use crate::remote::VrchatRequestPort;
+use crate::scope_gate::ScopeGate;
 use vrcx_0_application_core::{
-    vrchat_api::{VrchatApiRequest, VrchatScope},
     Error, Result, RuntimeAuthScope, RuntimeAuthScopeSnapshot, RuntimeEventBus, TaskSupervisor,
 };
+use vrcx_0_contracts::vrchat_api::VrchatScope;
 use vrcx_0_core::OwnerId;
+
+const GATE: ScopeGate = ScopeGate::new("Note export");
 
 pub const NOTE_EXPORT_MAX_ITEMS: usize = 1_000;
 const NOTE_EXPORT_INTERVAL: Duration = Duration::from_secs(2);
@@ -111,18 +114,8 @@ pub trait NoteExportActions: Send + Sync {
     fn save_note<'a>(&'a self, user_id: &'a str, note: &'a str) -> NoteExportFuture<'a>;
 }
 
-pub trait NoteExportRemoteRequests: Send + Sync {
-    fn save_note(
-        &self,
-        endpoint: String,
-        user_id: String,
-        note: String,
-    ) -> Result<VrchatApiRequest>;
-}
-
 pub struct VrchatNoteExportActions<'a> {
     remote: &'a dyn VrchatRequestPort,
-    remote_requests: &'a dyn NoteExportRemoteRequests,
     pub auth_scope: &'a RuntimeAuthScope,
     pub expected_scope: &'a RuntimeAuthScopeSnapshot,
     pub event_bus: &'a RuntimeEventBus,
@@ -131,14 +124,12 @@ pub struct VrchatNoteExportActions<'a> {
 impl<'a> VrchatNoteExportActions<'a> {
     pub fn new(
         remote: &'a dyn VrchatRequestPort,
-        remote_requests: &'a dyn NoteExportRemoteRequests,
         auth_scope: &'a RuntimeAuthScope,
         expected_scope: &'a RuntimeAuthScopeSnapshot,
         event_bus: &'a RuntimeEventBus,
     ) -> Self {
         Self {
             remote,
-            remote_requests,
             auth_scope,
             expected_scope,
             event_bus,
@@ -149,11 +140,14 @@ impl<'a> VrchatNoteExportActions<'a> {
 impl NoteExportActions for VrchatNoteExportActions<'_> {
     fn save_note<'a>(&'a self, user_id: &'a str, note: &'a str) -> NoteExportFuture<'a> {
         Box::pin(async move {
-            let request = self.remote_requests.save_note(
-                self.expected_scope.endpoint.clone(),
+            let request = vrcx_0_vrchat_protocol::tools::user_note_save_input(
+                vrcx_0_core::vrchat_endpoints::normalize_vrchat_api_endpoint(Some(
+                    &self.expected_scope.endpoint,
+                )),
                 user_id.to_string(),
                 note.to_string(),
-            )?;
+            )?
+            .1;
             let path = request
                 .path
                 .as_deref()
@@ -391,7 +385,6 @@ async fn wait_for_note_export_interval(
 pub struct NoteExportRuntime {
     shared: Arc<NoteExportRuntimeShared>,
     remote: Arc<dyn VrchatRequestPort>,
-    remote_requests: Arc<dyn NoteExportRemoteRequests>,
     event_bus: RuntimeEventBus,
     tasks: TaskSupervisor,
     auth_scope: RuntimeAuthScope,
@@ -412,7 +405,6 @@ struct NoteExportRuntimeInner {
 impl NoteExportRuntime {
     pub fn new(
         remote: Arc<dyn VrchatRequestPort>,
-        remote_requests: Arc<dyn NoteExportRemoteRequests>,
         event_bus: RuntimeEventBus,
         tasks: TaskSupervisor,
         auth_scope: RuntimeAuthScope,
@@ -423,7 +415,6 @@ impl NoteExportRuntime {
                 generation: AtomicU64::new(0),
             }),
             remote,
-            remote_requests,
             event_bus,
             tasks,
             auth_scope,
@@ -436,12 +427,7 @@ impl NoteExportRuntime {
 
     pub fn start(&self, input: NoteExportStartInput) -> Result<NoteExportStatus> {
         let items = prepare_note_export(input)?;
-        let scope = self.auth_scope.snapshot();
-        if !scope.active || scope.current_user_id.trim().is_empty() {
-            return Err(Error::Custom(
-                "Note export requires an authenticated session.".into(),
-            ));
-        }
+        let scope = GATE.require_active(&self.auth_scope)?;
 
         let cancel = Arc::new(AtomicBool::new(false));
         let status = {
@@ -480,7 +466,6 @@ impl NoteExportRuntime {
         self.tasks.spawn_cancellable(move |stop_token| async move {
             let actions = VrchatNoteExportActions::new(
                 runtime.remote.as_ref(),
-                runtime.remote_requests.as_ref(),
                 &runtime.auth_scope,
                 &scope,
                 &runtime.event_bus,
@@ -521,19 +506,6 @@ impl NoteExportRuntime {
                 cancel.store(true, Ordering::Release);
             }
             inner.status.status = NoteExportState::Cancelling;
-            inner.status.clone()
-        };
-        self.emit_status(status.clone());
-        status
-    }
-
-    pub fn cancel_if_scope_mismatch(&self) -> NoteExportStatus {
-        let scope = self.auth_scope.snapshot();
-        let status = {
-            let mut inner = self.lock_inner();
-            if !mark_cancelling_if_scope_mismatch(&mut inner, &scope) {
-                return inner.status.clone();
-            }
             inner.status.clone()
         };
         self.emit_status(status.clone());
@@ -598,20 +570,6 @@ fn is_active_status(status: NoteExportState) -> bool {
         status,
         NoteExportState::Running | NoteExportState::Cancelling
     )
-}
-
-fn mark_cancelling_if_scope_mismatch(
-    inner: &mut NoteExportRuntimeInner,
-    scope: &RuntimeAuthScopeSnapshot,
-) -> bool {
-    if !is_active_status(inner.status.status) || inner.auth_generation == scope.generation {
-        return false;
-    }
-    if let Some(cancel) = &inner.cancel {
-        cancel.store(true, Ordering::Release);
-    }
-    inner.status.status = NoteExportState::Cancelling;
-    true
 }
 
 #[cfg(test)]
@@ -737,30 +695,5 @@ mod tests {
             401,
         );
         assert!(event_bus.take_events_for_test().is_empty());
-    }
-
-    #[test]
-    fn scope_change_marks_active_export_cancelling() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let mut inner = NoteExportRuntimeInner {
-            status: NoteExportStatus {
-                run_id: "run-1".into(),
-                status: NoteExportState::Running,
-                ..Default::default()
-            },
-            cancel: Some(Arc::clone(&cancel)),
-            auth_generation: 1,
-        };
-
-        assert!(mark_cancelling_if_scope_mismatch(
-            &mut inner,
-            &RuntimeAuthScopeSnapshot {
-                generation: 2,
-                active: true,
-                ..Default::default()
-            }
-        ));
-        assert_eq!(inner.status.status, NoteExportState::Cancelling);
-        assert!(cancel.load(Ordering::Acquire));
     }
 }

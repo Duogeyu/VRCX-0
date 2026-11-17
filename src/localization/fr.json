@@ -687,10 +687,12 @@
             "doNotDisturbThreeHours": "3 heures",
             "doNotDisturbUntilStopped": "Jusqu'à désactivation",
             "doNotDisturbTurnOff": "Désactiver",
+            "gameIsolation": "Isolation du jeu",
             "rebuildUi": "Recharger l'interface",
             "sidebarMode": "Mode barre latérale",
             "disableTheme": "Désactiver le thème",
-            "exit": "Quitter"
+            "exit": "Quitter",
+            "realtimeReconnecting": "Connexion en temps réel perdue, reconnexion en cours"
         },
         "notification": {
             "backgroundModeStarted": {
@@ -750,7 +752,6 @@
                 "keyboardShortcuts": "Raccourcis clavier",
                 "sendFeedback": "Envoyer un retour",
                 "reportIssue": "Signaler un problème sur GitHub",
-                "qqGroup": "Groupe QQ (communauté chinoise)",
                 "openDevtools": "Ouvrir les DevTools",
                 "supportVrcx": "Soutenir VRCX-0"
             }
@@ -782,7 +783,6 @@
         "toggle_theme": "Changer le thème"
     },
     "nav_menu": {
-        "qq_group": "Groupe QQ (communauté chinoise)",
         "changelog": "Journal des modifications",
         "update": "Mettre à jour",
         "update_downloading": "Téléchargement…",
@@ -1570,7 +1570,6 @@
             "clear_results_tooltip": "Vider les résultats de la recherche",
             "user": {
                 "header": "Utilisateur",
-                "search_by_bio": "Rechercher dans la bio",
                 "sort_by_last_logged_in": "Trier par dernière connexion"
             },
             "world": {

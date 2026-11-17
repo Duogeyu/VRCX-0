@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+    useCallback,
+    useEffect,
+    useEffectEvent,
+    useRef,
+    useState
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import type { useSearchParams } from 'react-router';
 
@@ -19,15 +25,22 @@ import type { CapabilityStatus } from '@/state/runtimeStore';
 
 import {
     getGalleryFolderPathSet,
+    isScreenshotVirtualFolder,
     normalizeGalleryScrollPositions,
     normalizeGalleryScrollTop,
     resolveGalleryFolder,
-    SCREENSHOT_FAVORITES_FOLDER,
     SCREENSHOT_GALLERY_FOLDER_CONFIG_KEY,
     SCREENSHOT_GALLERY_SCROLL_CONFIG_KEY,
     SCREENSHOT_GALLERY_SCROLL_SAVE_DELAY_MS,
+    SCREENSHOT_TIMELINE_FOLDER,
     serializeGalleryScrollPositions
 } from './screenshotMetadataValues';
+
+function loadGalleryFolderImages(folder: string) {
+    return folder === SCREENSHOT_TIMELINE_FOLDER
+        ? commands.appQueryScreenshots({}).then((result) => result.images)
+        : commands.appGetScreenshotFolderImages(folder);
+}
 
 type SetSearchParams = ReturnType<typeof useSearchParams>[1];
 
@@ -53,6 +66,7 @@ export function useScreenshotGalleryController({
 }) {
     const { t } = useTranslation();
     const galleryRequestRef = useRef(0);
+    const galleryImagesRequestKeyRef = useRef('');
     const selectedGalleryFolderRef = useRef('');
     const galleryScrollPositionsRef = useRef<Map<string, number>>(new Map());
     const galleryScrollPersistTimerRef = useRef<number | null>(null);
@@ -176,7 +190,11 @@ export function useScreenshotGalleryController({
                 galleryScrollPositionsRef.current = new Map(
                     Array.from(
                         galleryScrollPositionsRef.current.entries()
-                    ).filter(([path]) => folderPathSet.has(path))
+                    ).filter(
+                        ([path]) =>
+                            folderPathSet.has(path) ||
+                            isScreenshotVirtualFolder(path)
+                    )
                 );
                 setSelectedGalleryFolder((current) =>
                     resolveGalleryFolder(
@@ -254,6 +272,26 @@ export function useScreenshotGalleryController({
         [applyScanStatus, loadGalleryTree, t]
     );
 
+    const onScanStatus = useEffectEvent(applyScanStatus);
+    const onInitialScanStatus = useEffectEvent(
+        (status: ScreenshotLibraryScanStatus) => {
+            applyScanStatus(status);
+            if (status.running) {
+                void loadGalleryTree();
+            } else {
+                void refreshGallery(false);
+            }
+        }
+    );
+    const onInitialScanError = useEffectEvent((error: unknown) => {
+        const message =
+            error instanceof Error
+                ? error.message
+                : t('dialog.screenshot_metadata.scan_failed');
+        setGalleryScanError(message);
+        toast.add({ type: 'error', title: message });
+    });
+
     useEffect(() => {
         if (
             !isGalleryMode ||
@@ -265,31 +303,19 @@ export function useScreenshotGalleryController({
         let active = true;
         const unsubscribe = subscribeScreenshotLibraryScanStatus((status) => {
             if (active) {
-                applyScanStatus(status);
+                onScanStatus(status);
             }
         });
         getCurrentScreenshotLibraryScanStatus()
             .then((status) => {
-                if (!active || !status) {
-                    return;
-                }
-                applyScanStatus(status);
-                if (status.running) {
-                    void loadGalleryTree();
-                } else {
-                    void refreshGallery(false);
+                if (active && status) {
+                    onInitialScanStatus(status);
                 }
             })
             .catch((error: unknown) => {
-                if (!active) {
-                    return;
+                if (active) {
+                    onInitialScanError(error);
                 }
-                const message =
-                    error instanceof Error
-                        ? error.message
-                        : t('dialog.screenshot_metadata.scan_failed');
-                setGalleryScanError(message);
-                toast.add({ type: 'error', title: message });
             });
         return () => {
             active = false;
@@ -297,13 +323,9 @@ export function useScreenshotGalleryController({
             unsubscribe();
         };
     }, [
-        applyScanStatus,
         isGalleryFolderPreferenceLoaded,
         isGalleryMode,
-        loadGalleryTree,
-        refreshGallery,
-        screenshotCacheStatus?.available,
-        t
+        screenshotCacheStatus?.available
     ]);
 
     useEffect(() => {
@@ -326,25 +348,38 @@ export function useScreenshotGalleryController({
     ]);
 
     useEffect(() => {
+        if (isGalleryMode || !routeFolder) {
+            return;
+        }
+        selectedGalleryFolderRef.current = routeFolder;
+        setSelectedGalleryFolder(routeFolder);
+    }, [isGalleryMode, routeFolder]);
+
+    useEffect(() => {
         if (
-            !isGalleryMode ||
             !selectedGalleryFolder ||
-            selectedGalleryFolder === SCREENSHOT_FAVORITES_FOLDER
+            (isScreenshotVirtualFolder(selectedGalleryFolder) &&
+                selectedGalleryFolder !== SCREENSHOT_TIMELINE_FOLDER)
         ) {
             galleryRequestRef.current += 1;
+            galleryImagesRequestKeyRef.current = '';
             setGalleryImages([]);
             setGalleryImagesFolder('');
             setIsGalleryImagesLoading(false);
             return;
         }
 
+        const requestKey = `${galleryRevision}:${selectedGalleryFolder}`;
+        if (galleryImagesRequestKeyRef.current === requestKey) {
+            return;
+        }
+        galleryImagesRequestKeyRef.current = requestKey;
         const requestId = galleryRequestRef.current + 1;
         galleryRequestRef.current = requestId;
         const requestedFolder = selectedGalleryFolder;
         setIsGalleryImagesLoading(true);
 
-        commands
-            .appGetScreenshotFolderImages(requestedFolder)
+        loadGalleryFolderImages(requestedFolder)
             .then((images) => {
                 if (galleryRequestRef.current === requestId) {
                     setGalleryImagesError('');
@@ -354,6 +389,7 @@ export function useScreenshotGalleryController({
             })
             .catch((error: unknown) => {
                 if (galleryRequestRef.current === requestId) {
+                    galleryImagesRequestKeyRef.current = '';
                     const message =
                         error instanceof Error
                             ? error.message
@@ -371,7 +407,7 @@ export function useScreenshotGalleryController({
                     setIsGalleryImagesLoading(false);
                 }
             });
-    }, [galleryRevision, isGalleryMode, selectedGalleryFolder, t]);
+    }, [galleryRevision, selectedGalleryFolder, t]);
 
     const removeGalleryImages = useCallback((paths: string[]) => {
         const removedPaths = new Set(paths);

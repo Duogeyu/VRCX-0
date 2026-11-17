@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use vrcx_0_application_core::{Error, Result};
-use vrcx_0_contracts::vrchat_api::VrchatScope as ApiScope;
+use vrcx_0_contracts::vrchat_api::VrchatScope;
 
 use super::message_dispatch::json_string_field;
 use super::state::ActiveRealtimeContext;
@@ -12,7 +12,7 @@ use crate::realtime::{
     RealtimeFriendApplyResult, RealtimeUserProjection, UserQueryCachePolicy, UserQueryKind,
     UserQueryOptions,
 };
-use vrcx_0_application_core::vrchat_api::VrchatApiResponse;
+use vrcx_0_contracts::vrchat_api::VrchatResponse;
 use vrcx_0_core::friends::FriendRecord;
 use vrcx_0_core::json::{RawJson, RawJsonObject};
 use vrcx_0_core::user_facts::UserFactMergeOptions;
@@ -161,14 +161,12 @@ impl RealtimeHostRuntime {
         if users.is_empty() {
             return;
         }
-        self.deps
-            .event_bus
-            .emit_realtime_user_projection(RealtimeUserProjection {
-                users: users
-                    .into_iter()
-                    .map(|user| RawJson::from(Value::Object(user.into_map())))
-                    .collect(),
-            });
+        self.deps.event_bus.emit(RealtimeUserProjection {
+            users: users
+                .into_iter()
+                .map(|user| RawJson::from(Value::Object(user.into_map())))
+                .collect(),
+        });
     }
 
     pub(super) fn collect_friend_record_cache_changes<'a>(
@@ -251,7 +249,7 @@ impl RealtimeHostRuntime {
         force: bool,
         dialog: bool,
         is_friend: Option<bool>,
-    ) -> Result<VrchatApiResponse> {
+    ) -> Result<VrchatResponse> {
         let kind = if dialog {
             UserQueryKind::Dialog
         } else if is_friend == Some(true) {
@@ -279,7 +277,7 @@ impl RealtimeHostRuntime {
         endpoint: String,
         user_id_input: String,
         options: UserQueryOptions,
-    ) -> Result<VrchatApiResponse> {
+    ) -> Result<VrchatResponse> {
         let (user_id, request) = self
             .deps
             .remote_requests
@@ -297,9 +295,8 @@ impl RealtimeHostRuntime {
             .user_query_cache
             .get_or_fetch(options.kind, &endpoint, &user_id, async move {
                 let resp = runtime
-                    .deps
                     .web
-                    .execute_api(request, ApiScope::Vrchat)
+                    .execute_api(request, VrchatScope::Vrchat)
                     .await?;
                 fetch_marker.store(true, Ordering::SeqCst);
                 Ok(Arc::new(resp))
@@ -419,12 +416,7 @@ impl RealtimeHostRuntime {
             let Some(active) = state.connection.active_context.clone() else {
                 return;
             };
-            if active.generation != generation
-                || !self
-                    .deps
-                    .session
-                    .is_realtime_generation_active(active.session_generation)
-            {
+            if active.generation != generation || !self.is_session_live(&active) {
                 return;
             }
             let mut refetches = Vec::new();
@@ -505,7 +497,7 @@ impl RealtimeHostRuntime {
                 return;
             }
         };
-        let response = match self.deps.web.execute_api(request, ApiScope::Vrchat).await {
+        let response = match self.web.execute_api(request, VrchatScope::Vrchat).await {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(user_id = %user_id, "Realtime friend profile refetch failed: {error}");

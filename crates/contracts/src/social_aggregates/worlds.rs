@@ -23,10 +23,33 @@ pub struct SearchWorldsVisitedOutput {
 pub struct VisitedWorldRow {
     pub world_id: String,
     pub world_name: String,
+    #[serde(skip_serializing, default)]
     pub location: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub access_type: String,
     pub visited_at: String,
     pub left_at: Option<String>,
     pub stay_minutes: i64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub people: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldVisitHistory {
+    pub visits: i64,
+    pub total_minutes: i64,
+    pub first_visited_at: String,
+    pub last_visited_at: String,
+    pub recent_visits: Vec<VisitedWorldRow>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisitedWorldMatch {
+    pub world_id: String,
+    pub world_name: String,
+    pub last_visited_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

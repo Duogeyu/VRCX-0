@@ -4,17 +4,18 @@ use std::time::Duration;
 use vrcx_0_application::game::{
     InstanceLaunchApiFuture, InstanceLaunchHttpClient, InstanceLaunchPipe, InstanceLaunchRuntime,
 };
-use vrcx_0_application_core::vrchat_api::{
-    execute_api_command, VrchatApiRequest, VrchatApiResponse, VrchatScope,
-};
+use vrcx_0_application_core::vrchat_api::execute_api_command;
 use vrcx_0_application_core::{
     is_remote_mutation_request, AuthenticatedMutationContext, RemoteMutationGate, RuntimeAuthScope,
     RuntimeDiagnostics, RuntimeSyncEngine, WebClient,
 };
+use vrcx_0_contracts::vrchat_api::{VrchatRequest, VrchatResponse, VrchatScope};
 use vrcx_0_host_desktop::host_capabilities::{require_host_capability, HostCapability};
 use vrcx_0_persistence::config as config_store;
 use vrcx_0_persistence::DatabaseService;
-use vrcx_0_vrchat_client::instances::{instance_self_invite_input, instance_short_name_get_input};
+use vrcx_0_vrchat_protocol::instances::{
+    instance_self_invite_input, instance_short_name_get_input,
+};
 
 const INSTANCE_JOIN_REMOTE_MUTATION_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -55,8 +56,8 @@ impl DesktopInstanceLaunchHttpClient {
         &self,
         command: &'static str,
         detail: &'static str,
-        mut request: VrchatApiRequest,
-    ) -> vrcx_0_application_core::Result<VrchatApiResponse> {
+        mut request: VrchatRequest,
+    ) -> vrcx_0_application_core::Result<VrchatResponse> {
         if !is_remote_mutation_request(&request) {
             return execute_api_command(
                 &self.web,
@@ -143,7 +144,8 @@ struct DesktopInstanceLaunchPipe {
 
 fn should_focus_game_window(db: &DatabaseService) -> bool {
     config_store::get_bool(db, "focusVrchatOnJoin", false).unwrap_or(false)
-        && config_store::get_bool(db, "isGameNoVR", false).unwrap_or(false)
+        && config_store::get_bool(db, vrcx_0_application_game::IS_GAME_NO_VR_CONFIG_KEY, false)
+            .unwrap_or(false)
 }
 
 impl InstanceLaunchPipe for DesktopInstanceLaunchPipe {
@@ -203,7 +205,8 @@ mod tests {
     fn focus_stays_off_until_the_user_enables_it() {
         let dir = TestDir::new("default-off");
         let db = database(&dir);
-        config_store::set_bool(&db, "isGameNoVR", true).unwrap();
+        config_store::set_bool(&db, vrcx_0_application_game::IS_GAME_NO_VR_CONFIG_KEY, true)
+            .unwrap();
 
         assert!(!should_focus_game_window(&db));
     }
@@ -213,7 +216,8 @@ mod tests {
         let dir = TestDir::new("desktop-mode");
         let db = database(&dir);
         config_store::set_bool(&db, "focusVrchatOnJoin", true).unwrap();
-        config_store::set_bool(&db, "isGameNoVR", true).unwrap();
+        config_store::set_bool(&db, vrcx_0_application_game::IS_GAME_NO_VR_CONFIG_KEY, true)
+            .unwrap();
 
         assert!(should_focus_game_window(&db));
     }
@@ -223,7 +227,12 @@ mod tests {
         let dir = TestDir::new("vr-mode");
         let db = database(&dir);
         config_store::set_bool(&db, "focusVrchatOnJoin", true).unwrap();
-        config_store::set_bool(&db, "isGameNoVR", false).unwrap();
+        config_store::set_bool(
+            &db,
+            vrcx_0_application_game::IS_GAME_NO_VR_CONFIG_KEY,
+            false,
+        )
+        .unwrap();
 
         assert!(!should_focus_game_window(&db));
     }

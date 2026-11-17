@@ -36,6 +36,21 @@ pub async fn app__assistant_cancel(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn app__assistant_answer_choice(
+    state: State<'_, AppState>,
+    sessionId: String,
+    choiceId: String,
+    userId: Option<String>,
+) -> Result<(), AppError> {
+    state
+        .assistant()
+        .await?
+        .answer_choice(&sessionId, &choiceId, userId);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn app__assistant_list_sessions(
     state: State<'_, AppState>,
 ) -> Result<Vec<SessionSummary>, AppError> {
@@ -69,6 +84,34 @@ pub async fn app__assistant_delete_session(
 ) -> Result<(), AppError> {
     state.assistant().await?.delete_session(&sessionId);
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn app__assistant_rename_session(
+    state: State<'_, AppState>,
+    sessionId: String,
+    title: String,
+) -> Result<(), AppError> {
+    state
+        .assistant()
+        .await?
+        .rename_session(&sessionId, &title)
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn app__assistant_set_session_pinned(
+    state: State<'_, AppState>,
+    sessionId: String,
+    pinned: bool,
+) -> Result<(), AppError> {
+    state
+        .assistant()
+        .await?
+        .set_session_pinned(&sessionId, pinned)
+        .map_err(AppError::from)
 }
 
 #[tauri::command]

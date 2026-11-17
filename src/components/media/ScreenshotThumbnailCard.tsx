@@ -1,5 +1,5 @@
 import { CameraIcon, ImageIcon, StarIcon } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -7,12 +7,11 @@ import {
     type LocationMetadataEntry
 } from '@/components/location/useLocationMetadata';
 import { FadeInImage } from '@/components/media/FadeInImage';
+import { useScreenshotThumbnailUrl } from '@/components/media/useScreenshotThumbnailUrl';
 import { TileShell } from '@/components/tile/TileShell';
 import { formatScreenshotDateTime } from '@/lib/dateTime';
 import { cn } from '@/lib/utils';
-import { convertFileSrc } from '@/platform/tauri/assets';
 import type { ScreenshotLibraryImage } from '@/platform/tauri/bindings';
-import { requestScreenshotThumbnail } from '@/services/screenshotThumbnailQueueService';
 import {
     TILE_FAVORITE_TOGGLE,
     TILE_SELECT_BOX,
@@ -21,6 +20,7 @@ import {
 } from '@/shared/constants/selectableTile';
 import { parseLocation } from '@/shared/utils/location';
 import { resolveScreenshotCapturedTime } from '@/shared/utils/screenshot';
+import { HintTooltip } from '@/ui/hint-tooltip';
 import { Button } from '@/ui/shadcn/button';
 import { Checkbox } from '@/ui/shadcn/checkbox';
 import { Skeleton } from '@/ui/shadcn/skeleton';
@@ -127,6 +127,7 @@ export function useScreenshotThumbnailTitleMap(
 
 export function ScreenshotThumbnailCard({
     compact = false,
+    fadeIn = true,
     item,
     onOpen,
     title = '',
@@ -141,6 +142,7 @@ export function ScreenshotThumbnailCard({
     onToggleFavorite
 }: {
     compact?: boolean;
+    fadeIn?: boolean;
     item: ScreenshotThumbnailItem;
     onOpen: (path: string) => void;
     title?: string;
@@ -156,36 +158,10 @@ export function ScreenshotThumbnailCard({
 }) {
     const { i18n, t } = useTranslation();
     const shiftPressedRef = useRef(false);
-    const [thumbnailUrl, setThumbnailUrl] = useState('');
-    const [loadState, setLoadState] = useState('idle');
-
-    useEffect(() => {
-        let active = true;
-        setThumbnailUrl('');
-        setLoadState('loading');
-
-        const request = requestScreenshotThumbnail(item.path);
-        request.promise
-            .then((thumbnailPath) => {
-                if (!active) {
-                    return;
-                }
-                setThumbnailUrl(
-                    convertFileSrc(String(thumbnailPath || ''), 'vrcx-0-thumb')
-                );
-                setLoadState('ready');
-            })
-            .catch(() => {
-                if (active) {
-                    setLoadState('error');
-                }
-            });
-
-        return () => {
-            active = false;
-            request.cancel();
-        };
-    }, [item.modifiedAt, item.path, item.sizeBytes]);
+    const { thumbnailUrl, loadState } = useScreenshotThumbnailUrl(
+        item.path,
+        `${item.modifiedAt}:${item.sizeBytes}`
+    );
 
     const dateLabel = formatScreenshotDateTime(
         resolveScreenshotCapturedTime(item),
@@ -227,6 +203,7 @@ export function ScreenshotThumbnailCard({
                     {thumbnailUrl ? (
                         <FadeInImage
                             src={thumbnailUrl}
+                            fade={fadeIn}
                             alt={item.fileName}
                             className="size-full object-cover"
                             loading="lazy"
@@ -308,25 +285,26 @@ export function ScreenshotThumbnailCard({
                 </span>
             ) : null}
             {onToggleFavorite && !isSelectionActive ? (
-                <Button
-                    type="button"
-                    variant="secondary"
-                    size="icon-xs"
-                    aria-label={favoriteLabel}
-                    aria-pressed={favorite}
-                    className={cn(
-                        TILE_FAVORITE_TOGGLE,
-                        'bg-background/85 shadow-sm',
-                        favorite && TILE_SELECT_TOGGLE_VISIBLE
-                    )}
-                    onClick={() => onToggleFavorite(!favorite)}
-                >
-                    <StarIcon
+                <HintTooltip label={favoriteLabel}>
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        size="icon-xs"
+                        aria-pressed={favorite}
                         className={cn(
-                            favorite && 'fill-current text-amber-400'
+                            TILE_FAVORITE_TOGGLE,
+                            'bg-background/85 shadow-sm',
+                            favorite && TILE_SELECT_TOGGLE_VISIBLE
                         )}
-                    />
-                </Button>
+                        onClick={() => onToggleFavorite(!favorite)}
+                    >
+                        <StarIcon
+                            className={cn(
+                                favorite && 'fill-current text-amber-400'
+                            )}
+                        />
+                    </Button>
+                </HintTooltip>
             ) : null}
         </div>
     );

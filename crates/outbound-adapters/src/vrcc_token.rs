@@ -120,7 +120,7 @@ impl LocalVrccTokenStore {
             return Ok(None);
         };
         let raw = vrcx_0_persistence::config::get_string(&self.db, &token_key, "")
-            .map_err(crate::map_persistence_error)?;
+            .map_err(crate::Error::from)?;
         if raw.trim().is_empty() {
             return Ok(None);
         }
@@ -147,7 +147,7 @@ impl LocalVrccTokenStore {
             return Ok(None);
         };
         let value = vrcx_0_persistence::config::get_string(&self.db, &store_key, "")
-            .map_err(crate::map_persistence_error)?;
+            .map_err(crate::Error::from)?;
         let trimmed = value.trim();
         Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
     }
@@ -169,14 +169,14 @@ impl LocalVrccTokenStore {
             ));
         };
         let previous = vrcx_0_persistence::config::get_string(&self.db, &token_key, "")
-            .map_err(crate::map_persistence_error)?;
+            .map_err(crate::Error::from)?;
         // `previous` 传进去是为了保留其它机器的槽位（secrets_at_rest 的约定）。
         let sealed = secrets::seal_secret_with_status(
             Some(previous.as_str()).filter(|value| !value.is_empty()),
             &credential.token,
         );
         vrcx_0_persistence::config::set_string(&self.db, &token_key, &sealed.stored)
-            .map_err(crate::map_persistence_error)?;
+            .map_err(crate::Error::from)?;
         self.save_optional_string(
             VRCC_STAR_KEY,
             credential.star.map(|v| v.to_string()).as_deref(),
@@ -192,7 +192,7 @@ impl LocalVrccTokenStore {
             return Ok(());
         };
         vrcx_0_persistence::config::set_string(&self.db, &store_key, value.unwrap_or(""))
-            .map_err(crate::map_persistence_error)
+            .map_err(crate::Error::from)
     }
 
     /// 清除凭据。断开连接时调用。
@@ -210,7 +210,7 @@ impl LocalVrccTokenStore {
                 continue;
             };
             vrcx_0_persistence::config::set_string(&self.db, &store_key, "")
-                .map_err(crate::map_persistence_error)?;
+                .map_err(crate::Error::from)?;
         }
         Ok(())
     }

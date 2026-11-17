@@ -33,10 +33,10 @@ pub use recall::recall_encounter;
 pub use resolve::resolve_user_by_name;
 pub use types::{
     ActivityBucket, BestTimeBucketRow, BestTimeFriend, BestTimeToPlayInput, BestTimeToPlayOutput,
-    CompanionOfRow, CompanionWorldRow, CompanionsOfInput, CompanionsOfOutput, CopresenceAudience,
-    CopresenceGroupBy, CopresenceOrderBy, CopresenceSummaryInput, CopresenceSummaryOutput,
-    CopresenceSummaryRow, FadingFriendRow, FadingFriendsInput, FadingFriendsOutput, FavoriteAction,
-    FavoriteLocalInput, FavoriteOutput, FriendActivityPatternInput, FriendActivityPatternOutput,
+    CompanionOfRow, CompanionsOfInput, CompanionsOfOutput, CopresenceAudience, CopresenceGroupBy,
+    CopresenceOrderBy, CopresenceSummaryInput, CopresenceSummaryOutput, CopresenceSummaryRow,
+    FadingFriendRow, FadingFriendsInput, FadingFriendsOutput, FavoriteAction, FavoriteLocalInput,
+    FavoriteOutput, FriendActivityPatternInput, FriendActivityPatternOutput,
     FriendActivityPatternRow, FriendChangeEvent, FriendChangeKind, FriendChangeRow,
     FriendChangesInput, FriendChangesOutput, FriendCirclePair, FriendCircleRow, FriendCirclesInput,
     FriendCirclesOutput, FriendLogInput, FriendLogOutput, FriendLogRow, InviteDirection,
@@ -44,12 +44,16 @@ pub use types::{
     RecallEncounterOutput, RecallEncounterRow, ResolveUserInput, ResolveUserOutput,
     ResolvedUserRow, SearchWorldsVisitedInput, SearchWorldsVisitedOutput, SocialGraphEdge,
     SocialGraphInput, SocialGraphNode, SocialGraphOutput, TimeWindow, VisitRosterRow, VisitRow,
-    VisitStint, VisitTimelineInput, VisitTimelineOutput, VisitedWorldRow,
+    VisitStint, VisitTimelineInput, VisitTimelineOutput, VisitedWorldMatch, VisitedWorldRow,
+    WorldVisitHistory,
 };
 pub use visits::get_visit_timeline;
 pub use vrcx_0_contracts::feed::{WorldFriendVisitRow, WorldFriendVisitsOutput};
 pub use world_friend_visits::get_world_friend_visits;
-pub use worlds::{favorite_local, search_worlds_visited, top_visited_worlds};
+pub use worlds::{
+    favorite_local, find_visited_worlds, search_worlds_visited, top_visited_worlds,
+    world_visit_history,
+};
 
 #[cfg(test)]
 mod activity_tests;

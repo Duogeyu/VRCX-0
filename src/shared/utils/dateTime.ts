@@ -23,7 +23,7 @@ export const DEFAULT_TIME_UNIT_LABELS = Object.freeze({
     s: 's'
 });
 
-type DateFilterFormat = 'long' | 'short' | 'time' | 'date';
+type DateFilterFormat = 'long' | 'short' | 'time' | 'date' | 'weekdayDate';
 type TimeUnitLabels = {
     -readonly [Unit in keyof typeof DEFAULT_TIME_UNIT_LABELS]: string;
 };
@@ -126,6 +126,15 @@ function toLocalDate(date: Date, dateFormat: string) {
     });
 }
 
+function toLocalWeekdayDate(date: Date, dateFormat: string) {
+    return date.toLocaleDateString(dateFormat, {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric'
+    });
+}
+
 export function formatDateFilterWithPreferences(
     dateStr: unknown,
     format: DateFilterFormat,
@@ -160,6 +169,9 @@ export function formatDateFilterWithPreferences(
     }
     if (format === 'date') {
         return toLocalDate(dt, dateFormat);
+    }
+    if (format === 'weekdayDate') {
+        return toLocalWeekdayDate(dt, dateFormat);
     }
 
     return '-';
@@ -222,6 +234,7 @@ export function formatRelativeTimeWithPreferences(
     preferences: DateTimeFormatPreferences & {
         nowMs?: number;
         style?: Intl.RelativeTimeFormatStyle;
+        minUnit?: 'second' | 'minute';
     } = {}
 ) {
     if (!value) {
@@ -250,7 +263,10 @@ export function formatRelativeTimeWithPreferences(
     const [unit, unitSeconds] =
         units.find(([, seconds]) => absSeconds >= seconds) ||
         units[units.length - 1];
-    const amount = Math.round(diffSeconds / unitSeconds);
+    const amount =
+        preferences.minUnit === 'minute' && unit === 'second'
+            ? 0
+            : Math.round(diffSeconds / unitSeconds);
     const locale = normalizeDateLocale(
         preferences.appLocale || preferences.dateCulture
     );
