@@ -16,6 +16,9 @@ permissions:
 jobs:
     announce:
         name: Post Release to Discord
+        # 只在上游仓库跑：标题写死 VRCX-0、解析的是上游 changelog 的标记，fork 发版时不该
+        # 发到 Discord。保留文件本身，同步上游时冲突面小。
+        if: github.repository == 'Map1en/VRCX-0'
         runs-on: ubuntu-24.04
         steps:
             - name: Post release
