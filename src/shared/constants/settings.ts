@@ -20,7 +20,7 @@ const VRChatCameraResolutions: VRChatResolution[] = [
 ];
 
 const GITHUB_RELEASES_URL =
-    'https://api.github.com/repos/Map1en/VRCX-0/releases';
+    'https://api.github.com/repos/VRChatCN-Kipfel/VRCX-0-Galaxies/releases';
 
 const TABLE_MAX_SIZE_MIN = 100;
 const TABLE_MAX_SIZE_MAX = 10000;

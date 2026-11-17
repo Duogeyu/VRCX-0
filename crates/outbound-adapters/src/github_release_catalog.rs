@@ -10,7 +10,9 @@ use vrcx_0_application::profile::{
 use vrcx_0_application_core::{Error, WebClient};
 use vrcx_0_contracts::external_api::{self, ExternalApiScope};
 
-const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/Map1en/VRCX-0/releases";
+/// fork 自己的发版：更新服务列出的版本和更新日志都从这里取（#16 第 8.2 项）。
+const GITHUB_RELEASES_URL: &str =
+    "https://api.github.com/repos/VRChatCN-Kipfel/VRCX-0-Galaxies/releases";
 
 pub struct GitHubReleaseCatalogAdapter {
     web: Arc<WebClient>,
