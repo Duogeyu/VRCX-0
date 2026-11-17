@@ -21,7 +21,17 @@ use crate::endpoints::{
 /// from the model unless the user has explicitly armed writes, so a prompt
 /// injection in attacker-controlled data (e.g. a friend's bio) cannot drive an
 /// autonomous write.
-const WRITE_TOOLS: &[&str] = &["favorite_local", "favorite_vrchat", "set_friend_note"];
+const WRITE_TOOLS: &[&str] = &[
+    "favorite_local",
+    "favorite_vrchat",
+    "set_friend_note",
+    // Chatbox writes go to the public chatbox everyone in the instance can read,
+    // so they need the same explicit arming: a friend's bio is attacker-controlled
+    // text and must not be able to drive the model into posting there.
+    "send_chatbox_message",
+    "set_chatbox_afk",
+    "update_chatbox",
+];
 use crate::error::AssistantError;
 use crate::events::AssistantEmitter;
 use crate::ports::{AssistantConfig, AssistantLlmClientFactory, AssistantSessionPersistence};
@@ -398,6 +408,29 @@ impl Drop for CancelCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every chatbox tool that changes what the instance sees stays hidden until
+    /// writes are armed; the read-only `get_chatbox` stays visible.
+    #[test]
+    fn chatbox_writes_stay_hidden_unless_writes_are_armed() {
+        let tool_defs = Arc::new(
+            [
+                "get_chatbox",
+                "send_chatbox_message",
+                "set_chatbox_afk",
+                "update_chatbox",
+            ]
+            .map(|name| crate::test_support::tool_def(name, serde_json::Value::Null))
+            .to_vec(),
+        );
+
+        let hidden = visible_tool_defs(&tool_defs, false);
+        let names: Vec<&str> = hidden.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(names, vec!["get_chatbox"]);
+
+        let armed = visible_tool_defs(&tool_defs, true);
+        assert_eq!(armed.len(), tool_defs.len());
+    }
 
     #[test]
     fn write_tools_stay_hidden_unless_writes_are_armed() {
