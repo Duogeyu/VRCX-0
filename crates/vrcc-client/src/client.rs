@@ -511,8 +511,15 @@ impl Call<'_> {
 /// 自己被取消时直接离队，不影响前面那个。
 type Flight = Arc<FlightTurn>;
 
-/// 排队号里那把锁：锁着前面那个分给排队者的回答。
-type FlightTurn = tokio::sync::Mutex<Option<String>>;
+/// 一个排队号：锁着前面那个分给排队者的回答，外加一个「已过时」标记。
+struct FlightTurn {
+    turn: tokio::sync::Mutex<Option<String>>,
+    /// 这个读还在路上时，写操作或换令牌把它涉及的回答作废了（见
+    /// [`VrccClient::forget_replies`]、[`VrccClient::forget_session_state`]）。这时
+    /// 它带回来的是作废前的那一份，不能存进缓存。在 `state` 锁里和存入一起检查，见
+    /// [`VrccClient::remember_reply`]。
+    superseded: std::sync::atomic::AtomicBool,
+}
 
 /// 一个可克隆的客户端句柄。
 #[derive(Clone)]
@@ -860,12 +867,17 @@ impl VrccClient {
     ///   `no-store` 一样处理（存了也没法验证）。
     ///
     /// 返回 `false` 时，限流槽由 [`SlotRelease`] 还回去，见那里的说明。
+    ///
+    /// `superseded`：这个读的排队号上的「已过时」标记（见 [`FlightTurn`]）。读还在路上
+    /// 时被写操作或换令牌作废了，就不存，也不动这个键下已有的回答（那可能是作废之后
+    /// 重拉回来的新一份），返回 `false`。
     fn keep_reply(
         &self,
         call: &Call<'_>,
         key: ReplyKey,
         text: String,
         policy: ReplyPolicy,
+        superseded: Option<&std::sync::atomic::AtomicBool>,
     ) -> bool {
         let unusable = policy.no_store || (policy.must_revalidate && policy.validators.is_empty());
         if unusable {
@@ -879,17 +891,22 @@ impl VrccClient {
             return false;
         }
         let reusable_now = !policy.must_revalidate;
-        self.remember_reply(
+        let kept = self.remember_reply(
             key,
             policy.ttl,
             text,
             policy.validators,
             policy.must_revalidate,
+            superseded,
         );
-        reusable_now
+        kept && reusable_now
     }
 
-    /// 记下一份成功回答，供之后复用或发条件请求。
+    /// 记下一份成功回答，供之后复用或发条件请求。返回存没存。
+    ///
+    /// `superseded` 在 `state` 锁里检查，和存入是同一步：作废它的写操作要么先打了
+    /// 标记（这里看得到，不存），要么还没走到清缓存那一步（它之后拿 `state` 锁时会
+    /// 把这份清掉）。
     fn remember_reply(
         &self,
         key: ReplyKey,
@@ -897,9 +914,13 @@ impl VrccClient {
         text: String,
         validators: Validators,
         must_revalidate: bool,
-    ) {
+        superseded: Option<&std::sync::atomic::AtomicBool>,
+    ) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if superseded.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
+            return false;
+        }
         state.replies.retain(|_, reply| reply.worth_keeping(now));
         if state.replies.len() >= REPLY_CACHE_MAX {
             // 还活着却已经满了：丢最旧的那份。
@@ -922,6 +943,7 @@ impl VrccClient {
                 must_revalidate,
             },
         );
+        true
     }
 
     /// 写操作成功了：清掉受影响的回答，并让它们的限流槽立刻可用。
@@ -938,10 +960,11 @@ impl VrccClient {
         let mut slots = Vec::new();
         {
             let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
-            flights.retain(|key, _| {
+            flights.retain(|key, flight| {
                 let hit = affected(key.key, &key.path);
                 if hit {
                     slots.push(limiter_key(key.key, &key.path));
+                    mark_superseded(flight);
                 }
                 !hit
             });
@@ -983,7 +1006,13 @@ impl VrccClient {
     pub fn forget_session_state(&self) {
         {
             let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
-            flights.retain(|key, _| key.scope == 0);
+            flights.retain(|key, flight| {
+                let open = key.scope == 0;
+                if !open {
+                    mark_superseded(flight);
+                }
+                open
+            });
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.replies.retain(|key, _| key.scope == 0);
@@ -1003,7 +1032,10 @@ impl VrccClient {
         }
         // 顺手清掉已经没人排的键，免得表随逛过的世界一直长。
         flights.retain(|_, flight| flight.strong_count() > 0);
-        let flight = Arc::new(tokio::sync::Mutex::new(None));
+        let flight = Arc::new(FlightTurn {
+            turn: tokio::sync::Mutex::new(None),
+            superseded: std::sync::atomic::AtomicBool::new(false),
+        });
         flights.insert(key.clone(), Arc::downgrade(&flight));
         flight
     }
@@ -1279,12 +1311,14 @@ impl VrccClient {
         // 分过来（见 `share_with_queued`），再查缓存。
         let flight = reply_key.as_ref().map(|key| self.flight(key));
         let mut turn = match &flight {
-            Some(flight) => Some(flight.lock().await),
+            Some(flight) => Some(flight.turn.lock().await),
             None => None,
         };
         if let Some(text) = turn.as_ref().and_then(|turn| turn.as_ref()) {
             return decode(text);
         }
+        // 这个读的「已过时」标记：路上被写操作或换令牌作废了，回来的回答就不存。
+        let superseded = flight.as_ref().map(|flight| &flight.superseded);
         // 间隔内的同一个读请求：先看有没有能复用的回答。放在扣额度之前——
         // 复用不发请求，不该占服务器的次数。
         //
@@ -1388,11 +1422,6 @@ impl VrccClient {
                 // 校验值就换上，没给就沿用原来的。
                 self.note_success();
                 let value = decode(text)?;
-                if let (Some(flight), Some(turn), false) =
-                    (flight.as_ref(), turn.as_mut(), call.marks_read())
-                {
-                    self.share_with_queued(key, flight, turn, text);
-                }
                 let renewed = Validators {
                     etag: cache
                         .validators
@@ -1413,8 +1442,14 @@ impl VrccClient {
                     must_revalidate: cache.no_cache || (!cache.has_control && *was_no_cache),
                     no_store: cache.no_store,
                 };
-                if self.keep_reply(&call, key.clone(), text.clone(), policy) {
+                if self.keep_reply(&call, key.clone(), text.clone(), policy, superseded) {
                     release.keep();
+                }
+                // 先存、再分给排队者并摘号，顺序见下面成功分支的说明。
+                if let (Some(flight), Some(turn), false) =
+                    (flight.as_ref(), turn.as_mut(), call.marks_read())
+                {
+                    self.share_with_queued(key, flight, turn, text);
                 }
                 return Ok(value);
             }
@@ -1423,15 +1458,6 @@ impl VrccClient {
         if status.is_success() {
             self.note_success();
             let value = decode(&text)?;
-            // 排在后面的同一个读直接拿这份，不再发第二次（标已读的读除外）。
-            if let (Some(key), Some(flight), Some(turn), false) = (
-                reply_key.as_ref(),
-                flight.as_ref(),
-                turn.as_mut(),
-                call.marks_read(),
-            ) {
-                self.share_with_queued(key, flight, turn, &text);
-            }
             let policy = ReplyPolicy {
                 ttl: reply_ttl(call.min_gap, call.authed, &cache),
                 validators: cache.validators.clone(),
@@ -1452,13 +1478,27 @@ impl VrccClient {
                         path: without_mark(&key.path),
                         ..key.clone()
                     };
-                    self.keep_reply(&call, plain, text.clone(), policy.clone());
+                    self.keep_reply(&call, plain, text.clone(), policy.clone(), superseded);
                 }
             }
-            if let Some(key) = reply_key {
-                if self.keep_reply(&call, key, text, policy) {
+            if let Some(key) = reply_key.clone() {
+                if self.keep_reply(&call, key, text.clone(), policy, superseded) {
                     release.keep();
                 }
+            }
+            // 排在后面的同一个读直接拿这份，不再发第二次（标已读的读除外）。
+            //
+            // 必须**先存、再分并摘号**：摘了号以后，写操作在表里找不到这个读，就不会
+            // 给它打「已过时」；这时再存，打分前的那一份就留在了缓存里。先存的话，写操作
+            // 要么已经打了标记（不存），要么之后会把存下的这份清掉。这个先后靠测试很难
+            // 稳定卡出来，只能在这里写明。
+            if let (Some(key), Some(flight), Some(turn), false) = (
+                reply_key.as_ref(),
+                flight.as_ref(),
+                turn.as_mut(),
+                call.marks_read(),
+            ) {
+                self.share_with_queued(key, flight, turn, &text);
             }
             Ok(value)
         } else {
@@ -2584,6 +2624,16 @@ impl Drop for SlotRelease<'_> {
             let mut state = self.client.state.lock().unwrap_or_else(|e| e.into_inner());
             state.limiter.undo(&slot, at, previous);
         }
+    }
+}
+
+/// 给一个还在路上的读打上「已过时」：它带回来的回答不进缓存（见 [`FlightTurn`]）。
+/// 没人排了的号什么都不做。
+fn mark_superseded(flight: &Weak<FlightTurn>) {
+    if let Some(flight) = flight.upgrade() {
+        flight
+            .superseded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -4356,6 +4406,68 @@ mod tests {
         );
     }
 
+    /// 和上一条同一个局面，只是回答能存（不带 `no-store`）：打分前发出去的那次
+    /// 读，在打分之后才回来，不能把打分前的那一份存进缓存。否则之后的读在间隔内
+    /// 直接拿到它，看到的还是打分前的内容。
+    #[tokio::test]
+    async fn a_read_that_returns_after_a_write_does_not_cache_the_old_reply() {
+        use std::sync::atomic::Ordering;
+        let (base, received, go, seen) = serve_gated(ok_with("", "{}")).await;
+        let client = client_at(base);
+
+        let before = client.my_map_page(WORLD, Some("hot"));
+        let write = async {
+            received.notified().await;
+            client
+                .rate_map(WORLD, 8, &VrccRatingText::Keep)
+                .await
+                .expect("打分");
+            go.notify_one();
+        };
+        let (before, ()) = tokio::join!(before, write);
+        before.expect("打分前发出去的那次");
+
+        client
+            .my_map_page(WORLD, Some("hot"))
+            .await
+            .expect("打分后再读");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            3,
+            "打分后再读要真的发出去，不能拿打分前那次存下的回答"
+        );
+    }
+
+    /// 同一个局面落在开放数据上：公开地图页的回答带 `public, max-age=60`，真服务器下
+    /// 就能存。打分时它正在路上，回来后不能把打分前的那一份存下来顶 60 秒。
+    #[tokio::test]
+    async fn a_public_map_page_that_returns_after_a_rating_is_not_cached() {
+        use std::sync::atomic::Ordering;
+        let body = serde_json::to_string(&VrccMapPage::default()).expect("默认值应能序列化");
+        let (base, received, go, seen) =
+            serve_gated(ok_with("Cache-Control: public, max-age=60\r\n", &body)).await;
+        let client = client_at(base);
+
+        let before = client.map_page(WORLD);
+        let write = async {
+            received.notified().await;
+            client
+                .rate_map(WORLD, 8, &VrccRatingText::Keep)
+                .await
+                .expect("打分");
+            go.notify_one();
+        };
+        let (before, ()) = tokio::join!(before, write);
+        before.expect("打分前发出去的那次");
+
+        client.map_page(WORLD).await.expect("打分后再读");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            3,
+            "打分后再读公开地图页要真的发出去"
+        );
+    }
+
     /// 分完回答，排队号就从表里摘掉：之后来的拿到的是新号，里面什么都没有，
     /// 看不到上一批的回答。
     #[tokio::test]
@@ -4367,12 +4479,12 @@ mod tests {
             path: "status".to_string(),
         };
         let flight = client.flight(&key);
-        let mut turn = flight.lock().await;
+        let mut turn = flight.turn.lock().await;
         client.share_with_queued(&key, &flight, &mut turn, "{}");
 
         let later = client.flight(&key);
         assert!(!Arc::ptr_eq(&flight, &later), "之后来的要拿新号");
-        assert!(later.lock().await.is_none(), "新号里没有上一批的回答");
+        assert!(later.turn.lock().await.is_none(), "新号里没有上一批的回答");
     }
 
     /// 会话换了令牌：带令牌的读的排队号摘掉，开放数据的留着。
