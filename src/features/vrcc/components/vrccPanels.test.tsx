@@ -407,6 +407,12 @@ describe('VrccMapsPanel', () => {
         expect(activePage(container)).toBe('1');
     });
 
+    it('拿到的榜单是空的时说「暂无」，不一直转圈', () => {
+        renderMaps('top', []);
+        expect(screen.getByText('vrcc.maps.empty')).toBeTruthy();
+        expect(screen.queryByRole('status')).toBeNull();
+    });
+
     it('本周榜按列表位置编号，不显示总榜名次', () => {
         // 本周榜只按本周的打分排，`rank` 还是总榜名次。
         renderMaps('week');

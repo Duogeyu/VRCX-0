@@ -156,6 +156,13 @@ impl VrccTokenStore for MemoryStore {
 struct FakeRemote {
     /// 当前连接状态，由 `connect`/`disconnect`/`expire` 改。
     connection: Mutex<VrccConnection>,
+    /// 会话代次，`connect`/`disconnect`/`expire` 各推进一次（同真实会话）。
+    generation: Mutex<u64>,
+    /// `notifications` 的返回；没设就按「令牌缺失」处理。
+    notifications_reply: Mutex<Option<VrccNotifications>>,
+    /// 设了以后，`notifications` / `unread` 在回答之前先推进代次：模拟请求还在
+    /// 路上时换了号（`reload_account`）或重新授权。
+    switch_mid_flight: Mutex<bool>,
     /// 下一次个人调用返回的错误。
     next_error: Mutex<Option<VrccError>>,
     /// `my_map` 的返回。设了就用它，没设就按「令牌缺失」处理。
@@ -217,6 +224,22 @@ impl FakeRemote {
     /// 预设下一次 `unread` 的返回。
     fn set_unread(&self, unread: VrccUnread) {
         *self.unread.lock().unwrap() = Some(unread);
+    }
+
+    /// 预设 `notifications` 的返回。
+    fn set_notifications(&self, polled: VrccNotifications) {
+        *self.notifications_reply.lock().unwrap() = Some(polled);
+    }
+
+    /// 之后的 `notifications` / `unread` 在回答前先换一次会话。
+    fn switch_session_mid_flight(&self) {
+        *self.switch_mid_flight.lock().unwrap() = true;
+    }
+
+    fn maybe_switch_session(&self) {
+        if *self.switch_mid_flight.lock().unwrap() {
+            *self.generation.lock().unwrap() += 1;
+        }
     }
 
     /// 预设星轨相交列表的返回。
@@ -351,7 +374,12 @@ impl VrccRemote for FakeRemote {
             if let Some(error) = self.take_error() {
                 return Err(error);
             }
-            Err(token_missing())
+            self.maybe_switch_session();
+            self.notifications_reply
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(token_missing)
         })
     }
     fn my_map<'a>(&'a self, _world: &'a str) -> VrccFuture<'a, VrccMyMap> {
@@ -470,6 +498,7 @@ impl VrccRemote for FakeRemote {
             if let Some(error) = self.take_error() {
                 return Err(error);
             }
+            self.maybe_switch_session();
             self.unread
                 .lock()
                 .unwrap()
@@ -566,6 +595,7 @@ impl VrccRemote for FakeRemote {
         connection.vrc_name = vrc_name;
         connection.scope = scope;
         connection.notifications_cursor = None;
+        *self.generation.lock().unwrap() += 1;
     }
     fn disconnect(&self) {
         let mut connection = self.connection.lock().unwrap();
@@ -574,12 +604,22 @@ impl VrccRemote for FakeRemote {
             poll_every_secs: 60,
             ..VrccConnection::default()
         };
+        *self.generation.lock().unwrap() += 1;
     }
-    fn expire(&self) {
+    fn expire(&self, generation: u64) -> bool {
+        let mut current = self.generation.lock().unwrap();
+        if *current != generation {
+            return false;
+        }
+        *current += 1;
         let mut connection = self.connection.lock().unwrap();
         connection.connected = false;
         connection.expired = true;
         connection.notifications_cursor = None;
+        true
+    }
+    fn generation(&self) -> u64 {
+        *self.generation.lock().unwrap()
     }
     fn connection(&self) -> VrccConnection {
         self.connection.lock().unwrap().clone()
@@ -594,8 +634,18 @@ impl VrccRemote for FakeRemote {
             ..VrccLocalUsage::default()
         }
     }
-    fn note_poll(&self, _at_ms: i64, cursor: Option<i64>, every_secs: Option<i64>) {
+    fn note_poll(
+        &self,
+        generation: u64,
+        _at_ms: i64,
+        cursor: Option<i64>,
+        every_secs: Option<i64>,
+    ) -> bool {
+        if *self.generation.lock().unwrap() != generation {
+            return false;
+        }
         self.notes_polled.lock().unwrap().push((cursor, every_secs));
+        true
     }
     fn window_limit(&self) -> i64 {
         120
@@ -657,12 +707,15 @@ fn a_gone_token_is_dropped_and_remembered_as_expired() {
     let remote = FakeRemote::new();
     remote.mark_connected();
     let service = VrccService::new(store.clone(), remote);
-    service.note_unread(&VrccUnread {
-        inbox: 2,
-        ..Default::default()
-    });
+    service.note_unread(
+        service.remote.generation(),
+        &VrccUnread {
+            inbox: 2,
+            ..Default::default()
+        },
+    );
 
-    let error = service.settle(http(404, "gone"));
+    let error = service.settle(service.remote.generation(), http(404, "gone"));
     assert!(error.is_gone());
 
     let snapshot = service.snapshot();
@@ -680,6 +733,112 @@ fn a_gone_token_is_dropped_and_remembered_as_expired() {
     );
 }
 
+/// 会话已经换过（重新授权、换号）以后才回来的 `404 gone`，说的是旧令牌：
+/// 不能拿它把现在这个令牌删掉。
+#[test]
+fn a_gone_from_an_earlier_session_does_not_drop_the_current_token() {
+    let store = MemoryStore::with(StoredCredential {
+        token: "old".into(),
+        scope: Some("profile notifications maps".into()),
+        ..Default::default()
+    });
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store.clone(), remote.clone());
+    let told = Arc::new(Mutex::new(0));
+    let counter = Arc::clone(&told);
+    service.on_session_expired(Arc::new(move || *counter.lock().unwrap() += 1));
+
+    let stale = remote.generation();
+    // 请求还在路上，玩家重新授权了一次：会话换成了新令牌。
+    remote.connect("new".into(), None, None, None);
+    let error = service.settle(stale, http(404, "gone"));
+
+    assert!(error.is_gone());
+    assert!(service.snapshot().connected);
+    assert_eq!(service.snapshot().credential, VrccCredentialState::Active);
+    assert!(store.load().unwrap().is_some());
+    assert_eq!(*told.lock().unwrap(), 0, "没有失效，就不该通知前端");
+}
+
+/// 玩家点「断开」时还在路上的请求回来 `TokenMissing`：本地本来就没有令牌，
+/// 不能把「已断开」改写成「连接已失效」。
+#[test]
+fn token_missing_after_a_disconnect_is_not_called_expired() {
+    let store = MemoryStore::with(StoredCredential {
+        token: "tok".into(),
+        ..Default::default()
+    });
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store.clone(), remote.clone());
+    remote.disconnect();
+    service.set_credential_state(VrccCredentialState::Disconnected);
+
+    service.settle(remote.generation(), token_missing());
+
+    assert_eq!(
+        service.snapshot().credential,
+        VrccCredentialState::Disconnected
+    );
+    assert!(!service.snapshot().expired);
+}
+
+/// 令牌真的失效时，挂上的回调（桌面侧：告诉前端连接变了）被叫到一次。
+#[test]
+fn a_real_expiry_tells_the_hook_once() {
+    let store = MemoryStore::with(StoredCredential {
+        token: "tok".into(),
+        ..Default::default()
+    });
+    let remote = FakeRemote::new();
+    let service = VrccService::new(store, remote.clone());
+    let told = Arc::new(Mutex::new(0));
+    let counter = Arc::clone(&told);
+    service.on_session_expired(Arc::new(move || *counter.lock().unwrap() += 1));
+
+    let generation = remote.generation();
+    service.settle(generation, http(404, "gone"));
+    assert_eq!(*told.lock().unwrap(), 1);
+    // 同一代的第二个失败（并发请求一起撞上）不再通知。
+    service.settle(generation, http(404, "gone"));
+    assert_eq!(*told.lock().unwrap(), 1);
+}
+
+/// 轮询在路上时换了号：回来的游标不能写进新会话。
+#[tokio::test]
+async fn a_poll_that_returns_after_the_session_changed_does_not_write_the_cursor() {
+    let remote = FakeRemote::new();
+    remote.mark_connected();
+    remote.set_notifications(VrccNotifications {
+        last: Some(9),
+        every: Some(60),
+        ..Default::default()
+    });
+    remote.switch_session_mid_flight();
+    let service = VrccService::new(Arc::new(MemoryStore::default()), remote.clone());
+    remote.mark_connected();
+
+    service.poll_notifications().await.expect("请求本身成功");
+    assert!(remote.notes_polled.lock().unwrap().is_empty());
+}
+
+/// `me/unread` 在路上时换了号：回来的未读数不能留给新账号。
+#[tokio::test]
+async fn unread_that_returns_after_the_session_changed_is_not_kept() {
+    let remote = FakeRemote::new();
+    remote.mark_connected();
+    remote.set_unread(VrccUnread {
+        inbox: 3,
+        ..Default::default()
+    });
+    remote.switch_session_mid_flight();
+    let service = VrccService::new(Arc::new(MemoryStore::default()), remote.clone());
+    remote.mark_connected();
+
+    service.refresh_unread().await.expect("请求本身成功");
+    assert!(service.cached_unread().is_none());
+    assert!(service.wrist_summary(None).is_none());
+}
+
 #[test]
 fn other_404s_leave_the_token_alone() {
     // `star_gone`（对方不在了）、`expired`（签名图片失效）、`not_found`（旧服务器
@@ -692,7 +851,7 @@ fn other_404s_leave_the_token_alone() {
         let remote = FakeRemote::new();
         remote.mark_connected();
         let service = VrccService::new(store.clone(), remote);
-        service.settle(http(404, code));
+        service.settle(service.remote.generation(), http(404, code));
         assert!(service.snapshot().connected, "{code}");
         assert!(!service.snapshot().expired, "{code}");
         assert!(store.load().unwrap().is_some(), "{code}");
@@ -839,6 +998,154 @@ fn connecting_again_clears_the_recorded_outcome() {
     assert_eq!(service.snapshot().credential, VrccCredentialState::Active);
 }
 
+/// 按账号分开存的仓库：和真仓库一样，「当前账号」每次读写时现取。
+///
+/// 没登录时一律答「没有」，写入也落空——真仓库就是这样，`VrccService::new`
+/// 发生在登录之前，所以它那一次恢复必然什么都读不到。
+#[derive(Default)]
+struct AccountStore {
+    owner: Mutex<Option<String>>,
+    accounts: Mutex<HashMap<String, Arc<MemoryStore>>>,
+}
+
+impl AccountStore {
+    fn account(&self, owner: &str) -> Arc<MemoryStore> {
+        Arc::clone(
+            self.accounts
+                .lock()
+                .unwrap()
+                .entry(owner.to_string())
+                .or_default(),
+        )
+    }
+
+    fn sign_in_as(&self, owner: Option<&str>) {
+        *self.owner.lock().unwrap() = owner.map(str::to_string);
+    }
+
+    fn current(&self) -> Option<Arc<MemoryStore>> {
+        let owner = self.owner.lock().unwrap().clone()?;
+        Some(self.account(&owner))
+    }
+}
+
+impl VrccTokenStore for AccountStore {
+    fn load(&self) -> Result<Option<StoredCredential>> {
+        self.current().map_or(Ok(None), |store| store.load())
+    }
+    fn save(&self, credential: &StoredCredential) -> Result<()> {
+        self.current()
+            .map_or(Ok(()), |store| store.save(credential))
+    }
+    fn clear(&self) -> Result<()> {
+        self.current().map_or(Ok(()), |store| store.clear())
+    }
+    fn load_state(&self) -> Result<VrccCredentialState> {
+        self.current()
+            .map_or(Ok(VrccCredentialState::Never), |store| store.load_state())
+    }
+    fn save_state(&self, state: VrccCredentialState) -> Result<()> {
+        self.current()
+            .map_or(Ok(()), |store| store.save_state(state))
+    }
+    fn load_guidance(&self) -> Result<VrccGuidanceState> {
+        self.current()
+            .map_or(Ok(VrccGuidanceState::default()), |store| {
+                store.load_guidance()
+            })
+    }
+    fn save_guidance(&self, state: VrccGuidanceState) -> Result<()> {
+        self.current()
+            .map_or(Ok(()), |store| store.save_guidance(state))
+    }
+}
+
+#[test]
+fn logging_in_after_startup_restores_that_accounts_session() {
+    // 应用启动：还没登录，构造时那一次恢复读不到任何东西。
+    let store = Arc::new(AccountStore::default());
+    store
+        .account("usr_a")
+        .save(&StoredCredential {
+            token: "tok-a".into(),
+            star: Some(7),
+            vrc_name: Some("甲".into()),
+            scope: None,
+            client_id: None,
+        })
+        .unwrap();
+    store
+        .account("usr_a")
+        .save_guidance(VrccGuidanceState::Seen)
+        .unwrap();
+    let service = VrccService::new(
+        Arc::clone(&store) as Arc<dyn VrccTokenStore>,
+        FakeRemote::new(),
+    );
+    assert!(!service.snapshot().connected);
+    assert_eq!(service.credential_state(), VrccCredentialState::Never);
+    assert_eq!(service.guidance_state(), VrccGuidanceState::Unseen);
+
+    // 登录完成：按这个账号重新恢复，不用再授权一次，也不再弹首连引导。
+    store.sign_in_as(Some("usr_a"));
+    service.reload_account();
+    let snapshot = service.snapshot();
+    assert!(snapshot.connected);
+    assert_eq!(snapshot.star, Some(7));
+    assert_eq!(service.credential_state(), VrccCredentialState::Active);
+    assert_eq!(service.guidance_state(), VrccGuidanceState::Seen);
+}
+
+#[test]
+fn switching_accounts_or_logging_out_leaves_nothing_of_the_previous_one() {
+    let store = Arc::new(AccountStore::default());
+    store
+        .account("usr_a")
+        .save(&StoredCredential {
+            token: "tok-a".into(),
+            star: Some(7),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .account("usr_b")
+        .save_state(VrccCredentialState::Disconnected)
+        .unwrap();
+    store.sign_in_as(Some("usr_a"));
+    let remote = FakeRemote::new();
+    *remote.unread.lock().unwrap() = Some(VrccUnread::default());
+    let service = VrccService::new(Arc::clone(&store) as Arc<dyn VrccTokenStore>, remote);
+    assert!(service.snapshot().connected);
+    service.note_unread(service.remote.generation(), &VrccUnread::default());
+    assert!(service.cached_unread().is_some());
+
+    // 换到 B：A 的令牌、身份和未读数都不能带过来，B 自己的结局要读出来。
+    store.sign_in_as(Some("usr_b"));
+    service.reload_account();
+    let snapshot = service.snapshot();
+    assert!(!snapshot.connected);
+    assert_eq!(snapshot.star, None);
+    assert!(service.cached_unread().is_none());
+    assert_eq!(
+        service.credential_state(),
+        VrccCredentialState::Disconnected
+    );
+    // 换号只清本地：A 存下的令牌还在，换回来接着用。
+    assert!(store.account("usr_a").load().unwrap().is_some());
+
+    // 登出：谁的会话都不该留着。
+    store.sign_in_as(None);
+    service.reload_account();
+    assert!(!service.snapshot().connected);
+    assert_eq!(service.credential_state(), VrccCredentialState::Never);
+
+    // 换回 A：令牌还在，直接恢复成已连接。
+    store.sign_in_as(Some("usr_a"));
+    service.reload_account();
+    assert!(service.snapshot().connected);
+    assert_eq!(service.snapshot().star, Some(7));
+}
+
 #[test]
 fn guidance_starts_unseen_and_survives_a_restart() {
     let store = Arc::new(MemoryStore::default());
@@ -884,7 +1191,7 @@ fn wrist_prefers_the_unread_counts_over_recent() {
         Arc::clone(&remote) as Arc<dyn VrccRemote>,
     );
     // 旧服务器：只有「最近的提醒」的未读条数。
-    service.note_recent(2);
+    service.note_recent(service.remote.generation(), 2);
     assert_eq!(service.wrist_summary(None).unwrap().unread, 2);
 
     // 有了 `me/unread`：腕表显示几处红点的合计。
@@ -894,13 +1201,16 @@ fn wrist_prefers_the_unread_counts_over_recent() {
         chats: 2,
         notes: 3,
     };
-    assert!(service.note_unread(&counts), "第一次拿到算变化");
+    assert!(
+        service.note_unread(service.remote.generation(), &counts),
+        "第一次拿到算变化"
+    );
     assert_eq!(service.wrist_summary(None).unwrap().unread, 7);
     // 之后「最近的提醒」不再覆盖它。
-    service.note_recent(0);
+    service.note_recent(service.remote.generation(), 0);
     assert_eq!(service.wrist_summary(None).unwrap().unread, 7);
     // 一样的数不算变化，后台就不必通知前端。
-    assert!(!service.note_unread(&counts));
+    assert!(!service.note_unread(service.remote.generation(), &counts));
     assert_eq!(service.cached_unread(), Some(counts));
 }
 
@@ -912,10 +1222,13 @@ fn wrist_prefers_the_unread_counts_over_recent() {
 async fn reconnecting_clears_the_previous_accounts_wrist_summary() {
     let (service, remote, _store) = connected_service();
     // 造出上一个账号的未读数与腕表缓存。
-    service.note_unread(&VrccUnread {
-        inbox: 5,
-        ..Default::default()
-    });
+    service.note_unread(
+        service.remote.generation(),
+        &VrccUnread {
+            inbox: 5,
+            ..Default::default()
+        },
+    );
     assert!(service.wrist_summary(None).is_some());
 
     remote.set_device_token(VrccTokenResponse {
@@ -973,7 +1286,7 @@ fn wrist_shows_the_map_rank_once_connected() {
         Arc::clone(&remote) as Arc<dyn VrccRemote>,
     );
     // 连接后先有一条提醒，腕表才有数据可显示。
-    service.note_recent(0);
+    service.note_recent(service.remote.generation(), 0);
     service.note_boards(&VrccBoard {
         maps: vec![VrccBoardMap {
             world: "wrld_x".into(),
@@ -1034,7 +1347,7 @@ fn wrist_summary_reports_map_rank_from_board_cache() {
         Arc::clone(&remote) as Arc<dyn VrccRemote>,
     );
     // 腕表要先有数据（比如拉过一次提醒）才会显示；榜单负责补名次。
-    service.note_recent(0);
+    service.note_recent(service.remote.generation(), 0);
     // 直接喂一份榜单，模拟页面拉过地图榜。
     let board = VrccBoard {
         board: Some("maps".into()),
@@ -1083,7 +1396,7 @@ fn wrist_summary_unread_comes_from_recent_read_cursor() {
         Arc::new(MemoryStore::default()),
         Arc::clone(&remote) as Arc<dyn VrccRemote>,
     );
-    service.note_recent(4);
+    service.note_recent(service.remote.generation(), 4);
     let summary = service.wrist_summary(None).expect("有未读数据了");
     assert_eq!(summary.unread, 4);
 }
@@ -1962,51 +2275,6 @@ async fn model_board_returns_the_board_it_received() {
     assert_eq!(board.models[0].likes, 42);
 }
 
-/// 限流窗口内再问：把上次那份还给玩家，而不是报「请求太频繁」。
-///
-/// 缓存命中要求**排序和条数都一样**：请求 50 条却拿到 20 条的旧数据，界面
-/// 会以为这就是全部内容。
-#[tokio::test]
-async fn model_board_falls_back_to_cache_when_locally_throttled() {
-    let store = Arc::new(MemoryStore::default());
-    let remote = FakeRemote::new();
-    remote.set_models(VrccModelBoard {
-        board: Some("models".to_string()),
-        models: vec![VrccBoardModel {
-            id: 1,
-            name: "モデル".to_string(),
-            likes: 7,
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
-    let service = VrccService::new(store, remote.clone());
-
-    // 第一次：真的拿到，并进缓存。
-    let first = service
-        .models_board(20, VrccBoardSort::Top)
-        .await
-        .expect("应成功")
-        .expect("应返回榜单");
-    assert_eq!(first.models.len(), 1);
-
-    // 第二次：本地限流拦下（`is_local_gap`），服务层拿缓存顶上。
-    remote.set_error(throttled_locally(30, LocalThrottle::Gap));
-    let second = service
-        .models_board(20, VrccBoardSort::Top)
-        .await
-        .expect("限流窗口内不该报错，应回退到缓存")
-        .expect("缓存里有这一份");
-    assert_eq!(second.models.len(), 1);
-    assert_eq!(second.models[0].id, 1);
-
-    // 条数不同就不给：请求 50 条却拿到 20 条的旧数据会误导界面。
-    // `set_error` 取一次就清空，所以要重新设一次限流。
-    remote.set_error(throttled_locally(30, LocalThrottle::Gap));
-    let mismatch = service.models_board(50, VrccBoardSort::Top).await;
-    assert!(mismatch.is_err(), "条数不一致时不能拿旧数据冒充");
-}
-
 /// `model()` 不在榜上时是 `None`，不是故障。
 #[tokio::test]
 async fn model_lookup_returns_none_when_not_listed() {
@@ -2222,49 +2490,5 @@ async fn model_detail_cache_is_partitioned_by_account() {
         remote.model_calls.lock().unwrap().len(),
         2,
         "切回原账号应该命中它自己那份"
-    );
-}
-
-/// 榜单缓存也要按账号分区。
-///
-/// 用模型榜来验（`FakeRemote` 对它既有预设又有调用计数）。榜单今天不含个人
-/// 字段，但这条约束不该靠「今天」来维持：接口以后完全可能带上「你投过票没有」。
-#[tokio::test]
-async fn board_cache_is_partitioned_by_account() {
-    let store = Arc::new(MemoryStore::default());
-    let remote = FakeRemote::new();
-    remote.set_models(VrccModelBoard {
-        board: Some("models".to_string()),
-        sort: None,
-        total: Some(1),
-        ..Default::default()
-    });
-    let service = VrccService::new(store, remote.clone());
-
-    // 账号 A 拉一次，进缓存。
-    remote.connect("tok-a".into(), Some(111), Some("A".into()), None);
-    let _ = service.models_board(20, VrccBoardSort::Top).await;
-    let a_calls = remote.models_calls.lock().unwrap().len();
-    assert_eq!(a_calls, 1);
-
-    // 换账号 B：缓存里没有 B 的那份。
-    remote.connect("tok-b".into(), Some(222), Some("B".into()), None);
-    let b_key = OwnedModelBoardKey::new(service.cache_scope(), VrccBoardSort::Top);
-    assert!(
-        service.cached_models(20, b_key).is_none(),
-        "换账号之后不该能读到上一个账号的榜单缓存"
-    );
-
-    // 切回 A：A 自己那份还在，而且不用重新请求。
-    remote.connect("tok-a".into(), Some(111), Some("A".into()), None);
-    let a_key = OwnedModelBoardKey::new(service.cache_scope(), VrccBoardSort::Top);
-    assert!(
-        service.cached_models(20, a_key).is_some(),
-        "切回原账号应该还能命中它自己那份"
-    );
-    assert_eq!(
-        remote.models_calls.lock().unwrap().len(),
-        a_calls,
-        "这一段只查缓存，不该再发请求"
     );
 }

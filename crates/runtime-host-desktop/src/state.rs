@@ -1307,10 +1307,16 @@ impl DesktopRuntimeHostState {
     ///
     /// 现在：每次登录就绪起一个**属于该账号**的任务，并用一个 `AtomicBool`
     /// 让旧任务在下次醒来时自行退出。任务从创建起 owner 就是固定值。
+    ///
+    /// 顺带挂上「令牌失效」的事件钩子：那是装配阶段的一次性动作，而这里是唯一
+    /// 一次拿到全局事件出口的地方，见
+    /// [`crate::vrcc::DesktopVrccRuntime::install_session_expired_events`]。
     pub fn start_vrcc_background_poll<E>(&self, event_sink: Arc<E>)
     where
         E: vrcx_0_application_core::RuntimeEventSink + 'static,
     {
+        self.vrcc
+            .install_session_expired_events(Arc::clone(&event_sink));
         crate::vrcc_poll::install(
             Arc::clone(&self.vrcc),
             self.desktop.services.notification_dispatcher(),

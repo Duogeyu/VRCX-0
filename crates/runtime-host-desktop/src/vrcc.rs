@@ -9,7 +9,7 @@ use serde_json::json;
 use vrcx_0_application::vrcc::{
     classify_vrcc_error, StoredCredential, VrccErrorKind, VrccFailure, VrccService, VrccTokenStore,
 };
-use vrcx_0_application_core::ConfigStore;
+use vrcx_0_application_core::{ConfigStore, RuntimeAuthScopeObserver, RuntimeAuthScopeSnapshot};
 use vrcx_0_contracts::vrcc::{
     scope_grants, VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs,
     VrccConnectionSnapshot, VrccCredentialState, VrccGuidanceState, VrccMapPage, VrccModelBoard,
@@ -73,6 +73,16 @@ impl VrccTokenStore for TokenStoreAdapter {
     }
 }
 
+/// 登录账号一变，就按新账号重新恢复星遇同频的会话（见 [`VrccService::reload_account`]）。
+///
+/// 宿主在装配时把它挂到登录作用域上。作用域只存弱引用，`DesktopVrccRuntime`
+/// 由宿主状态持有，所以订阅与宿主同寿。
+impl RuntimeAuthScopeObserver for DesktopVrccRuntime {
+    fn runtime_auth_scope_changed(&self, _snapshot: &RuntimeAuthScopeSnapshot) {
+        self.service.reload_account();
+    }
+}
+
 /// 星遇同频提醒或未读数发生变化时发给前端的事件名。
 ///
 /// 只作为「该刷新了」的信号，不带正文——玩家内容没必要经手额外的事件层。
@@ -80,7 +90,9 @@ pub const VRCC_NOTICES_CHANGED_EVENT: &str = "vrccNoticesChanged";
 
 /// 令牌被服务器判了失效（`404 gone`）、本地已经清掉时发给前端的事件名。
 ///
-/// 前端收到后重读连接状态，显示「连接已失效，请重新连接」。
+/// 前端收到后重读连接状态，显示「连接已失效，请重新连接」。不管是后台轮询还是
+/// 前台命令撞上的失效都会发，钩子在装配阶段挂一次，见
+/// [`DesktopVrccRuntime::install_session_expired_events`]。
 pub const VRCC_CONNECTION_CHANGED_EVENT: &str = "vrccConnectionChanged";
 
 /// 桌面侧的星遇同频运行时。
@@ -177,6 +189,28 @@ impl DesktopVrccRuntime {
             owner,
             config,
         }
+    }
+
+    /// 令牌被判失效时告诉前端改显示。
+    ///
+    /// 挂在应用层 `settle` 的回调上，而不是只在后台轮询里发：前台命令撞上的失效
+    /// （例如在世界详情里提交评分收到 `404 gone`）同样走 `settle`，已经打开的
+    /// 世界、群组面板也要跟着换到「未连接」。
+    ///
+    /// **在装配阶段挂**，不挂在 [`Self::spawn_background_poll`] 里：那条任务要等
+    /// 第一次「登录就绪」才起，而失效可能发生得更早——应用刚起来、还没登录
+    /// VRChat 时，玩家已经连上星遇同频并提交过评分。那种情况下没有钩子，令牌被
+    /// 清掉却没有任何事件，面板会一直拿着旧账号的键和权限。
+    ///
+    /// 重复调用只会覆盖上一个钩子；事件出口本来就是全局的，重挂没有副作用。
+    pub fn install_session_expired_events<E>(&self, event_sink: Arc<E>)
+    where
+        E: vrcx_0_application_core::RuntimeEventSink + 'static,
+    {
+        let sink: Arc<dyn vrcx_0_application_core::RuntimeEventSink> = event_sink;
+        self.service.on_session_expired(Arc::new(move || {
+            sink.emit(VRCC_CONNECTION_CHANGED_EVENT, json!({}));
+        }));
     }
 
     /// 服务名（官方译名）。
@@ -635,6 +669,10 @@ impl DesktopVrccRuntime {
         let base = Self::BACKGROUND_POLL_BASE;
         let jitter = Self::BACKGROUND_POLL_JITTER;
 
+        // 令牌失效的通知**不在这里挂**：这条任务要等第一次「登录就绪」才起，
+        // 而失效可能发生得更早。改在装配阶段挂一次，见
+        // [`Self::install_session_expired_events`]。
+
         supervisor.spawn_cancellable(move |stop_token| {
             let service = Arc::clone(&service);
             let db = Arc::clone(&db);
@@ -722,13 +760,13 @@ impl DesktopVrccRuntime {
                                 if classify_vrcc_error(&error).0 == VrccErrorKind::NeedsReauth =>
                             {
                                 // 令牌已作废，应用层已经把它清掉了：之后几轮会因为
-                                // 未连接而跳过，等玩家重新连接。告诉前端改显示。
-                                // 判据复用应用层的单点分类，不在这里再判一次 HTTP。
+                                // 未连接而跳过，等玩家重新连接。告诉前端改显示的
+                                // 事件由 `settle` 的回调发（见上面 `on_session_expired`），
+                                // 这里不再重复发。
                                 tracing::info!(
                                     round,
                                     "vrcc: token invalid, background poll idle until reconnect"
                                 );
-                                event_sink.emit(VRCC_CONNECTION_CHANGED_EVENT, json!({}));
                             }
                             Err(error) => {
                                 // 不把错误抛出去：一次失败不该杀掉整个轮询。

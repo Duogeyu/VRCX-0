@@ -132,7 +132,7 @@ Sur Windows, installez **Visual Studio** avec la charge de travail
 
 ```bash
 git clone https://github.com/VRChatCN-Kipfel/VRCX-0-Galaxies
-cd VRCX-0
+cd VRCX-0-Galaxies
 
 npm install
 ```

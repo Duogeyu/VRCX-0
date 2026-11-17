@@ -3,13 +3,12 @@
 import { useQuery } from '@tanstack/react-query';
 
 import type { GroupInstanceRecord } from '@/domain/entities/group';
-import { queryKeys } from '@/lib/entityQueryCache';
 import {
     clubCodeForGroup,
     vrccMyClubQueryOptions,
     vrccPublicClubQueryOptions
 } from '@/repositories/vrccClubRepository';
-import { fetchVrccScopeGrants } from '@/repositories/vrccMapRepository';
+import { useVrccConnection } from '@/repositories/vrccConnectionRepository';
 
 import { clubRoomsToInstanceRows, type VrccClubRoom } from './clubRooms';
 
@@ -46,20 +45,16 @@ export function useGroupClubInstanceRecords(
         enabled: Boolean(code)
     });
 
-    const scopeQuery = useQuery({
-        queryKey: queryKeys.vrccScope('clubs'),
-        queryFn: () => fetchVrccScopeGrants('clubs'),
-        staleTime: 60 * 1000,
-        retry: 0,
-        refetchOnWindowFocus: false
-    });
+    const vrcc = useVrccConnection();
 
     // 两个条件都要：没有 `clubs` 权限时那条 IPC 注定失败；公开页已答 404 时
-    // 这个群组根本没入驻社团，问带令牌的只是白花额度。
+    // 这个群组根本没入驻社团，问带令牌的只是白花额度。和社团卡传同一个
+    // 账号标识，所以两处共用一个键、一次请求。
     const detailQuery = useQuery(
         vrccMyClubQueryOptions(
             code,
-            scopeQuery.data === true && Boolean(clubQuery.data?.club)
+            vrcc.account,
+            vrcc.grants('clubs') === true && Boolean(clubQuery.data?.club)
         )
     );
 

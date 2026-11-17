@@ -18,7 +18,7 @@
 //! 让它在下一次醒来时自行退出。旧任务不立即中止而是「下次醒来退出」，是因为
 //! `TaskSupervisor` 不对外暴露单个任务的句柄——只能靠任务自己看信号。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use vrcx_0_application_core::{
     RuntimeAuthScope, RuntimeAuthScopeObserver, RuntimeAuthScopeSnapshot, RuntimeEventSink,
@@ -64,6 +64,25 @@ impl VrccPollRuntime for HostPollRuntime {
 /// 端口实现：把宿主的登录作用域翻译成「当前账号 + 变化通知」。
 struct HostAuthIdentity {
     scope: RuntimeAuthScope,
+    /// 注册出去的观察者，**强引用由这里持有**。
+    ///
+    /// `RuntimeAuthScope::add_observer` 只存 `Weak`，观察者活多久归注册方管。
+    /// 早先这里直接把一个临时 `Arc` 交出去：注册时那一次初始回调一结束它就被
+    /// 释放了，之后的登录、登出、换号一个都通知不到。应用启动时还没登录，那次
+    /// 初始回调什么也不做，于是后台轮询从来没有起来过。
+    ///
+    /// 这会形成 `binding → identity → adapter → observer → binding` 的环，是有意
+    /// 的：订阅与宿主同寿，装配只在启动时发生一次。
+    subscriptions: Mutex<Vec<Arc<AuthObserverAdapter>>>,
+}
+
+impl HostAuthIdentity {
+    fn new(scope: RuntimeAuthScope) -> Self {
+        Self {
+            scope,
+            subscriptions: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl VrccAuthIdentity for HostAuthIdentity {
@@ -73,8 +92,13 @@ impl VrccAuthIdentity for HostAuthIdentity {
     }
 
     fn subscribe(&self, observer: Arc<dyn VrccAuthObserver>) {
-        self.scope
-            .add_observer(Arc::new(AuthObserverAdapter { observer }));
+        let adapter = Arc::new(AuthObserverAdapter { observer });
+        // 先留住再注册：`add_observer` 会立刻回调一次，回调里可能已经起了任务。
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Arc::clone(&adapter));
+        self.scope.add_observer(adapter);
     }
 }
 
@@ -111,6 +135,50 @@ pub(crate) fn install<E>(
         event_sink: event_sink as Arc<dyn RuntimeEventSink>,
         supervisor,
     });
-    let identity_port: Arc<dyn VrccAuthIdentity> = Arc::new(HostAuthIdentity { scope: auth_scope });
+    let identity_port: Arc<dyn VrccAuthIdentity> = Arc::new(HostAuthIdentity::new(auth_scope));
     vrcx_0_vrcc_client::install(runtime_port, identity_port);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use vrcx_0_application_core::RuntimeAuthScope;
+    use vrcx_0_vrcc_client::{VrccAuthIdentity, VrccAuthObserver};
+
+    use super::HostAuthIdentity;
+
+    #[derive(Default)]
+    struct Recorder {
+        seen: Mutex<Vec<Option<String>>>,
+    }
+
+    impl VrccAuthObserver for Recorder {
+        fn vrc_auth_changed(&self, owner: Option<&str>) {
+            self.seen.lock().unwrap().push(owner.map(str::to_string));
+        }
+    }
+
+    #[test]
+    fn subscription_keeps_hearing_about_logins_after_registration() {
+        // 应用启动时还没登录：初始回调是 None，真正有用的是之后那次登录。
+        let scope = RuntimeAuthScope::new();
+        let identity = HostAuthIdentity::new(scope.clone());
+        let recorder = Arc::new(Recorder::default());
+        identity.subscribe(Arc::clone(&recorder) as Arc<dyn VrccAuthObserver>);
+
+        scope.set("usr_a", "https://api.vrchat.cloud/api/1");
+        scope.set("usr_b", "https://api.vrchat.cloud/api/1");
+        scope.set("", "");
+
+        assert_eq!(
+            *recorder.seen.lock().unwrap(),
+            vec![
+                None,
+                Some("usr_a".to_string()),
+                Some("usr_b".to_string()),
+                None
+            ]
+        );
+    }
 }

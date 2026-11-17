@@ -16,7 +16,6 @@ import { useTranslation } from 'react-i18next';
 
 import { TranslatableText } from '@/components/translation/TranslatableText';
 import { formatCompactDateTime } from '@/lib/dateTime';
-import { queryKeys } from '@/lib/entityQueryCache';
 import { useNowMs } from '@/lib/useNowMs';
 import { useTiltGrid } from '@/lib/useTiltGrid';
 import {
@@ -24,7 +23,7 @@ import {
     vrccMyClubQueryOptions,
     vrccPublicClubQueryOptions
 } from '@/repositories/vrccClubRepository';
-import { fetchVrccScopeGrants } from '@/repositories/vrccMapRepository';
+import { useVrccConnection } from '@/repositories/vrccConnectionRepository';
 import { openExternalLink } from '@/services/shellIntegrationService';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
 
@@ -79,19 +78,14 @@ export function GroupVrccClub({
     });
 
     // 必须在提前 return 之前调用：写在后面会让 Hook 顺序随渲染路径变化。
-    const scopeQuery = useQuery({
-        queryKey: queryKeys.vrccScope('clubs'),
-        queryFn: () => fetchVrccScopeGrants('clubs'),
-        staleTime: 60 * 1000,
-        retry: 0,
-        refetchOnWindowFocus: false
-    });
+    const vrcc = useVrccConnection();
 
     const detailQuery = useQuery(
         vrccMyClubQueryOptions(
             code,
+            vrcc.account,
             // 公开页已答 404 时没必要再问带令牌的；没有 `clubs` 权限也别问。
-            scopeQuery.data === true && Boolean(query.data?.club)
+            vrcc.grants('clubs') === true && Boolean(query.data?.club)
         )
     );
 
@@ -496,7 +490,7 @@ export function GroupVrccClub({
 
                                 {backEmpty ? (
                                     <p className="text-muted-foreground/70 mt-2 min-w-0 text-[11px] leading-snug break-words">
-                                        {scopeQuery.data === true
+                                        {vrcc.grants('clubs') === true
                                             ? t('dialog.group.vrcc.back_empty')
                                             : t(
                                                   'dialog.group.vrcc.back_locked'

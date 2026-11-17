@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLinkIcon } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -11,8 +11,9 @@ import { queryKeys } from '@/lib/entityQueryCache';
 import { cn } from '@/lib/utils';
 import { VrccError } from '@/lib/vrccError';
 import type { VrccMyMapPage } from '@/platform/tauri/bindings';
+import { useVrccConnection } from '@/repositories/vrccConnectionRepository';
 import {
-    fetchVrccScopeGrants,
+    dropOtherVrccMyMapPageSorts,
     readVrccMyMap,
     voteVrccMapContent,
     vrccMyMapPageQueryOptions,
@@ -68,6 +69,7 @@ const SCORE_MAX = 10;
  */
 export function WorldVrccPanel({ worldId }: { worldId: string }) {
     const { t } = useTranslation();
+    const queryClient = useQueryClient();
     // 排序是这一页的两个交互状态之一。默认「最热」，与官方一致。
     const [sort, setSort] = useState<'hot' | 'new'>('hot');
     // 配置四宫格默认收起：它是「想深究再看」的信息，不该占住首屏。
@@ -97,38 +99,32 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
         enabled: Boolean(worldId)
     });
 
-    const signedIn = useQuery({
-        ...vrccMyMapPageQueryOptions(worldId, sort),
-        enabled: Boolean(worldId)
-    });
-
-    // 令牌里有没有 `maps.rate`。**必须在任何提前 return 之前调用**：
+    // 当前星遇同频账号与权限。**必须在任何提前 return 之前调用**：
     // 这个 Hook 写在下面（数据就绪之后）会让 Hook 顺序随渲染路径变化。
-    const scopeQuery = useQuery({
-        queryKey: queryKeys.vrccScope('maps.rate'),
-        queryFn: () => fetchVrccScopeGrants('maps.rate'),
-        staleTime: 60 * 1000,
-        retry: 0,
-        refetchOnWindowFocus: false
+    const vrcc = useVrccConnection();
+
+    // 带令牌的那一半挂在当前账号下，要等这次挂载读到连接再发：
+    // 缓存里的旧连接可能是上一个账号的。
+    // 切排序时先沿用另一个排序的「我的评分」，打分器不会被卸掉，见查询选项里的
+    // `placeholderData`。
+    const signedIn = useQuery({
+        ...vrccMyMapPageQueryOptions(worldId, sort, vrcc.account),
+        enabled: Boolean(worldId) && vrcc.ready
     });
 
+    // 令牌里有没有 `maps.rate`（打分）。
+    const canRateScope = vrcc.grants('maps.rate');
     // 投票是另一项权限（maps.write），和打分（maps.rate）分开判定：
     // 两个敏感权限都可以单独缺失，混成一个布尔会让「能打分不能投票」的
-    // 玩家看到一个点不动的赞。**同样必须在提前 return 之前调用。**
-    const writeScopeQuery = useQuery({
-        queryKey: queryKeys.vrccScope('maps.write'),
-        queryFn: () => fetchVrccScopeGrants('maps.write'),
-        staleTime: 60 * 1000,
-        retry: 0,
-        refetchOnWindowFocus: false
-    });
+    // 玩家看到一个点不动的赞。
+    const canVoteScope = vrcc.grants('maps.write');
 
     // 带令牌的状态：只有它能区分「未收录」和「待审核」。
     // 公开接口对这两种都回 404。**同样必须在提前 return 之前调用。**
     const myMapQuery = useQuery({
-        queryKey: queryKeys.worldVrccMine(worldId),
+        queryKey: queryKeys.worldVrccMine(worldId, vrcc.account),
         queryFn: () => readVrccMyMap(worldId),
-        enabled: Boolean(worldId) && scopeQuery.data === true,
+        enabled: Boolean(worldId) && canRateScope === true,
         // 状态会变（投稿后进入审核、审核后上榜），别缓存太久。
         staleTime: 30 * 1000,
         retry: 0,
@@ -357,8 +353,8 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
     // 已经连上、但令牌是加权限之前发的玩家，正是这里的分水岭：他们有 `maps`
     // 却没有 `maps.rate`，服务器会回 `403 scope`。给这类玩家看一个点不动的
     // 打分器，不如直接告诉他「重新连接一次即可」。
-    const canRate = scopeQuery.data === true;
-    const canVote = writeScopeQuery.data === true;
+    const canRate = canRateScope === true;
+    const canVote = canVoteScope === true;
 
     return (
         // `h-full` + 内部 flex：让这一页永远不超过标签页容器的高度。
@@ -432,9 +428,18 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                     {/* 我自己的分：现在可以改。
                         写操作需要 maps.rate，所以只有连上之后才给控件；
                         未连接时连输入框都不出现——摆一个点不动的打分器
-                        比没有更糟。 */}
-                    {canRate ? (
+                        比没有更糟。
+
+                        还要等「我的评分」（`signedIn`）到手再挂：编辑器的草稿
+                        只在挂载时取一次。权限查询是本地调用、几乎立刻就回，
+                        早先它一到就挂上编辑器，草稿是空的；等我的评分到了，
+                        短评框仍是空的，玩家只改一下分数提交，就会被判成
+                        「清空短评」，把原来那条删掉。`key` 绑住账号和服务器上的
+                        分数和短评：别处改过、或提交后重新拉到新值时，草稿
+                        跟着重新取。 */}
+                    {canRate && signedIn.data ? (
                         <VrccRatingEditor
+                            key={`${worldId}:${vrcc.account}:${mine?.score ?? ''}:${mine?.text ?? ''}`}
                             worldId={worldId}
                             currentScore={
                                 mine && typeof mine.score === 'number'
@@ -444,12 +449,18 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                             currentText={mine?.text ?? null}
                             check={mine?.check ?? null}
                             onDone={() => {
+                                dropOtherVrccMyMapPageSorts(
+                                    queryClient,
+                                    worldId,
+                                    sort,
+                                    vrcc.account
+                                );
                                 void signedIn.refetch();
                             }}
                         />
                     ) : mine ? (
                         <MineRating rate={mine} />
-                    ) : signedIn.data && scopeQuery.data === false ? (
+                    ) : signedIn.data && canRateScope === false ? (
                         // 连上了，但令牌里没有 maps.rate。这种情况几乎都是
                         // 「令牌是加权限之前签发的」，重连一次就好——直接说清楚，
                         // 比给一个点了必然 403 的控件有用。
@@ -480,6 +491,12 @@ export function WorldVrccPanel({ worldId }: { worldId: string }) {
                         {signedIn.isPending
                             ? t('common.loading', '加载中…')
                             : t('dialog.world.vrcc.words_hint')}
+                    </p>
+                ) : signedIn.isPlaceholderData ? (
+                    // 刚切了排序：手上是另一个排序的那一份，短评列表已经拿掉了，
+                    // 等这个排序的到了再显示。不能说「还没有短评」。
+                    <p className="text-muted-foreground text-xs">
+                        {t('common.loading', '加载中…')}
                     </p>
                 ) : rates.length ? (
                     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">

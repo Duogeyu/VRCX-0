@@ -4,9 +4,8 @@ import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 
 import { VrccStars } from '@/components/vrcc/VrccStars';
-import { queryKeys } from '@/lib/entityQueryCache';
+import { useVrccConnection } from '@/repositories/vrccConnectionRepository';
 import {
-    fetchVrccScopeGrants,
     vrccMyMapPageQueryOptions,
     vrccPublicMapQueryOptions
 } from '@/repositories/vrccMapRepository';
@@ -64,18 +63,12 @@ export function WorldVrccRating({ worldId }: { worldId: string }) {
     //
     // 先问一次令牌有没有 `maps` 再决定要不要发这个请求：没连上的玩家占多数，
     // 让他们每打开一张地图就吃一次必然失败的请求（还要重试一次）没有意义。
-    const scopeQuery = useQuery({
-        queryKey: queryKeys.vrccScope('maps'),
-        queryFn: () => fetchVrccScopeGrants('maps'),
-        staleTime: 60 * 1000,
-        retry: 0,
-        refetchOnWindowFocus: false
-    });
+    const vrcc = useVrccConnection();
     const signedIn = useQuery({
-        // 和「星遇同频」页签**同一个键**（默认排序就是 `hot`），所以玩家之后
-        // 切过去时零额外请求——这张卡片等于提前把它预热了。
-        ...vrccMyMapPageQueryOptions(worldId, 'hot'),
-        enabled: isWorld && scopeQuery.data === true
+        // 和「星遇同频」页签**同一个键**（默认排序就是 `hot`，同一个账号），
+        // 所以玩家之后切过去时零额外请求——这张卡片等于提前把它预热了。
+        ...vrccMyMapPageQueryOptions(worldId, 'hot', vrcc.account),
+        enabled: isWorld && vrcc.grants('maps') === true
     });
 
     /**

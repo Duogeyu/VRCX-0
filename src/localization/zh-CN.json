@@ -1014,6 +1014,7 @@
             "source_mine": "已连接：含只给成员看的社团",
             "loading": "正在读取社团列表…",
             "error": "社团列表没能加载出来，稍后再试。",
+            "stale_hint": "显示的是上一次的列表，这次刷新失败了。",
             "empty": "还没有公开的社团。",
             "members": "{count} 人",
             "likes": "{count} 个赞",
@@ -1100,6 +1101,7 @@
             "unavailable": "这一项需要额外权限，当前客户端还没开通",
             "rate_mine": "我给 TA 的分",
             "linked_at": "连上的时间",
+            "open_profile": "查看资料",
             "presence": {
                 "online": "在线",
                 "friend": "已是好友",

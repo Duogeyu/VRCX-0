@@ -57,7 +57,9 @@ export function VrccRatingEditor({
     onDone: () => void;
 }) {
     const { t } = useTranslation();
-    // 本地草稿：玩家还没提交的选择。
+    // 本地草稿：玩家还没提交的选择。**只在挂载时从 props 取一次**——调用方
+    // 必须等「我的评分」到手再挂载，并用 `key` 绑住服务器上的值，否则草稿和
+    // `currentText` 对不上，「只改分数」会被当成「清空短评」。
     const [draftScore, setDraftScore] = useState<number | null>(currentScore);
     const [draftText, setDraftText] = useState<string>(currentText ?? '');
     const [busy, setBusy] = useState(false);

@@ -177,6 +177,48 @@ impl RateLimiter {
         self.last_at.insert(key.to_string(), now);
     }
 
+    /// 忘掉某个槽的上次放行时间：下一次这个槽的请求不再受最小间隔约束。
+    ///
+    /// 窗口里的记录不动，每分钟的总数照算。只给「写操作之后，相关的读马上要
+    /// 重拉」用，见 `VrccClient::forget_replies`。
+    pub fn forget(&mut self, key: &str) {
+        self.last_at.remove(key);
+    }
+
+    /// 这个槽上一次放行（或预占）的时间。
+    pub fn last(&self, key: &str) -> Option<Instant> {
+        self.last_at.get(key).copied()
+    }
+
+    /// 撤销自己在 `at` 的那次预占，把槽恢复成预占前的样子（`previous`）。
+    ///
+    /// 和 [`Self::forget`] 不同：`forget` 连预占之前就在的间隔也一起抹掉。等在
+    /// `acquire` 里的请求被取消时，那段更早的间隔（比如上一次请求吃到 429 后留着的
+    /// 槽）还该挡着，只撤掉自己加上去的那一截。
+    ///
+    /// 槽上记的已经不是 `at`（之后又有人预占，或者整张表被 `forget_gaps` /
+    /// `forget` 清过）时什么都不做：那是别人的记录。窗口里的记录不动，每分钟的
+    /// 总数照算。
+    pub fn undo(&mut self, key: &str, at: Instant, previous: Option<Instant>) {
+        if self.last_at.get(key) != Some(&at) {
+            return;
+        }
+        match previous {
+            Some(previous) => {
+                self.last_at.insert(key.to_string(), previous);
+            }
+            None => {
+                self.last_at.remove(key);
+            }
+        }
+    }
+
+    /// 忘掉所有槽的上次放行时间（会话换了令牌时用，见
+    /// `VrccClient::forget_session_state`）。窗口里的记录不动，每分钟的总数照算。
+    pub fn forget_gaps(&mut self) {
+        self.last_at.clear();
+    }
+
     /// 当前窗口内已用次数。
     pub fn window_used(&self, now: Instant) -> usize {
         self.stamps
@@ -206,6 +248,30 @@ mod tests {
 
     fn at(base: Instant, secs: u64) -> Instant {
         base + Duration::from_secs(secs)
+    }
+
+    /// 同一个槽上先后两次预占，先占的那次后撤：槽上记的已经是后一次，不能动。
+    /// 写操作之后的重拉就会造出这种局面——打分前的读还在路上，重拉又占了一次。
+    #[test]
+    fn undo_leaves_a_later_reservation_alone() {
+        let base = Instant::now();
+        let gap = Duration::from_secs(5);
+        let budget = Duration::from_secs(10);
+        let mut limiter = RateLimiter::new();
+
+        let previous = limiter.last("k");
+        let first = limiter.reserve("k", gap, base, budget).expect("第一次");
+        let later = limiter
+            .reserve("k", gap, base, budget)
+            .expect("第二次排在后面");
+        assert!(later > first);
+
+        limiter.undo("k", first, previous);
+        assert_eq!(limiter.last("k"), Some(later), "后一次的预占还在");
+
+        // 槽上记的是自己时才恢复成预占前的值。
+        limiter.undo("k", later, Some(first));
+        assert_eq!(limiter.last("k"), Some(first));
     }
 
     #[test]

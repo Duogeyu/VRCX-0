@@ -1014,6 +1014,7 @@
             "source_mine": "已連接：含只給成員看的社團",
             "loading": "正在讀取社團列表…",
             "error": "社團列表沒能載入出來，稍後再試。",
+            "stale_hint": "顯示的是上一次的列表，這次重新整理失敗了。",
             "empty": "還沒有公開的社團。",
             "members": "{count} 人",
             "likes": "{count} 個讚",
@@ -1100,6 +1101,7 @@
             "unavailable": "這一項需要額外權限，當前客戶端還沒開通",
             "rate_mine": "我給 TA 的分",
             "linked_at": "連上的時間",
+            "open_profile": "查看資料",
             "presence": {
                 "online": "線上",
                 "friend": "已是好友",

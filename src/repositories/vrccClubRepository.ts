@@ -31,10 +31,15 @@ export function vrccPublicClubQueryOptions(code: string) {
  *
  * `enabled` 由调用方决定：公开页已经答 404 的群组没必要再问带令牌的。
  */
-export function vrccMyClubQueryOptions(code: string, enabled: boolean) {
+export function vrccMyClubQueryOptions(
+    code: string,
+    account: string,
+    enabled: boolean
+) {
     const trimmed = code.trim();
     return queryOptions({
-        queryKey: queryKeys.groupVrccClubDetail(trimmed),
+        // 账号进键：这是某一个星遇同频账号的数据，见 `queryKeys.worldVrccSignedIn`。
+        queryKey: queryKeys.groupVrccClubDetail(trimmed, account),
         queryFn: async () => {
             const { commands } = await import('@/platform/tauri/bindings');
             return commands.appVrccMyClub(trimmed);

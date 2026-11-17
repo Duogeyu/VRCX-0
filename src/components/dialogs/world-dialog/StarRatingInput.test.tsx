@@ -3,6 +3,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('react-i18next', () => ({
@@ -98,5 +99,52 @@ describe('StarRatingInput', () => {
 
         fireEvent.keyDown(radios[0], { key: 'ArrowLeft' });
         expect(onChange).toHaveBeenLastCalledWith(1);
+    });
+
+    it('聚焦后用方向键改分，星星和读数跟着走，不停在聚焦时那一档', () => {
+        function Controlled() {
+            const [value, setValue] = useState<number | null>(null);
+            return <StarRatingInput value={value} onChange={setValue} />;
+        }
+        render(<Controlled />);
+        const first = screen.getAllByRole('radio')[0];
+
+        fireEvent.focus(first);
+        expect(screen.getByText('1/10')).toBeTruthy();
+        fireEvent.keyDown(first, { key: 'ArrowRight' });
+        fireEvent.keyDown(first, { key: 'ArrowRight' });
+        fireEvent.keyDown(first, { key: 'ArrowRight' });
+
+        expect(screen.getByText('3/10')).toBeTruthy();
+        expect(
+            screen.getAllByRole('radio')[2].getAttribute('aria-checked')
+        ).toBe('true');
+    });
+
+    it('方向键把键盘焦点也移到新的那一档，之后按空格 / 回车不会把分数改回去', () => {
+        function Controlled() {
+            const [value, setValue] = useState<number | null>(null);
+            return <StarRatingInput value={value} onChange={setValue} />;
+        }
+        render(<Controlled />);
+        const radios = screen.getAllByRole('radio');
+
+        fireEvent.focus(radios[0]);
+        radios[0].focus();
+        fireEvent.keyDown(radios[0], { key: 'ArrowRight' });
+        fireEvent.keyDown(document.activeElement as Element, {
+            key: 'ArrowRight'
+        });
+        fireEvent.keyDown(document.activeElement as Element, {
+            key: 'ArrowRight'
+        });
+
+        expect(document.activeElement).toBe(screen.getAllByRole('radio')[2]);
+        // 空格 / 回车在按钮上就是一次 click：落在新的那一档上，值不变。
+        fireEvent.click(document.activeElement as Element);
+        expect(screen.getByText('3/10')).toBeTruthy();
+        expect(
+            screen.getAllByRole('radio')[2].getAttribute('aria-checked')
+        ).toBe('true');
     });
 });

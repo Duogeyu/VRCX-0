@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { queryOptions } from '@tanstack/react-query';
+import { hashKey, queryOptions } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query';
 
 import { entityQueryPolicies, queryKeys } from '@/lib/entityQueryCache';
 import { normalizeVrccError } from '@/lib/vrccError';
-import { scopeGrants } from '@/lib/vrccScope';
 import { commands } from '@/platform/tauri/bindings';
 import type { VrccMyMap } from '@/platform/tauri/bindings';
 
@@ -60,19 +60,70 @@ export function vrccPublicMapQueryOptions(worldId: string) {
  */
 export function vrccMyMapPageQueryOptions(
     worldId: string,
-    sort: 'hot' | 'new'
+    sort: VrccMyMapPageSort,
+    account: string
 ) {
+    // 同一张图、同一个账号的各个排序的键，用同一个键构造函数现拼。占位判断拿它
+    // 比，不按下标取键里的段：键的形状以后变了，这里跟着变。
+    const siblings = new Set(
+        VRCC_MY_MAP_PAGE_SORTS.map((each) =>
+            hashKey(queryKeys.worldVrccSignedIn(worldId, each, account))
+        )
+    );
     return queryOptions({
-        queryKey: queryKeys.worldVrccSignedIn(worldId, sort),
+        // 账号进键：这是某一个星遇同频账号的数据，见 `queryKeys.worldVrccSignedIn`。
+        queryKey: queryKeys.worldVrccSignedIn(worldId, sort, account),
         queryFn: async () =>
             worldId.startsWith('wrld_')
                 ? commands.appVrccMyMapPage(worldId, sort)
                 : null,
+        // 切短评排序时，新排序那一份到之前先沿用另一个排序的那一份：「我的评分」
+        // 和排序无关，而打分器要等它才挂载——不沿用的话一切排序，编辑器就被卸掉，
+        // 没提交的分数和短评一起丢了。
+        //
+        // 只沿用同一张图、同一个账号的，而且**拿掉短评列表**：列表按 `sort` 排，
+        // 沿用会把上一个排序的列表当成这一个显示。界面在占位期间（`isPlaceholderData`）
+        // 把短评区显示成「加载中」。
+        placeholderData: (previous, previousQuery) =>
+            previous &&
+            previousQuery &&
+            siblings.has(hashKey(previousQuery.queryKey))
+                ? { ...previous, rates: undefined }
+                : undefined,
         staleTime: 5 * 60 * 1000,
         gcTime: 30 * 60 * 1000,
         retry: 1,
         refetchOnWindowFocus: false
     });
+}
+
+/** 带令牌地图页的两种短评排序。 */
+export const VRCC_MY_MAP_PAGE_SORTS = ['hot', 'new'] as const;
+export type VrccMyMapPageSort = (typeof VRCC_MY_MAP_PAGE_SORTS)[number];
+
+/**
+ * 打分、删分成功后调：同一张图**其它排序**缓存里的「我的评分」已经过时，丢掉。
+ * 当前排序由调用方自己重拉。
+ *
+ * 只标成过期不够：切过去时仍会先显示缓存里的旧值，打分器的 `key`（绑着服务器上
+ * 的分数和短评）跟着变回旧值，编辑器重新挂载，没提交的草稿就丢了。丢掉之后切过去
+ * 走占位那一路，沿用当前排序刚拉到的这一份。
+ */
+export function dropOtherVrccMyMapPageSorts(
+    queryClient: QueryClient,
+    worldId: string,
+    sort: VrccMyMapPageSort,
+    account: string
+): void {
+    for (const other of VRCC_MY_MAP_PAGE_SORTS) {
+        if (other === sort) {
+            continue;
+        }
+        queryClient.removeQueries({
+            queryKey: queryKeys.worldVrccSignedIn(worldId, other, account),
+            exact: true
+        });
+    }
 }
 
 /**
@@ -325,33 +376,4 @@ export async function prefetchVrccWorldCovers(
         )
     );
     return stored;
-}
-
-/**
- * 当前令牌有没有某项权限。
- *
- * ## 为什么要问后端
- *
- * 「有没有 `maps.rate`」取决于**玩家当初授权时拿到的 scope 字符串**，那是
- * 令牌的属性，不在前端状态里。已经连上、但令牌是加权限之前签发的玩家，
- * 正是这里的分水岭：他们有 `maps` 却没有 `maps.rate`，服务器会回
- * `403 scope`。前端猜不出来，只能读。
- *
- * ## 判定是**严格**的：宁可少给，不给一个点了必然失败的按钮
- *
- * 拿不到 scope（未连接、旧版本没记、或读连接状态本身失败）时按**没有**处理，
- * 界面于是要求玩家重新连接一次。这是**故意与契约层的 `scope_grants` 相反**：
- * 那里问的是「该不该替服务器先拦下请求」，不知道就放行（`None => true`，交给
- * 服务器判）；这里问的是「该不该给玩家看一个按钮」，不知道就不给。
- *
- * 官方的 scope 分隔符兼容空格、逗号与 `+`，判定本身在
- * [`scopeGrants`](@/lib/vrccScope)，页面那边用的是同一个。
- */
-export async function fetchVrccScopeGrants(scope: string): Promise<boolean> {
-    try {
-        const connection = await commands.appVrccConnection();
-        return scopeGrants(connection.scope, scope);
-    } catch {
-        return false;
-    }
 }

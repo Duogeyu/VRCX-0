@@ -1015,6 +1015,7 @@
             "source_mine": "Connected — includes member-only clubs",
             "loading": "Loading clubs…",
             "error": "The club list didn't load. Try again later.",
+            "stale_hint": "Showing the last loaded list; refreshing failed.",
             "empty": "No public clubs yet.",
             "members": "{count} members",
             "likes": "{count} likes",
@@ -1101,6 +1102,7 @@
             "unavailable": "This needs an extra permission this client does not have",
             "rate_mine": "My rating for them",
             "linked_at": "When you linked",
+            "open_profile": "View profile",
             "presence": {
                 "online": "Online",
                 "friend": "Already friends",

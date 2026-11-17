@@ -133,7 +133,7 @@ On Windows, also install **Visual Studio Build Tools** with the **Desktop develo
 
 ```bash
 git clone https://github.com/VRChatCN-Kipfel/VRCX-0-Galaxies
-cd VRCX-0
+cd VRCX-0-Galaxies
 
 npm install
 ```
