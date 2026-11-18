@@ -796,6 +796,13 @@
         "not_connected": "未連線",
         "connected": "已連線",
         "service_down": "服務無法使用",
+        "health": {
+            "unreachable": "無法確認 VRCC 伺服器狀態",
+            "failing": "VRCC 介面目前無法使用",
+            "failing_hint": "vrcc.cc 的介面出錯，改動本機設定無法修復。系統最多每 5 分鐘重試一次。",
+            "server_said": "伺服器原文：{message}",
+            "view_site": "檢視 vrcc.cc 狀態頁"
+        },
         "go_connect": "去連線",
         "reconnect_hint": "去「我的」重新連線",
         "missing_scope": "這一項需要 {scope} 權限，重新連線一次即可",
@@ -933,10 +940,10 @@
             "unknown": "操作失敗，請稍後再試",
             "device_code_quota": "申請連接碼的額度按網路出口 IP 計算，每天 30 個，同一網路下的其他裝置或玩家共用。換一個網路（例如手機熱點）可以立刻再用。",
             "network": {
-                "connect": "連不上星遇同頻，可能被網路攔截。開了代理的話，請檢查設定裡的代理是否可用。",
-                "dns": "找不到 vrcc.cc，網域名稱解析失敗。請檢查網路或換個 DNS。",
-                "timeout": "連線星遇同頻逾時，請稍後再試。",
-                "generic": "與星遇同頻的網路連線中斷，請稍後再試。"
+                "connect": "連不上 vrcc.cc，可能被網路攔截。如果已啟用代理，檢查代理設定。",
+                "dns": "找不到 vrcc.cc，網域名稱解析失敗。檢查網路，或換一個 DNS。",
+                "timeout": "連線 vrcc.cc 逾時。網路可能不穩定。",
+                "generic": "無法連線 vrcc.cc。檢查網路或代理。"
             }
         },
         "mutuals": {
@@ -7141,6 +7148,13 @@
         "servers": "伺服器",
         "servers_issue": "VRChat 伺服器發生問題",
         "servers_ok": "VRChat 伺服器運作正常",
+        "servers_unreachable": "無法確認 VRChat 伺服器狀態",
+        "servers_unknown": "尚未確認 VRChat 伺服器狀態",
+        "servers_stale": "上次查到的結果，目前無法更新。",
+        "vrcc": "星遇狀態",
+        "vrcc_ok": "星遇狀態正常",
+        "vrcc_issue": "星遇介面暫時無法使用",
+        "vrcc_unknown": "尚未確認星遇狀態",
         "view_status": "檢視狀態",
         "proxy": "代理",
         "realtime_connection": "即時連線",
