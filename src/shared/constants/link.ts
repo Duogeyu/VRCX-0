@@ -14,6 +14,8 @@ const links: Record<string, string> = {
     discord: 'https://discord.gg/fehKP3SVPN',
     qqGroup: 'https://qm.qq.com/q/MDK8QDUX2C',
     vrchatStatus: 'https://status.vrchat.com/',
+    /** 星遇同频的状态页（`GET /api/v1/status` 的页面版，官方文档里给的）。 */
+    vrccStatus: 'https://vrcc.cc/status/',
     vrchatDocsConfigurationFile:
         'https://docs.vrchat.com/docs/configuration-file',
     vrchatDocsLaunchOptions: 'https://docs.vrchat.com/docs/launch-options',

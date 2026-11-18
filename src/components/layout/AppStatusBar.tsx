@@ -40,6 +40,7 @@ import { useProfileBackupStore } from '@/state/profileBackupStore';
 import { markRestartPending } from '@/state/restartPendingStore';
 import { useRuntimeStore } from '@/state/runtimeStore';
 import { useShellStore } from '@/state/shellStore';
+import { useVrccHealthStore } from '@/state/vrccHealthStore';
 import { useWorldCollectionImportStore } from '@/state/worldCollectionImportStore';
 import { ContextMenu, ContextMenuTrigger } from '@/ui/shadcn/context-menu';
 
@@ -56,6 +57,9 @@ const DEFAULT_VISIBILITY: StatusBarVisibility = {
     steamvr: true,
     proxy: true,
     ws: true,
+    // 星遇同频：默认关。它和绝大多数玩家无关（要先连上星遇同频才用得上），
+    // 状态栏不该被一个没在用的站点占位。在右键菜单里可以打开。
+    vrcc: false,
     instanceQueue: true,
     nowPlaying: true,
     uptime: false,
@@ -282,6 +286,9 @@ export function AppStatusBar({
         (state) => state.vrcStatus.refreshing
     );
     const vrcStatusError = useRuntimeStore((state) => state.vrcStatus.error);
+    // 星遇状态：结论和"上次拿到结论的时刻"由 `VrccHealthProbeHost` 常驻写进 store。
+    const vrccHealth = useVrccHealthStore((state) => state.health);
+    const vrccCheckedAt = useVrccHealthStore((state) => state.checkedAt);
     const preferencesHydrated = usePreferencesStore(
         (state) => state.preferencesHydrated
     );
@@ -669,6 +676,26 @@ export function AppStatusBar({
         await refreshStatusPromise;
     }
 
+    /**
+     * 打开 vrcc.cc 的状态页。
+     *
+     * 不顺手触发一次重探：探针在 `VrccHealthProbeHost` 里按自己的节奏跑，
+     * 而 `status` 有 30 秒本地间隔 + 服务端 1 分钟缓存，点一下再问一遍多半拿到同一份。
+     */
+    function openVrccStatusPage() {
+        openExternalLink(links.vrccStatus).catch((error: unknown) => {
+            toast.add({
+                type: 'error',
+                title:
+                    error instanceof Error
+                        ? error.message
+                        : t(
+                              'component.app_status_bar.toast.failed_to_open_vrchat_status'
+                          )
+            });
+        });
+    }
+
     async function openProxyEditor() {
         if (!preferencesHydrated) {
             await loadPreferenceSnapshot();
@@ -820,6 +847,7 @@ export function AppStatusBar({
         visibility,
         visibleClocks,
         worldCollectionImport,
+        vrcc: { health: vrccHealth, checkedAt: vrccCheckedAt },
         vrcStatus,
         zoomLabel: formatZoomPercentage(currentZoomLevel),
         zoomLevel: currentZoomLevel,
@@ -853,6 +881,7 @@ export function AppStatusBar({
             });
         },
         onOpenStatusPage: openStatusPage,
+        onOpenVrccStatusPage: openVrccStatusPage,
         onStartBackgroundMode: startBackgroundMode,
         onProxyDraftEnabledChange: setProxyDraftEnabled,
         onProxyDraftServerChange: setProxyDraftServer,
