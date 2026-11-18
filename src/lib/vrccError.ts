@@ -208,6 +208,35 @@ function normalizeTransportKind(
 }
 
 /**
+ * 传输层卡在哪一步，对应哪一条文案。
+ *
+ * 判据是 `VrccTransportKind`，不是对错误文案做字符串匹配。
+ *
+ * **两个地方共用这一份映射**：
+ *
+ * - `describeVrccError`（某个操作失败时给玩家的那句话）；
+ * - `LoginVrccStatusAlert`（常驻探活发现"够不着 vrcc.cc"时的说明）。
+ *
+ * 两处说的是同一件事 —— 请求没拿到响应，卡在哪一步 —— 所以必须用同一套措辞，
+ * 否则同一个 DNS 失败会在两个地方叫两个名字。
+ *
+ * `body`（响应中断）和 `other` 落到通用那条：它们对玩家没有可执行的区别，
+ * 再细分只是把「不知道」说得很详细。
+ */
+export function networkCopyKey(kind: VrccTransportKind | null): string {
+    switch (kind) {
+        case 'dns':
+            return 'vrcc.error.network.dns';
+        case 'connect':
+            return 'vrcc.error.network.connect';
+        case 'timeout':
+            return 'vrcc.error.network.timeout';
+        default:
+            return 'vrcc.error.network.generic';
+    }
+}
+
+/**
  * 把命令抛出的错误归一化成 [`VrccError`]。
  *
  * 任何调用 `commands.app__vrcc_*` 的地方都应该经过它，否则拿到的是原始

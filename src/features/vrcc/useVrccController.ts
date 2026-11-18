@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { queryKeys } from '@/lib/entityQueryCache';
 import { queryClient } from '@/lib/queryClient';
+import { networkCopyKey } from '@/lib/vrccError';
 import { scopeGrants } from '@/lib/vrccScope';
 import { tauriClient } from '@/platform/tauri/client';
 import { copyTextToClipboard } from '@/services/clipboardService';
@@ -114,19 +115,9 @@ export function describeVrccError(error: VrccError): string {
     }
 
     if (error.layer === 'transport') {
-        const kind = error.transportKind;
-        if (kind === 'timeout') {
-            return i18n.t('vrcc.error.network.timeout');
-        }
-        // DNS 与建连对玩家的意义不同：前者换 DNS/换网络可能好，后者多半要开代理。
-        // 注意走 SOCKS5 代理时 DNS 由代理解析，这里只会看到 `connect`。
-        if (kind === 'connect') {
-            return i18n.t('vrcc.error.network.connect');
-        }
-        if (kind === 'dns') {
-            return i18n.t('vrcc.error.network.dns');
-        }
-        return i18n.t('vrcc.error.network.generic');
+        // 卡在哪一步由 `networkCopyKey` 统一决定：常驻探活的提示用同一份映射，
+        // 同一个 DNS 失败不该在两个地方叫两个名字。
+        return i18n.t(networkCopyKey(error.transportKind));
     }
 
     // 出口 IP 维度的额度：说成「你自己的次数用完了」会让玩家去查账号。
