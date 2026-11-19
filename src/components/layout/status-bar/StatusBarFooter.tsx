@@ -232,6 +232,7 @@ export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
             vrcc.health,
             // 时间格式和 VRChat 那段的"上次获取"保持一致。
             vrcc.checkedAt,
+            vrcc.refreshing,
             t,
             (ms) => formatStatusDate(new Date(ms).toISOString())
         );
@@ -277,15 +278,16 @@ export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
                     tooltip={statusTooltip(vrcIndicator)}
                 />
                 {/*
-                  星遇状态（vrcc.cc）：默认**不显示**。
-                  绝大多数玩家没连过星遇同频，状态栏不该被一个与他无关的站点占位；
-                  在状态栏右键菜单里可以打开（`status_bar.vrcc`）。
-                  提示结构和上面 VRChat 那段一致。
+                  星遇状态（vrcc.cc）。和上面 VRChat 那段同权：默认显示，右键菜单
+                  里可以关掉。提示结构和它一致 —— 首行结论，之后是灰色次要行。
                 */}
                 <StatusSegment
                     visible={sidebarWindowMode || visibility.vrcc}
                     active={vrccIndicator.active}
-                    dotClassName={vrccIndicator.dotClassName}
+                    dotClassName={cn(
+                        vrcc.refreshing && 'motion-safe:animate-pulse',
+                        vrccIndicator.dotClassName
+                    )}
                     label={t('status_bar.vrcc')}
                     className="cursor-pointer"
                     onClick={onOpenVrccStatusPage}

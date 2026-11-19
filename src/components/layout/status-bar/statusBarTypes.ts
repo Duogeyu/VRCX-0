@@ -146,6 +146,8 @@ type StatusBarFooterModel = {
     vrcc: {
         health: VrccHealth;
         checkedAt: number | null;
+        /** 后端正在探。状态栏据此让圆点脉冲，和 VRChat 那段一致。 */
+        refreshing: boolean;
     };
     vrcStatus: Pick<
         VrcStatusState,

@@ -14,8 +14,18 @@ const formatCheckedAt = (ms: number) => `at:${ms}`;
 
 const CHECKED_AT = 1_794_453_729_283;
 
-function resolve(health: VrccHealth, checkedAt: number | null = CHECKED_AT) {
-    return resolveVrccStatusIndicator(health, checkedAt, t, formatCheckedAt);
+function resolve(
+    health: VrccHealth,
+    checkedAt: number | null = CHECKED_AT,
+    refreshing = false
+) {
+    return resolveVrccStatusIndicator(
+        health,
+        checkedAt,
+        refreshing,
+        t,
+        formatCheckedAt
+    );
 }
 
 describe('statusBarVrcc', () => {
@@ -46,6 +56,19 @@ describe('statusBarVrcc', () => {
 
         it('还没有过结论时不显示时间行', () => {
             expect(resolve({ state: 'unknown' }, null).details).toEqual([]);
+        });
+
+        // 和 VRChat 那段一致：正在问就告诉玩家。
+        it('正在探时多一行「加载中」，时间行跟在后面', () => {
+            expect(
+                resolve({ state: 'ok', at: 1 }, CHECKED_AT, true).details
+            ).toEqual(['common.loading', `at:${CHECKED_AT}`]);
+        });
+
+        it('还没结论又正在探时只有那一行', () => {
+            expect(resolve({ state: 'unknown' }, null, true).details).toEqual([
+                'common.loading'
+            ]);
         });
     });
 

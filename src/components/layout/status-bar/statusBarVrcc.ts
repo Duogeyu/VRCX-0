@@ -49,15 +49,21 @@ const WARN_DOT = 'bg-[var(--status-askme)]';
 
 /**
  * @param checkedAt 最近一次拿到结论的时刻（毫秒）。`null` 表示还没有过结论。
+ * @param refreshing 后台正在探。和 VRChat 那段一样，提示里加一行「加载中」。
  * @param formatCheckedAt 把毫秒数写成人话。沿用状态栏里其他地方的时间格式。
  */
 export function resolveVrccStatusIndicator(
     health: VrccHealth,
     checkedAt: number | null,
+    refreshing: boolean,
     t: (key: string) => string,
     formatCheckedAt: (ms: number) => string
 ): VrccStatusIndicator {
-    const timeRow = checkedAt === null ? [] : [formatCheckedAt(checkedAt)];
+    const refreshingRow = refreshing ? [t('common.loading')] : [];
+    const timeRow =
+        checkedAt === null
+            ? refreshingRow
+            : [...refreshingRow, formatCheckedAt(checkedAt)];
 
     switch (health.state) {
         case 'ok':
@@ -75,7 +81,7 @@ export function resolveVrccStatusIndicator(
                 active: false,
                 dotClassName: OFFLINE_DOT,
                 headline: t('status_bar.vrcc_unknown'),
-                details: []
+                details: refreshingRow
             };
 
         // 网络层：玩家自己能修，所以首行按卡在哪一步（DNS / 建连 / 超时）说。
