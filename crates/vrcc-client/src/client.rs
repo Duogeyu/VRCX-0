@@ -480,6 +480,26 @@ struct Call<'a> {
     ///
     /// 这类请求都是玩家手动触发的一次性动作，不可能刷屏，所以不设限没有风险。
     bypass_gate: bool,
+    /// 探活请求：**不受全局退避限制**，但仍然守最小间隔和每分钟窗口。
+    ///
+    /// 只给 `status` 用。退避是**全局**的：任何一个接口吃到 429，整个客户端都会
+    /// 停一段时间（见 [`VrccClient::note_rate_limited`]）。但 `GET /status` 是官方
+    /// 的探活接口 —— 官方 `security` 是空数组，**不要求**令牌与 `X-Client`，
+    /// 不计入任何个人额度。它存在的全部意义就是回答「现在服务能不能用」，
+    /// 被自家的退避挡住就等于什么都没探到。
+    ///
+    /// 「不要求」不等于「不发」：这条请求照旧带 `X-Client`（标识由
+    /// `send_reserved` 统一注入）。不带的只有 `Authorization`，那是
+    /// `authed: false` 管的事。
+    ///
+    /// 时机上更要紧：玩家真正需要探活的时候，往往正是刚出过故障的时候，
+    /// 那时退避大概率还没结束。早先的折中是在前端把 `ThrottledLocally`
+    /// 当成「不知道」而不是「服务挂了」（见 `useVrccController` 的注释）
+    /// —— 那是在表现层替一个客户端层的缺陷擦屁股。
+    ///
+    /// **只跳过退避**，不跳过最小间隔和窗口：探活不该挤掉业务请求的额度，
+    /// 而且服务端对这个回答本来就缓存一分钟，问得更勤没有意义。
+    ignore_backoff: bool,
 }
 
 impl Call<'_> {
@@ -717,19 +737,24 @@ impl VrccClient {
         key: &str,
         min_gap: Duration,
         budget: Duration,
+        ignore_backoff: bool,
     ) -> Result<SlotRelease<'_>, VrccError> {
         let now = Instant::now();
         let (at, previous) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let backoff = state.backoff_remaining(now);
-            if !backoff.is_zero() {
-                return Err(VrccError::new(
-                    ErrorLayer::Client,
-                    ErrorDetail::ThrottledLocally {
-                        retry_after_secs: backoff.as_secs().max(1),
-                        reason: LocalThrottle::Backoff,
-                    },
-                ));
+            // 探活请求（`ignore_backoff`）跳过退避：退避是别的接口吃 429 留下的，
+            // 和服务本身能不能用是两件事。详见 `Call::ignore_backoff` 的说明。
+            if !ignore_backoff {
+                let backoff = state.backoff_remaining(now);
+                if !backoff.is_zero() {
+                    return Err(VrccError::new(
+                        ErrorLayer::Client,
+                        ErrorDetail::ThrottledLocally {
+                            retry_after_secs: backoff.as_secs().max(1),
+                            reason: LocalThrottle::Backoff,
+                        },
+                    ));
+                }
             }
             // 预占前槽上记的时间，和预占在同一把锁里取：撤回时只撤自己那一截。
             let previous = state.limiter.last(key);
@@ -760,18 +785,21 @@ impl VrccClient {
             tokio::time::sleep(wait).await;
         }
         // 睡醒再看一眼：等待期间可能已经有别的请求吃到 429，全局退避开始了。
-        let backoff = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.backoff_remaining(Instant::now())
-        };
-        if !backoff.is_zero() {
-            return Err(VrccError::new(
-                ErrorLayer::Client,
-                ErrorDetail::ThrottledLocally {
-                    retry_after_secs: backoff.as_secs().max(1),
-                    reason: LocalThrottle::Backoff,
-                },
-            ));
+        // 探活请求不看这一眼，理由同上面进锁那次。
+        if !ignore_backoff {
+            let backoff = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.backoff_remaining(Instant::now())
+            };
+            if !backoff.is_zero() {
+                return Err(VrccError::new(
+                    ErrorLayer::Client,
+                    ErrorDetail::ThrottledLocally {
+                        retry_after_secs: backoff.as_secs().max(1),
+                        reason: LocalThrottle::Backoff,
+                    },
+                ));
+            }
         }
         Ok(release)
     }
@@ -1224,8 +1252,13 @@ impl VrccClient {
         let mut release = if call.bypass_gate {
             SlotRelease::none(self)
         } else {
-            self.acquire(&slot_of(call), call.min_gap, wait_budget)
-                .await?
+            self.acquire(
+                &slot_of(call),
+                call.min_gap,
+                wait_budget,
+                call.ignore_backoff,
+            )
+            .await?
         };
         if call.reusable() {
             // 可复用的读：等响应时被取消也撤（守卫跟着 future 一起丢掉）。拿到响应
@@ -1559,6 +1592,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1591,6 +1625,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1617,6 +1652,7 @@ impl VrccClient {
                 bucket: None,
                 limiter: None,
                 bypass_gate: false,
+                ignore_backoff: false,
             })
             .await
         {
@@ -1629,6 +1665,10 @@ impl VrccClient {
     }
 
     /// 服务探活。不需要 client 标识，也不计入个人额度。
+    ///
+    /// **不受全局退避限制**（`ignore_backoff`）：见 [`Call::ignore_backoff`] 的说明。
+    /// 一句话：别的接口吃 429 之后进程会整体退避，而玩家最需要探活的时候恰恰是
+    /// 刚出过故障的时候 —— 探活被自家退避挡回去，它就什么都没探到。
     pub async fn status(&self) -> Result<VrccStatus, VrccError> {
         self.request(Call {
             method: "GET",
@@ -1640,6 +1680,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: true,
         })
         .await
     }
@@ -1692,6 +1733,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1727,6 +1769,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1761,6 +1804,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1794,6 +1838,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1820,6 +1865,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::MoreReads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1847,6 +1893,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::MoreReads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1872,6 +1919,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1917,6 +1965,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::MoreReads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -1962,6 +2011,7 @@ impl VrccClient {
                 bucket: None,
                 limiter: None,
                 bypass_gate: false,
+                ignore_backoff: false,
             })
             .await?;
         self.forget_after_rating(world);
@@ -1995,6 +2045,7 @@ impl VrccClient {
                 bucket: None,
                 limiter: None,
                 bypass_gate: false,
+                ignore_backoff: false,
             })
             .await?;
         // 只要拿到了 2xx 就算成功；正文可能是什么都没有，或者是一份地图状态。
@@ -2039,6 +2090,7 @@ impl VrccClient {
                 bucket: None,
                 limiter: None,
                 bypass_gate: false,
+                ignore_backoff: false,
             })
             .await?;
         // 票数显示在带令牌的地图页里。`id` 是短评编号，看不出是哪张图，
@@ -2061,6 +2113,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2086,6 +2139,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2129,6 +2183,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2146,6 +2201,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2167,6 +2223,7 @@ impl VrccClient {
                 bucket: None,
                 limiter: None,
                 bypass_gate: true,
+                ignore_backoff: false,
             })
             .await?;
         Ok(())
@@ -2193,6 +2250,7 @@ impl VrccClient {
             bucket: None,
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2214,6 +2272,7 @@ impl VrccClient {
             // 再切到这一页时就会被挡在本地，已读推不上去。同 `crossings/probe`。
             limiter: mark.then_some("recent/mark"),
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2233,6 +2292,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::Unread),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2249,6 +2309,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::MoreReads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2276,6 +2337,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::Reads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2318,6 +2380,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::MoreReads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2338,6 +2401,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::Reads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2356,6 +2420,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::MoreReads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2376,6 +2441,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::Reads),
             limiter: None,
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2405,6 +2471,7 @@ impl VrccClient {
             // （不标已读）再切回这一页时，不能被那次挡下。
             limiter: mark.then_some("crossings/mark"),
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2432,6 +2499,7 @@ impl VrccClient {
             bucket: Some(QuotaBucket::Reads),
             limiter: Some("crossings/probe"),
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -2461,6 +2529,7 @@ impl VrccClient {
             // 标已读的那次单独一个槽，理由见 `recent_notifications`。
             limiter: mark.then_some("crossings/cards/mark"),
             bypass_gate: false,
+            ignore_backoff: false,
         })
         .await
     }
@@ -4226,11 +4295,14 @@ mod tests {
         let gap = Duration::from_secs(4);
         let budget = Duration::from_secs(10);
 
-        let mut first = client.acquire("slot", gap, budget).await.expect("第一次");
+        let mut first = client
+            .acquire("slot", gap, budget, false)
+            .await
+            .expect("第一次");
         first.keep();
         let queued = tokio::time::timeout(
             Duration::from_millis(100),
-            client.acquire("slot", gap, budget),
+            client.acquire("slot", gap, budget, false),
         )
         .await;
         assert!(
@@ -4259,9 +4331,12 @@ mod tests {
         let gap = Duration::from_millis(1500);
         let budget = Duration::from_secs(10);
 
-        let mut first = client.acquire("slot", gap, budget).await.expect("第一次");
+        let mut first = client
+            .acquire("slot", gap, budget, false)
+            .await
+            .expect("第一次");
         first.keep();
-        let queued = client.acquire("slot", gap, budget);
+        let queued = client.acquire("slot", gap, budget, false);
         let backoff = async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             client.state.lock().unwrap().backoff_until =
@@ -4287,6 +4362,40 @@ mod tests {
             Ok(()),
             "没发出去的那次不该还占着槽"
         );
+    }
+
+    /// 探活不受全局退避限制。
+    ///
+    /// 退避是**全局**的：任何一个接口吃到 429，整个客户端都停一段时间。但
+    /// `GET /status` 是探活接口（官方 `security: []`，不要求令牌与 `X-Client`，
+    /// 不计入任何额度），玩家最需要它的时候恰恰是刚出过故障的时候 —— 那时退避
+    /// 大概率还没结束。被自家退避挡回去，探活就什么都没探到。
+    ///
+    /// 早先的折中是在前端把本机拦截读成「不知道」而不是「服务挂了」，那是在表现
+    /// 层替客户端层的缺陷擦屁股。这条测试钉的是根因：探活真的发出去了。
+    #[tokio::test]
+    async fn the_probe_is_not_held_back_by_a_global_backoff() {
+        // 只起一个连接：普通读要是也发出去了，它会抢走这一次。
+        let base = serve("200 OK", r#"{"at":1,"state":"ok"}"#, 1).await;
+        let client = client_at(base);
+
+        // 模拟「别的接口刚吃过 429」：进程整体退避一分钟。
+        client.state.lock().unwrap().backoff_until = Some(Instant::now() + Duration::from_secs(60));
+
+        // 普通读被退避拦住，请求根本没发出去。
+        let blocked = client
+            .boards(5, VrccBoardSort::Top)
+            .await
+            .expect_err("退避期间普通读不该放行");
+        assert_eq!(
+            blocked.layer,
+            ErrorLayer::Client,
+            "普通读应当是本机拦截：{blocked:?}"
+        );
+
+        // 探活照旧发出去：服务还在，就该探得到。
+        let status = client.status().await.expect("探活不该被自家退避挡住");
+        assert_eq!(status.state.as_deref(), Some("ok"));
     }
 
     /// 每个连接都回答 `response`，但第一个连接收下请求后先通知 `received`，等 `go`

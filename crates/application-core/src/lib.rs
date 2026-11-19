@@ -61,6 +61,7 @@ pub use event_bus::RuntimeEventForTest;
 pub use event_bus::{
     FavoriteChange, FavoritesChangedPayload, RuntimeEventBus, RuntimeEventSink,
     RuntimeRealtimeTransportEpoch, RuntimeVrchatAuthFailurePayload, VrcStatusSnapshot,
+    VrccHealthProbe, VrccHealthSnapshot,
 };
 pub use events::{FriendProfileBulkLoadStatus, FriendProfileLoadStatusPayload};
 pub use file_cache::{FileCache, FileCachePort};

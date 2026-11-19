@@ -12,6 +12,7 @@ import { LoginPageHeader } from './components/LoginPageHeader';
 import { LoginPageUtilities } from './components/LoginPageUtilities';
 import { LoginProxySettingsDialog } from './components/LoginProxySettingsDialog';
 import { LoginServerStatusAlert } from './components/LoginServerStatusAlert';
+import { LoginVrccStatusAlert } from './components/LoginVrccStatusAlert';
 import { QrLoginCard } from './components/QrLoginCard';
 import { SavedAccountsCard } from './components/SavedAccountsCard';
 import { getLoginUserDisplayName } from './loginDisplay';
@@ -29,7 +30,8 @@ export function LoginPage() {
         qrLogin,
         savedAccounts,
         serverStatus,
-        utilities
+        utilities,
+        vrccStatus
     } = useLoginPageController();
     const showQrLogin =
         qrLogin.view.status !== 'closed' || qrLogin.pending !== null;
@@ -64,10 +66,12 @@ export function LoginPage() {
                         onLanguageChange={header.onLanguageChange}
                     />
                     <LoginServerStatusAlert
-                        indicator={serverStatus.indicator}
-                        status={serverStatus.status}
-                        summary={serverStatus.summary}
+                        health={serverStatus.health}
                         onOpenStatusPage={serverStatus.onOpenStatusPage}
+                    />
+                    <LoginVrccStatusAlert
+                        health={vrccStatus.health}
+                        onOpenStatusPage={vrccStatus.onOpenStatusPage}
                     />
                     {expiredAccount ? (
                         <Alert>

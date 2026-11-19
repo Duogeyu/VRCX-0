@@ -281,6 +281,12 @@ export const commands = {
         __TAURI_INVOKE<VrcStatusSnapshot>('app__vrc_status_refresh'),
     appVrccConnection: () =>
         __TAURI_INVOKE<VrccConnectionSnapshot>('app__vrcc_connection'),
+    /**  读当前结论。纯内存，不发请求。 */
+    appVrccHealthGet: () =>
+        __TAURI_INVOKE<VrccHealthSnapshot>('app__vrcc_health_get'),
+    /**  立刻探一次。并发调用共用同一次请求（应用层单飞）。 */
+    appVrccHealthRefresh: () =>
+        __TAURI_INVOKE<VrccHealthSnapshot>('app__vrcc_health_refresh'),
     /**
      *  玩家对首连引导表态到哪一步。
      *
@@ -3584,6 +3590,7 @@ export type BackendRuntimeEventPayloadMap = {
     backgroundImageState: BackgroundImageProjection;
     communityThemeState: CommunityThemeProjection;
     vrcStatus: VrcStatusSnapshot;
+    vrccHealth: VrccHealthSnapshot;
     gameLogProjection: GameLogProjection;
     gameLogPersistenceFallback: GameLogPersistenceFallbackPayload;
     gameLogSideEffect: GameLogSideEffectEvent;
@@ -8634,6 +8641,61 @@ export type VrccGuidanceState =
      *  否则每次启动都问一遍等于骚扰。
      */
     | 'postponed';
+
+/**
+ *  一次探测拿到的事实。
+ *
+ *  只报告**采集层看到的**，不在这里下"服务健不健康"的结论：四态判定在前端
+ *  （`src/lib/vrccHealth.ts`），那边有覆盖全部分支的测试，也负责把 `layer` /
+ *  `needsReauth` 翻成玩家看得懂的话。这和 VRChat 那条的分工一致 ——
+ *  `VrcStatusSnapshot` 同样只带原始字段。
+ */
+export type VrccHealthProbe =
+    /**  还没探过。 */
+    | { outcome: 'idle' }
+    /**  200，且 `state` 是 `ok`。 */
+    | {
+          outcome: 'ok';
+          /**  服务端给的时间戳（毫秒）。 */
+          at: number | null;
+      }
+    /**  200，但 `state` 不是 `ok`。契约里这个 enum 只有 `ok`，别的值我们读不懂。 */
+    | { outcome: 'stateNotOk'; raw: string }
+    /**  请求失败。字段照 `VrccError` 的分类原样带出。 */
+    | {
+          outcome: 'failed';
+          /**  `transport` / `server` / `client` / `session` / `input`。 */
+          layer: string;
+          /**  传输层卡在哪一步：`dns` / `connect` / `timeout` / `body` / `other`。 */
+          transportKind: string | null;
+          /**  `403 client_*` 那一类：是我们自己的标识坏了，不是站方挂了。 */
+          needsReauth: boolean;
+          message: string;
+      };
+
+/**
+ *  星遇同频（vrcc.cc）服务可达性的快照。
+ *
+ *  ## 采集为什么在 Rust
+ *
+ *  前端自己 `setInterval` 探测有个硬伤：窗口最小化到托盘后 WebView 会节流定时器，
+ *  探测停摆。而"切出去很久、回来想知道 vrcc 还能不能用"恰恰是它最该可靠的场景。
+ *  同一个理由当初把提醒轮询从 `useVrccController` 搬到了
+ *  `DesktopVrccRuntime::spawn_background_poll`。
+ *
+ *  采集不看登录态：`GET /api/v1/status` 不要令牌，所以登录页也读这份快照。
+ */
+export type VrccHealthSnapshot = {
+    probe: VrccHealthProbe;
+    /**
+     *  上次拿到结论的时刻（ISO 8601）。`None` 表示还没有过结论 ——
+     *  和"结论是 unknown"是两件事：探测被本机限流挡下时不产生结论，这里不动。
+     */
+    checkedAt: string | null;
+    refreshing: boolean;
+    /**  下次自动探测的间隔（毫秒）。正常与异常时不同，和 VRChat 那条一致。 */
+    pollingIntervalMs: number;
+};
 
 /**
  *  地图榜条目上的热评 `{text, by, up, went}`。

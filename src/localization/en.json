@@ -953,6 +953,13 @@
         "not_connected": "Not connected",
         "connected": "Connected",
         "service_down": "Service unavailable",
+        "health": {
+            "unreachable": "Can't reach VRCC servers",
+            "failing": "VRCC API is unavailable right now",
+            "failing_hint": "vrcc.cc's API is failing; local settings cannot fix it. The app retries every 5 minutes at most.",
+            "server_said": "Server response: {message}",
+            "view_site": "View vrcc.cc status"
+        },
         "go_connect": "Connect",
         "reconnect_hint": "Reconnect from the \"Me\" tab",
         "missing_scope": "This needs the {scope} permission; reconnect once to get it",
@@ -1090,10 +1097,10 @@
             "unknown": "The action failed. Please try again.",
             "device_code_quota": "Requesting a link code is limited to 30 per day per network egress IP, shared by everyone behind the same network. Switching to another network (a phone hotspot, for example) lets you continue right away.",
             "network": {
-                "connect": "Cannot reach vrcc.cc — the connection may be blocked. If you use a proxy, check that it works.",
-                "dns": "Cannot resolve vrcc.cc. Check your network or try a different DNS.",
-                "timeout": "Connecting to vrcc.cc timed out. Please try again later.",
-                "generic": "The connection to vrcc.cc was interrupted. Please try again later."
+                "connect": "Cannot reach vrcc.cc; the network may be blocking it. If a proxy is enabled, check the proxy settings.",
+                "dns": "Cannot resolve vrcc.cc. Check the network, or use a different DNS.",
+                "timeout": "Connecting to vrcc.cc timed out. The network may be unstable.",
+                "generic": "Cannot connect to vrcc.cc. Check the network or proxy."
             }
         },
         "mutuals": {
@@ -7788,6 +7795,13 @@
         "servers": "Servers",
         "servers_issue": "VRChat Server Issues",
         "servers_ok": "VRChat servers are operational",
+        "servers_unreachable": "Can't reach VRChat status",
+        "servers_unknown": "VRChat status not confirmed yet",
+        "servers_stale": "Last known result; it could not be updated.",
+        "vrcc": "Orbitune status",
+        "vrcc_ok": "Orbitune is operational",
+        "vrcc_issue": "Orbitune API is unavailable",
+        "vrcc_unknown": "Orbitune status not confirmed yet",
         "view_status": "View Status",
         "proxy": "Proxy",
         "realtime_connection": "Realtime",

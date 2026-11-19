@@ -17,7 +17,7 @@ use vrcx_0_application::social::{
 use vrcx_0_application_core::{
     BackendRuntimeTelemetry, FavoritesChangedPayload, FriendProfileLoadStatusPayload,
     HostSessionProjection, ParsedLocation, RealtimeProjectionSync, RuntimeVrchatAuthFailurePayload,
-    VrcStatusSnapshot,
+    VrcStatusSnapshot, VrccHealthSnapshot,
 };
 use vrcx_0_application_game::{
     GameClientEvent, GameLogPersistenceFallbackPayload, GameLogProjection, GameLogSideEffectEvent,
@@ -58,6 +58,7 @@ struct BackendRuntimeEventPayloadMap {
     background_image_state: BackgroundImageProjection,
     community_theme_state: CommunityThemeProjection,
     vrc_status: VrcStatusSnapshot,
+    vrcc_health: VrccHealthSnapshot,
     game_log_projection: GameLogProjection,
     game_log_persistence_fallback: GameLogPersistenceFallbackPayload,
     game_log_side_effect: GameLogSideEffectEvent,
@@ -221,6 +222,8 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::application::vrc_status::app__vrc_status_get,
             commands::application::vrc_status::app__vrc_status_refresh,
             commands::application::vrcc::app__vrcc_connection,
+            commands::application::vrcc::app__vrcc_health_get,
+            commands::application::vrcc::app__vrcc_health_refresh,
             commands::application::vrcc::app__vrcc_guidance,
             commands::application::vrcc::app__vrcc_set_guidance,
             commands::application::vrcc::app__vrcc_usage,

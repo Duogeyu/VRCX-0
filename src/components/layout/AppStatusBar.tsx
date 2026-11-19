@@ -27,6 +27,10 @@ const DEFAULT_VISIBILITY: StatusBarVisibility = {
     steamvr: true,
     proxy: true,
     ws: true,
+    // 星遇状态：默认显示。它和 VRChat 服务器状态是同一种东西 —— 都是「外面那个
+    // 服务现在能不能用」，出问题时玩家都会疑惑「是我网络坏了还是站方在歇」。
+    // 不想看的人在右键菜单里取消勾选即可。
+    vrcc: true,
     instanceQueue: true,
     nowPlaying: true,
     uptime: false,

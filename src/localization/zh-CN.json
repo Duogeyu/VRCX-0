@@ -952,6 +952,13 @@
         "not_connected": "未连接",
         "connected": "已连接",
         "service_down": "服务不可用",
+        "health": {
+            "unreachable": "无法确认 VRCC 服务器状态",
+            "failing": "VRCC 接口当前不可用",
+            "failing_hint": "vrcc.cc 的接口出错，改动本地设置无法修复。系统最多每 5 分钟重试一次。",
+            "server_said": "服务端原文：{message}",
+            "view_site": "查看 vrcc.cc 状态页"
+        },
         "go_connect": "去连接",
         "reconnect_hint": "去「我的」重新连接",
         "missing_scope": "这一项需要 {scope} 权限，重新连接一次即可",
@@ -1089,10 +1096,10 @@
             "unknown": "操作失败，请稍后再试",
             "device_code_quota": "申请连接码的额度按网络出口 IP 计算，每天 30 个，同一网络下的其他设备或玩家共用。换一个网络（例如手机热点）可以立刻再用。",
             "network": {
-                "connect": "连不上星遇同频，可能被网络拦截。开了代理的话，请检查设置里的代理是否可用。",
-                "dns": "找不到 vrcc.cc，域名解析失败。请检查网络或换个 DNS。",
-                "timeout": "连接星遇同频超时，请稍后再试。",
-                "generic": "与星遇同频的网络连接中断，请稍后再试。"
+                "connect": "连不上 vrcc.cc，可能被网络拦截。如果已启用代理，检查代理设置。",
+                "dns": "找不到 vrcc.cc，域名解析失败。检查网络，或换一个 DNS。",
+                "timeout": "连接 vrcc.cc 超时。网络可能不稳定。",
+                "generic": "无法连接 vrcc.cc。检查网络或代理。"
             }
         },
         "mutuals": {
@@ -7775,6 +7782,13 @@
         "servers": "服务器状态",
         "servers_issue": "VRChat 服务器出现异常",
         "servers_ok": "VRChat 服务目前一切正常",
+        "servers_unreachable": "无法确认 VRChat 服务器状态",
+        "servers_unknown": "还没有确认 VRChat 服务器状态",
+        "servers_stale": "上次查到的结果，当前无法更新。",
+        "vrcc": "星遇状态",
+        "vrcc_ok": "星遇状态正常",
+        "vrcc_issue": "星遇接口暂时不可用",
+        "vrcc_unknown": "还没有确认星遇状态",
         "view_status": "查看服务状态",
         "proxy": "代理服务器",
         "realtime_connection": "实时连接",

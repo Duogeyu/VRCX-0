@@ -9,6 +9,7 @@ import { useDataDirMigrationStore } from '@/state/dataDirMigrationStore';
 import { useProfileBackupStore } from '@/state/profileBackupStore';
 import { useRuntimeStore } from '@/state/runtimeStore';
 import { useSessionStore } from '@/state/sessionStore';
+import { useVrccHealthStore } from '@/state/vrccHealthStore';
 
 import { handleAppLauncherSnapshotEvent } from './appLauncherSnapshotService';
 import {
@@ -217,6 +218,13 @@ function handleRuntimeEvent(event: RuntimeEvent): void {
 
     if (event.name === 'vrcStatus') {
         applyVrcStatusSnapshot(event.payload);
+        return;
+    }
+
+    if (event.name === 'vrccHealth') {
+        // 直接写 store：`services` 不能引 `features`（分层规则），而这里要做的
+        // 本来也只是把快照投影进去，没有别的编排。
+        useVrccHealthStore.getState().applySnapshot(event.payload);
         return;
     }
 
@@ -539,6 +547,7 @@ export async function bindRuntimeEvents(): Promise<() => void> {
         'runtimeWorkerError',
         'runtimeVrchatAuthFailure',
         'vrcStatus',
+        'vrccHealth',
         'realtimeFriendProjection',
         'realtimeFeedProjection',
         'realtimeUserProjection',

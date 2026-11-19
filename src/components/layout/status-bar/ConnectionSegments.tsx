@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 
+import { resolveServerHealth } from '@/lib/serverHealth';
 import { cn } from '@/lib/utils';
 import { commands } from '@/platform/tauri/bindings';
 import { openExternalLink } from '@/services/shellIntegrationService';
@@ -12,6 +13,8 @@ import { realtimeRecoveryLabel } from './realtimeRecovery';
 import { formatStatusDate } from './statusBarFormat';
 import { StatusSegment } from './StatusBarParts';
 import { useStatusNowMs } from './statusBarTicker';
+import { resolveVrcStatusIndicator } from './statusBarVrc';
+import { StatusIndicatorTooltip } from './StatusIndicatorTooltip';
 
 export function ServersSegment() {
     const { t } = useTranslation();
@@ -23,8 +26,21 @@ export function ServersSegment() {
     );
     const refreshing = useRuntimeStore((state) => state.vrcStatus.refreshing);
     const error = useRuntimeStore((state) => state.vrcStatus.error);
-    const hasIssue = Boolean(indicator && indicator !== 'none');
-    const isMajor = ['major', 'critical'].includes(indicator);
+    // 判定在 `@/lib/serverHealth`：四态（healthy / issue / unreachable / unknown）。
+    // 以前这里是就地写的 `indicator && indicator !== 'none'`，那条判据会把
+    // "刷新失败、其实什么也不知道"读成健康。
+    const vrcIndicator = resolveVrcStatusIndicator(
+        resolveServerHealth({
+            indicator,
+            status,
+            summary,
+            error,
+            lastFetchedAt
+        }),
+        { refreshing },
+        t,
+        formatStatusDate
+    );
 
     async function openStatusPage() {
         const refreshStatusPromise = refreshVrcStatusNow().catch(
@@ -52,41 +68,18 @@ export function ServersSegment() {
 
     return (
         <StatusSegment
-            active={!hasIssue}
-            alert={hasIssue ? (isMajor ? 'danger' : 'warn') : null}
+            active={vrcIndicator.active}
+            alert={vrcIndicator.alert}
             dotClassName={cn(
                 refreshing && 'motion-safe:animate-pulse',
-                hasIssue
-                    ? isMajor
-                        ? 'bg-[var(--status-busy)]'
-                        : 'bg-[var(--status-askme)]'
-                    : undefined
+                vrcIndicator.dotClassName
             )}
             label={t('status_bar.servers')}
             className="cursor-pointer"
             onClick={() => {
                 openStatusPage();
             }}
-            tooltip={
-                <div className="flex flex-col gap-1 text-xs">
-                    <span>
-                        {summary || status || t('status_bar.servers_ok')}
-                    </span>
-                    {refreshing ? (
-                        <span className="text-muted-foreground">
-                            {t('common.loading')}
-                        </span>
-                    ) : null}
-                    {error ? (
-                        <span className="text-muted-foreground">{error}</span>
-                    ) : null}
-                    {lastFetchedAt ? (
-                        <span className="text-muted-foreground">
-                            {formatStatusDate(lastFetchedAt)}
-                        </span>
-                    ) : null}
-                </div>
-            }
+            tooltip={<StatusIndicatorTooltip indicator={vrcIndicator} />}
         />
     );
 }

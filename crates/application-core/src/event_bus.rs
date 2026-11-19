@@ -117,6 +117,65 @@ pub struct VrcStatusSnapshot {
     pub error: String,
 }
 
+/// 一次探测拿到的事实。
+///
+/// 只报告**采集层看到的**，不在这里下"服务健不健康"的结论：四态判定在前端
+/// （`src/lib/vrccHealth.ts`），那边有覆盖全部分支的测试，也负责把 `layer` /
+/// `needsReauth` 翻成玩家看得懂的话。这和 VRChat 那条的分工一致 ——
+/// `VrcStatusSnapshot` 同样只带原始字段。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum VrccHealthProbe {
+    /// 还没探过。
+    #[default]
+    Idle,
+    /// 200，且 `state` 是 `ok`。
+    Ok {
+        /// 服务端给的时间戳（毫秒）。
+        at: Option<i64>,
+    },
+    /// 200，但 `state` 不是 `ok`。契约里这个 enum 只有 `ok`，别的值我们读不懂。
+    StateNotOk { raw: String },
+    /// 请求失败。字段照 `VrccError` 的分类原样带出。
+    Failed {
+        /// `transport` / `server` / `client` / `session` / `input`。
+        layer: String,
+        /// 传输层卡在哪一步：`dns` / `connect` / `timeout` / `body` / `other`。
+        #[serde(rename = "transportKind")]
+        transport_kind: Option<String>,
+        /// `403 client_*` 那一类：是我们自己的标识坏了，不是站方挂了。
+        #[serde(rename = "needsReauth")]
+        needs_reauth: bool,
+        message: String,
+    },
+}
+
+/// 星遇同频（vrcc.cc）服务可达性的快照。
+///
+/// ## 采集为什么在 Rust
+///
+/// 前端自己 `setInterval` 探测有个硬伤：窗口最小化到托盘后 WebView 会节流定时器，
+/// 探测停摆。而"切出去很久、回来想知道 vrcc 还能不能用"恰恰是它最该可靠的场景。
+/// 同一个理由当初把提醒轮询从 `useVrccController` 搬到了
+/// `DesktopVrccRuntime::spawn_background_poll`。
+///
+/// 采集不看登录态：`GET /api/v1/status` 不要令牌，所以登录页也读这份快照。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VrccHealthSnapshot {
+    pub probe: VrccHealthProbe,
+    /// 上次拿到结论的时刻（ISO 8601）。`None` 表示还没有过结论 ——
+    /// 和"结论是 unknown"是两件事：探测被本机限流挡下时不产生结论，这里不动。
+    pub checked_at: Option<String>,
+    pub refreshing: bool,
+    /// 下次自动探测的间隔（毫秒）。正常与异常时不同，和 VRChat 那条一致。
+    pub polling_interval_ms: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeRealtimeTransportEpoch {
@@ -140,6 +199,7 @@ pub struct RuntimeVrchatAuthFailurePayload {
 
 runtime_event_payload!(FavoritesChangedPayload, "favoritesChanged");
 runtime_event_payload!(VrcStatusSnapshot, "vrcStatus");
+runtime_event_payload!(VrccHealthSnapshot, "vrccHealth");
 runtime_event_payload!(RuntimeVrchatAuthFailurePayload, "runtimeVrchatAuthFailure");
 runtime_event_payload!(BackendRuntimeTelemetry, "backendRuntimeTelemetry");
 runtime_event_payload!(RealtimeProjectionSync, "realtimeProjectionSync");

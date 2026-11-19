@@ -98,6 +98,12 @@ pub const VRCC_CONNECTION_CHANGED_EVENT: &str = "vrccConnectionChanged";
 /// 桌面侧的星遇同频运行时。
 pub struct DesktopVrccRuntime {
     service: Arc<VrccService>,
+    /// 服务可达性的常驻探测。
+    ///
+    /// 和 [`Self::service`] 共用**同一个** `VrccRemote`：那里面带着本地限流状态
+    /// （`status` 有 30 秒最小间隔）。各造一个实例会变成两套限流器，手动刷新和
+    /// 后台循环会同时把请求打出去。
+    health: vrcx_0_application::vrcc::VrccHealthService,
     /// 通知中心那一行要落到当前账号的库表里，句柄与令牌存储共用同一个。
     db: Arc<DatabaseService>,
     /// 读当前登录账号。装配发生在登录之前，所以取闭包而不是固定 id。
@@ -172,6 +178,7 @@ impl DesktopVrccRuntime {
         proxy_url: Option<&str>,
         owner: Arc<dyn Fn() -> Option<vrcx_0_core::OwnerId> + Send + Sync>,
         config: Arc<dyn ConfigStore>,
+        event_bus: vrcx_0_application_core::RuntimeEventBus,
     ) -> Self {
         let db = Arc::clone(store.db());
         let port = Arc::new(TokenStoreAdapter { inner: store });
@@ -183,12 +190,21 @@ impl DesktopVrccRuntime {
                 client_id,
                 proxy_url.map(str::to_string),
             ));
+        // 健康探测和业务请求共用一个 remote，见字段注释。
+        let health =
+            vrcx_0_application::vrcc::VrccHealthService::new(Arc::clone(&remote), event_bus);
         Self {
             service: Arc::new(VrccService::new(port, remote)),
+            health,
             db,
             owner,
             config,
         }
+    }
+
+    /// 服务可达性的常驻探测。命令层读它的快照，装配阶段起它的循环。
+    pub fn health(&self) -> &vrcx_0_application::vrcc::VrccHealthService {
+        &self.health
     }
 
     /// 令牌被判失效时告诉前端改显示。

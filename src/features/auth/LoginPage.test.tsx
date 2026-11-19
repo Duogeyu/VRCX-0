@@ -133,10 +133,12 @@ function controllerValue(hasSavedAccounts: boolean) {
             visible: hasSavedAccounts
         },
         serverStatus: {
-            indicator: '',
-            onOpenStatusPage: noop,
-            status: '',
-            summary: ''
+            health: { state: 'unknown' },
+            onOpenStatusPage: noop
+        },
+        vrccStatus: {
+            health: { state: 'unknown' },
+            onOpenStatusPage: noop
         },
         utilities: {
             disabled: false,

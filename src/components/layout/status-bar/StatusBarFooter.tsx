@@ -27,6 +27,7 @@ import { OfflineRecordIndicator } from './OfflineRecordIndicator';
 import { ProxySegment } from './ProxySegment';
 import type { StatusBarFooterProps } from './statusBarTypes';
 import { AppUptimeSegment, ClocksSegment } from './TimeSegments';
+import { VrccStatusSegment } from './VrccStatusSegment';
 import { ZoomSegment } from './ZoomSegment';
 
 export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
@@ -48,6 +49,9 @@ export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
             <>
                 {sidebarWindowMode || visibility.servers ? (
                     <ServersSegment />
+                ) : null}
+                {sidebarWindowMode || visibility.vrcc ? (
+                    <VrccStatusSegment />
                 ) : null}
                 {sidebarWindowMode || visibility.ws ? (
                     <RealtimeConnectionSegment />

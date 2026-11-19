@@ -41,6 +41,8 @@ pub(in crate::state) fn build_vrcc_runtime(
         vrcc_owner,
         // 服务名要按界面语言取官方译名（`vrcc.title`），所以给它配置仓库。
         runtime.desktop_assembly().config_store(),
+        // 健康探测要推事件给前端，和 VRChat 那条用同一个总线。
+        runtime.desktop_assembly().event_bus().clone(),
     ));
     // 腕表要显示星遇同频摘要，把运行时挂上；没挂时腕表不显示这一块。
     desktop.services.attach_vrcc_runtime(Arc::clone(&vrcc));

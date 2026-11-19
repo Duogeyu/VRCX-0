@@ -30,6 +30,7 @@ const VISIBILITY_MENU_ITEMS: Array<readonly [StatusBarVisibilityKey, string]> =
     [
         ['vrchat', 'status_bar.game'],
         ['servers', 'status_bar.servers'],
+        ['vrcc', 'status_bar.vrcc'],
         ['steamvr', 'SteamVR'],
         ['instanceQueue', 'status_bar.instance_queue'],
         ['ws', 'status_bar.realtime_connection'],

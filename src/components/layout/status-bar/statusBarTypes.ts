@@ -7,6 +7,7 @@ export type StatusBarVisibilityKey =
     | 'steamvr'
     | 'proxy'
     | 'ws'
+    | 'vrcc'
     | 'instanceQueue'
     | 'nowPlaying'
     | 'uptime'
