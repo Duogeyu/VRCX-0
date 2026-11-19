@@ -1775,3 +1775,7 @@ impl VrccService {
 
 #[cfg(test)]
 mod tests;
+
+mod health;
+
+pub use health::VrccHealthService;
