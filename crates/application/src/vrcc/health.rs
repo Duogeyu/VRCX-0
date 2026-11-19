@@ -34,15 +34,15 @@ use vrcx_0_application_core::{
     sleep_until_due_or_stopped, Error, Result, RuntimeEventBus, TaskSupervisor, VrccHealthProbe,
     VrccHealthSnapshot,
 };
-use vrcx_0_contracts::vrcc::{ErrorDetail, ErrorLayer, TransportKind};
+use vrcx_0_contracts::vrcc::{ErrorDetail, ErrorLayer, TransportKind, VrccError};
 use vrcx_0_core::time::now_iso;
 
 use super::VrccRemote;
 
 /// 一切正常时的轮询间隔。
-const OK_POLL_MS: u32 = 5 * 60 * 1_000;
+pub(super) const OK_POLL_MS: u32 = 5 * 60 * 1_000;
 /// 出问题时的轮询间隔：问得更勤，好让恢复尽快被看到。
-const ISSUE_POLL_MS: u32 = 2 * 60 * 1_000;
+pub(super) const ISSUE_POLL_MS: u32 = 2 * 60 * 1_000;
 
 type SharedRefresh = Shared<BoxFuture<'static, std::result::Result<VrccHealthSnapshot, String>>>;
 
@@ -118,7 +118,8 @@ impl VrccHealthService {
 
         match self.inner.remote.status().await {
             Ok(status) => {
-                let probe = if status.state.as_deref() == Some("ok") {
+                let healthy = status.state.as_deref() == Some("ok");
+                let probe = if healthy {
                     VrccHealthProbe::Ok { at: status.at }
                 } else {
                     // 契约里 `state` 的 enum 只有 `"ok"`。别的值说明服务端加了新
@@ -131,16 +132,24 @@ impl VrccHealthService {
                     probe,
                     checked_at: Some(now_iso()),
                     refreshing: false,
-                    polling_interval_ms: OK_POLL_MS,
+                    // 服务端说「不是 ok」就是有异常，和 5xx 一样该问得更勤。
+                    polling_interval_ms: if healthy { OK_POLL_MS } else { ISSUE_POLL_MS },
                 };
                 self.replace_snapshot(snapshot.clone());
                 Ok(snapshot)
             }
             Err(error) => {
-                // 本机限流（`ErrorLayer::Client`）：请求**根本没发出去**，服务状态
-                // 没变 —— 拿它覆盖上一条结论，等于让一次无关的限流抹掉一条真实
-                // 结论。只把 refreshing 放下。
-                if error.layer == ErrorLayer::Client {
+                // 两种「问不成」的情况不该动结论：
+                //
+                // 1. **本机限流**（`ErrorLayer::Client`）：请求根本没发出去。
+                // 2. **服务器 429**：探活真的发出去了，但被官方的频率上限挡了。
+                //    那个上限是**全部接口合计**（每个网络出口每分钟约 120 次），
+                //    探活也要算进去 —— 跳过全局退避之后它会自己撞上 429。
+                //
+                // 两种情况都只说明「现在不该问」，和服务状态无关。拿它们覆盖上一条
+                // 结论，等于让一次无关的限流抹掉一条真实结论，玩家会看到「接口暂时
+                // 不可用」，而站方其实好好的。
+                if error.layer == ErrorLayer::Client || is_rate_limited(&error) {
                     return Ok(self.update_snapshot(|snapshot| snapshot.refreshing = false));
                 }
                 let message = error.to_string();
@@ -229,4 +238,14 @@ fn transport_kind_name(detail: &ErrorDetail) -> Option<&'static str> {
         }),
         _ => None,
     }
+}
+
+/// 服务器用 429 挡住了这次探测。
+///
+/// 官方限流是**全部接口合计**的（`429 too_many`，按网络出口每分钟约 120 次），
+/// 探活也算在内。它和 `503 stop`（停站）是两件事：前者是「问得太勤」，后者是
+/// 「站方在维护」。判断按状态码，不按错误码字符串 —— 同一个 `busy` 在 409 和 429
+/// 上意思完全不同。
+fn is_rate_limited(error: &VrccError) -> bool {
+    error.http().is_some_and(|http| http.status == 429)
 }
