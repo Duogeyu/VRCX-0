@@ -42,6 +42,11 @@
  */
 
 import type {
+    VrccHealthProbe,
+    VrccHealthSnapshot
+} from '@/platform/tauri/bindings';
+
+import type {
     VrccErrorKind,
     VrccErrorLayer,
     VrccTransportKind
@@ -156,4 +161,39 @@ export function resolveVrccHealth(probe: VrccProbe | null): VrccHealth {
 /** 需不需要对玩家说点什么。`unknown` 不算（别在启动时闪一下告警）。 */
 export function vrccHealthNeedsAttention(health: VrccHealth): boolean {
     return health.state === 'unreachable' || health.state === 'failing';
+}
+
+/**
+ * 把 Rust 推来的快照 probe 转成本模块的 [`VrccProbe`]。
+ *
+ * 两侧的形状**有意分开**：Rust 只报告"采集层拿到了什么"，这里的 [`VrccProbe`]
+ * 是判定的输入。`idle`（还没探过）在判定里没有对应物 —— 返回 `null`，判成
+ * "不知道"。
+ *
+ * `kind` 只能还原成 `needsReauth` 与 `other` 两档：判定只用到这两个（见上面
+ * `server` 分支的注释）。其余细分留在 Rust 的 `ErrorDetail` 里，界面用不到。
+ */
+export function probeFromSnapshot(probe: VrccHealthProbe): VrccProbe | null {
+    switch (probe.outcome) {
+        case 'idle':
+            return null;
+        case 'ok':
+            return { outcome: 'ok', at: probe.at };
+        case 'stateNotOk':
+            return { outcome: 'state-not-ok', raw: probe.raw };
+        case 'failed':
+            return {
+                outcome: 'failed',
+                layer: probe.layer as VrccErrorLayer,
+                kind: probe.needsReauth ? 'needsReauth' : 'other',
+                transportKind: (probe.transportKind ??
+                    null) as VrccTransportKind | null,
+                message: probe.message
+            };
+    }
+}
+
+/** 快照 → 结论。 */
+export function healthFromSnapshot(snapshot: VrccHealthSnapshot): VrccHealth {
+    return resolveVrccHealth(probeFromSnapshot(snapshot.probe));
 }

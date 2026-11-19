@@ -4,33 +4,34 @@ import { useEffect } from 'react';
 
 import { useVrccHealthStore } from '@/state/vrccHealthStore';
 
-import { refreshVrccHealth } from './vrccHealthService';
+import { hydrateVrccHealth, refreshVrccHealth } from './vrccHealthService';
 
-/** 后台多久重探一次。服务端自己缓存一分钟，问得更勤没有意义。 */
-const PROBE_INTERVAL_MS = 5 * 60 * 1_000;
-
-/** 回到窗口时，距上次探测超过这么久才重探。 */
+/** 回到窗口时，距上次结论超过这么久才请后端补探一次。 */
 const FOCUS_REFRESH_MS = 60 * 1_000;
 
 /**
- * 星遇同频服务可达性的常驻探针。
+ * 星遇同频服务可达性：把后端那份快照接进前端 store。
  *
- * 挂在 `GlobalHosts` 下，**刻意不看登录态**：`GET /api/v1/status` 不要令牌也不要
- * `X-Client`（见 `vrccHealthService` 的文件头），所以登录页也该有结论 —— 那正是
- * 玩家最需要知道"vrcc.cc 现在能不能连"的时刻之一（本机实测访问 vrcc.cc 要代理）。
+ * ## 这个组件不再轮询
  *
- * 同理也不过问"有没有连过星遇同频"：站点在不在线，和这个账号用不用它无关。
+ * 探测住在 Rust 侧的后台循环（`VrccHealthService::start_loop`），由
+ * `DesktopVrccRuntime` 在装配阶段起。前端守着一个定时器的问题是：窗口最小化到
+ * 托盘后 WebView 会节流它，探测跟着停摆 —— 而"切出去很久、回来想知道还能不能
+ * 用"恰恰是最该可靠的场景。
+ *
+ * ## 它只做两件事
+ *
+ * 1. 启动时读一次已有快照（无论 WebView 什么时候起来、是不是重启过，都能立刻
+ *    显示上一次的结论）；
+ * 2. 回到窗口时请后端补探一次 —— 后端循环的间隔最长 5 分钟，而玩家切回来的
+ *    那一刻他最想知道的正是"现在"。一分钟内的重复聚焦不重复请。
+ *
+ * 刻意不看登录态：`GET /api/v1/status` 不要令牌，登录页也该有结论。
  */
 export function VrccHealthProbeHost(): null {
     useEffect(() => {
-        void refreshVrccHealth();
+        void hydrateVrccHealth();
 
-        const timer = window.setInterval(() => {
-            void refreshVrccHealth();
-        }, PROBE_INTERVAL_MS);
-
-        // 回到窗口时补一次：窗口切走再切回来，最长可能已经隔了一个间隔。
-        // 一分钟内的重复聚焦不重探（客户端那层有 30 秒间隔，但没必要每次都走 IPC）。
         const onFocus = () => {
             const checkedAt = useVrccHealthStore.getState().checkedAt;
             if (
@@ -44,7 +45,6 @@ export function VrccHealthProbeHost(): null {
         window.addEventListener('focus', onFocus);
 
         return () => {
-            window.clearInterval(timer);
             window.removeEventListener('focus', onFocus);
         };
     }, []);
