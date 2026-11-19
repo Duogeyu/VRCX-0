@@ -62,6 +62,7 @@ pub use event_bus::RuntimeEventForTest;
 pub use event_bus::{
     FavoriteChange, FavoritesChangedPayload, RuntimeEventBus, RuntimeEventSink,
     RuntimeRealtimeTransportEpoch, RuntimeVrchatAuthFailurePayload, VrcStatusSnapshot,
+    VrccHealthProbe, VrccHealthSnapshot,
 };
 pub use events::{
     FeedLiveEntry, FriendProfileBulkLoadStatus, FriendProfileLoadStatusPayload, FriendProjection,

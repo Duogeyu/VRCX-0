@@ -1,5 +1,6 @@
 import type { ComponentPropsWithoutRef } from 'react';
 
+import type { VrccHealth } from '@/lib/vrccHealth';
 import type { DataDirMigrationStatus } from '@/services/dataDirMigrationService';
 import type { ProfileBackupStatus } from '@/services/profileBackupService';
 import type {
@@ -15,6 +16,7 @@ export type StatusBarVisibilityKey =
     | 'steamvr'
     | 'proxy'
     | 'ws'
+    | 'vrcc'
     | 'instanceQueue'
     | 'nowPlaying'
     | 'uptime'
@@ -112,6 +114,8 @@ type StatusBarFooterModel = {
     onCopyMediaLink: () => void;
     onOpenMediaLink: () => void;
     onOpenStatusPage: () => Promise<void>;
+    /** 打开 vrcc.cc 的状态页。 */
+    onOpenVrccStatusPage: () => void;
     onProxyDraftEnabledChange: (enabled: boolean) => void;
     onProxyDraftServerChange: (server: string) => void;
     onProxyEditorOpenChange: (open: boolean) => void;
@@ -133,6 +137,18 @@ type StatusBarFooterModel = {
     visibility: StatusBarVisibility;
     visibleClocks: StatusBarClock[];
     worldCollectionImport: StatusBarWorldCollectionImport;
+    /**
+     * 星遇状态（vrcc.cc）：常驻探针维护的结论，以及上次拿到结论的时刻。
+     *
+     * `checkedAt` 是**拿到结论**的时间，不是"上次尝试"的时间 ——
+     * 探测被本机限流挡下时不产生结论，那时这个值不动。
+     */
+    vrcc: {
+        health: VrccHealth;
+        checkedAt: number | null;
+        /** 后端正在探。状态栏据此让圆点脉冲，和 VRChat 那段一致。 */
+        refreshing: boolean;
+    };
     vrcStatus: Pick<
         VrcStatusState,
         'summary' | 'status' | 'refreshing' | 'error' | 'lastFetchedAt'

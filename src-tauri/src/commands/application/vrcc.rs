@@ -12,6 +12,7 @@
 
 use tauri::State;
 use vrcx_0_application::vrcc::{VrccDeviceAuthPrompt, VrccDeviceAuthStep, VrccFailure};
+use vrcx_0_application_core::VrccHealthSnapshot;
 use vrcx_0_contracts::vrcc::{
     VrccAnnouncements, VrccBoard, VrccBoardSort, VrccClubResponse, VrccClubs,
     VrccConnectionSnapshot, VrccGuidanceState, VrccMapPage, VrccModelBoard, VrccModelDetail,
@@ -86,6 +87,31 @@ impl From<VrccDeviceAuthStep> for VrccDeviceAuthStepOutput {
 #[specta::specta]
 pub fn app__vrcc_connection(state: State<'_, AppState>) -> VrccConnectionSnapshot {
     state.runtime_host().vrcc().connection()
+}
+
+// -- 服务可达性 -------------------------------------------------------------
+//
+// 采集在 Rust 侧的后台循环里（`VrccHealthService`），前端只读投影：窗口最小化到
+// 托盘后 WebView 会节流定时器，前端自己轮询会停摆。
+
+/// 读当前结论。纯内存，不发请求。
+#[tauri::command(async)]
+#[specta::specta]
+pub fn app__vrcc_health_get(state: State<'_, AppState>) -> VrccHealthSnapshot {
+    state.runtime_host().vrcc_health_snapshot()
+}
+
+/// 立刻探一次。并发调用共用同一次请求（应用层单飞）。
+#[tauri::command]
+#[specta::specta]
+pub async fn app__vrcc_health_refresh(
+    state: State<'_, AppState>,
+) -> Result<VrccHealthSnapshot, AppError> {
+    state
+        .runtime_host()
+        .refresh_vrcc_health()
+        .await
+        .map_err(AppError::from)
 }
 
 // -- 首连引导 ---------------------------------------------------------------

@@ -153,7 +153,7 @@ impl VrccTokenStore for MemoryStore {
 /// 配额报什么数）可以完全不碰网络就测掉。过去这些测试靠真的
 /// `VrccSession`，一联网就拖慢、还会碰真实限流。
 #[derive(Default)]
-struct FakeRemote {
+pub(super) struct FakeRemote {
     /// 当前连接状态，由 `connect`/`disconnect`/`expire` 改。
     connection: Mutex<VrccConnection>,
     /// 会话代次，`connect`/`disconnect`/`expire` 各推进一次（同真实会话）。
@@ -195,10 +195,22 @@ struct FakeRemote {
     model_detail: Mutex<Option<VrccModelDetail>>,
     /// 记录 `model()` 收到的 id，用来验证缓存是否真的省掉了请求。
     model_calls: Mutex<Vec<i64>>,
+    /// `status` 的返回。没设就按「传输失败」处理。
+    ///
+    /// 健康探测（`health.rs`）的测试也用它：那边的编排要点是「什么情况下不换
+    /// 结论」，而结论源自 `status()` 的一次回答。
+    status_reply: Mutex<Option<std::result::Result<VrccStatus, VrccError>>>,
+    /// `status` 回答之前先等这么久。`None` 表示立即回答。
+    ///
+    /// 测探活单飞必须要它：立即完成的回答没有 await 点，三个并发调用会依次跑完
+    /// 各自的「创建—完成—清理」，谁都碰不到谁的 in-flight，单飞看起来失效了。
+    status_delay: Mutex<Option<Duration>>,
+    /// `status` 被调了几次。探活单飞不能真的发两次，只能这样数。
+    status_calls: Mutex<u32>,
 }
 
 impl FakeRemote {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             connection: Mutex::new(VrccConnection {
                 client: "dev-test".to_string(),
@@ -219,6 +231,21 @@ impl FakeRemote {
     /// 预设下一次 `recent_notifications` 的返回。
     fn set_recent(&self, recent: VrccRecentNotifications) {
         *self.recent.lock().unwrap() = Some(recent);
+    }
+
+    /// 预设 `status` 的回答。健康探测的测试用它铺前置结论。
+    pub(super) fn set_status(&self, reply: std::result::Result<VrccStatus, VrccError>) {
+        *self.status_reply.lock().unwrap() = Some(reply);
+    }
+
+    /// 让 `status` 延迟回答，好让并发的调用真的重叠在一起。
+    pub(super) fn set_status_delay(&self, delay: Duration) {
+        *self.status_delay.lock().unwrap() = Some(delay);
+    }
+
+    /// `status` 被调了几次。
+    pub(super) fn status_calls(&self) -> u32 {
+        *self.status_calls.lock().unwrap()
     }
 
     /// 预设下一次 `unread` 的返回。
@@ -322,7 +349,15 @@ impl VrccRemote for FakeRemote {
         Box::pin(async move { Err(transport("fake")) })
     }
     fn status<'a>(&'a self) -> VrccFuture<'a, VrccStatus> {
-        Box::pin(async move { Err(transport("fake")) })
+        *self.status_calls.lock().unwrap() += 1;
+        let reply = self.status_reply.lock().unwrap().clone();
+        let delay = *self.status_delay.lock().unwrap();
+        Box::pin(async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            reply.unwrap_or_else(|| Err(transport("fake")))
+        })
     }
     fn fetch_site_asset<'a>(&'a self, _path: &'a str) -> VrccFuture<'a, Vec<u8>> {
         Box::pin(async move { Err(transport("fake")) })

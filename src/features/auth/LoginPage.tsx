@@ -7,6 +7,7 @@ import { LoginPageHeader } from './components/LoginPageHeader';
 import { LoginPageUtilities } from './components/LoginPageUtilities';
 import { LoginProxySettingsDialog } from './components/LoginProxySettingsDialog';
 import { LoginServerStatusAlert } from './components/LoginServerStatusAlert';
+import { LoginVrccStatusAlert } from './components/LoginVrccStatusAlert';
 import { SavedAccountsCard } from './components/SavedAccountsCard';
 import { useLoginPageController } from './useLoginPageController';
 
@@ -20,7 +21,8 @@ export function LoginPage() {
         proxyDialog,
         savedAccounts,
         serverStatus,
-        utilities
+        utilities,
+        vrccStatus
     } = useLoginPageController();
     const showSavedAccounts = savedAccounts.visible && !manualLoginSelected;
 
@@ -36,10 +38,12 @@ export function LoginPage() {
                         onLanguageChange={header.onLanguageChange}
                     />
                     <LoginServerStatusAlert
-                        indicator={serverStatus.indicator}
-                        status={serverStatus.status}
-                        summary={serverStatus.summary}
+                        health={serverStatus.health}
                         onOpenStatusPage={serverStatus.onOpenStatusPage}
+                    />
+                    <LoginVrccStatusAlert
+                        health={vrccStatus.health}
+                        onOpenStatusPage={vrccStatus.onOpenStatusPage}
                     />
                     {showSavedAccounts ? (
                         <SavedAccountsCard

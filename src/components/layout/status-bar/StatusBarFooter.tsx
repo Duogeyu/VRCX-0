@@ -10,6 +10,7 @@ import { forwardRef, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ProxySettingsEditor } from '@/components/proxy/ProxySettingsEditor';
+import { resolveServerHealth } from '@/lib/serverHealth';
 import { cn } from '@/lib/utils';
 import {
     dataDirMigrationErrorKey,
@@ -25,7 +26,6 @@ import {
     MIN_ZOOM_LEVEL,
     ZOOM_STEP
 } from '@/shared/constants/themes';
-import type { VrcStatusState } from '@/state/runtimeStore';
 import { Button } from '@/ui/shadcn/button';
 import {
     Popover,
@@ -64,6 +64,8 @@ import type {
     StatusBarInstanceQueue,
     StatusBarMutualGraph
 } from './statusBarTypes';
+import { resolveVrcStatusIndicator } from './statusBarVrc';
+import { resolveVrccStatusIndicator } from './statusBarVrcc';
 
 function formatFriendProfileLoadValue(
     friendProfileLoad: StatusBarFriendProfileLoad
@@ -150,36 +152,6 @@ function formatMutualGraphTooltip(
     return t('status_bar.mutual_graph_progress');
 }
 
-function formatVrcStatusTooltip(
-    vrcStatus: Pick<
-        VrcStatusState,
-        'summary' | 'status' | 'refreshing' | 'error' | 'lastFetchedAt'
-    >,
-    t: ReturnType<typeof useTranslation>['t'],
-    formatStatusDate: (value: string | null) => string
-) {
-    const status =
-        vrcStatus.summary || vrcStatus.status || t('status_bar.servers_ok');
-    return (
-        <div className="flex flex-col gap-1 text-xs">
-            <span>{status}</span>
-            {vrcStatus.refreshing ? (
-                <span className="text-muted-foreground">
-                    {t('common.loading')}
-                </span>
-            ) : null}
-            {vrcStatus.error ? (
-                <span className="text-muted-foreground">{vrcStatus.error}</span>
-            ) : null}
-            {vrcStatus.lastFetchedAt ? (
-                <span className="text-muted-foreground">
-                    {formatStatusDate(vrcStatus.lastFetchedAt)}
-                </span>
-            ) : null}
-        </div>
-    );
-}
-
 export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
     function StatusBarFooter(
         { className, footer, sidebarWindowMode = false, ...props },
@@ -208,6 +180,7 @@ export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
             visibility,
             visibleClocks,
             worldCollectionImport,
+            vrcc,
             vrcStatus,
             zoomLevel,
             zoomLabel,
@@ -218,6 +191,7 @@ export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
             onCopyMediaLink,
             onOpenMediaLink,
             onOpenStatusPage,
+            onOpenVrccStatusPage,
             onStartBackgroundMode,
             onProxyDraftEnabledChange,
             onProxyDraftServerChange,
@@ -245,12 +219,22 @@ export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
             'cancelled',
             'error'
         ].includes(mutualGraphStatus);
-        const vrcStatusIndicator = vrcStatus.indicator;
-        const vrcStatusHasIssue = Boolean(
-            vrcStatusIndicator && vrcStatusIndicator !== 'none'
+        // 判定在 `@/lib/serverHealth`：四态（healthy / issue / unreachable / unknown）。
+        // 以前这里是就地写的 `indicator && indicator !== 'none'`，那条判据会把
+        // "刷新失败、其实什么也不知道"读成健康。
+        const vrcIndicator = resolveVrcStatusIndicator(
+            resolveServerHealth(vrcStatus),
+            { refreshing: vrcStatus.refreshing },
+            t,
+            formatStatusDate
         );
-        const vrcStatusIsMajor = ['major', 'critical'].includes(
-            vrcStatusIndicator
+        const vrccIndicator = resolveVrccStatusIndicator(
+            vrcc.health,
+            // 时间格式和 VRChat 那段的"上次获取"保持一致。
+            vrcc.checkedAt,
+            vrcc.refreshing,
+            t,
+            (ms) => formatStatusDate(new Date(ms).toISOString())
         );
         const proxyIndicator = resolveProxyIndicatorState({
             enabled: proxyEnabled,
@@ -258,36 +242,56 @@ export const StatusBarFooter = forwardRef<HTMLElement, StatusBarFooterProps>(
             hasNetworkIssue: Boolean(proxyEnabled && vrcStatus.error)
         });
 
+        /** 两段共用的提示布局：首行结论，之后是灰色次要行。 */
+        const statusTooltip = (indicator: {
+            headline: string;
+            details: string[];
+        }) => (
+            <div className="flex flex-col gap-1 text-xs">
+                <span>{indicator.headline}</span>
+                {indicator.details.map((line) => (
+                    <span
+                        key={line}
+                        className="text-muted-foreground break-all"
+                    >
+                        {line}
+                    </span>
+                ))}
+            </div>
+        );
+
         const connections = (
             <>
                 <StatusSegment
                     visible={sidebarWindowMode || visibility.servers}
-                    active={!vrcStatusHasIssue}
-                    alert={
-                        vrcStatusHasIssue
-                            ? vrcStatusIsMajor
-                                ? 'danger'
-                                : 'warn'
-                            : null
-                    }
+                    active={vrcIndicator.active}
+                    alert={vrcIndicator.alert}
                     dotClassName={cn(
                         vrcStatus.refreshing && 'motion-safe:animate-pulse',
-                        vrcStatusHasIssue
-                            ? vrcStatusIsMajor
-                                ? 'bg-[var(--status-busy)]'
-                                : 'bg-[var(--status-askme)]'
-                            : undefined
+                        vrcIndicator.dotClassName
                     )}
                     label={t('status_bar.servers')}
                     className="cursor-pointer"
                     onClick={() => {
                         onOpenStatusPage();
                     }}
-                    tooltip={formatVrcStatusTooltip(
-                        vrcStatus,
-                        t,
-                        formatStatusDate
+                    tooltip={statusTooltip(vrcIndicator)}
+                />
+                {/*
+                  星遇状态（vrcc.cc）。和上面 VRChat 那段同权：默认显示，右键菜单
+                  里可以关掉。提示结构和它一致 —— 首行结论，之后是灰色次要行。
+                */}
+                <StatusSegment
+                    visible={sidebarWindowMode || visibility.vrcc}
+                    active={vrccIndicator.active}
+                    dotClassName={cn(
+                        vrcc.refreshing && 'motion-safe:animate-pulse',
+                        vrccIndicator.dotClassName
                     )}
+                    label={t('status_bar.vrcc')}
+                    className="cursor-pointer"
+                    onClick={onOpenVrccStatusPage}
+                    tooltip={statusTooltip(vrccIndicator)}
                 />
                 {sidebarWindowMode || visibility.ws ? (
                     <Tooltip>

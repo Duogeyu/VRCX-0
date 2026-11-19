@@ -5,7 +5,9 @@ import type { FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { StatusDot } from '@/components/layout/status-bar/StatusBarParts';
+import { resolveVrccStatusIndicator } from '@/components/layout/status-bar/statusBarVrcc';
 import { userFacingErrorMessage } from '@/lib/errorDisplay';
+import { vrccHealthNeedsAttention } from '@/lib/vrccHealth';
 import type { PrivacyLockOutcome } from '@/platform/tauri/bindings';
 import { logoutWithoutConfirmation } from '@/services/authExecutionService';
 import { startBackgroundModeForCurrentSession } from '@/services/backgroundModeService';
@@ -16,6 +18,7 @@ import {
 } from '@/services/privacyLockService';
 import { usePrivacyLockPhase } from '@/state/privacyLockPhase';
 import { useRuntimeStore } from '@/state/runtimeStore';
+import { useVrccHealthStore } from '@/state/vrccHealthStore';
 import { Avatar, AvatarFallback, AvatarImage } from '@/ui/shadcn/avatar';
 import { Button } from '@/ui/shadcn/button';
 import { Field, FieldError, FieldLabel } from '@/ui/shadcn/field';
@@ -67,6 +70,11 @@ function LockedPanel() {
         (state) =>
             !state.vrcStatus.indicator || state.vrcStatus.indicator === 'none'
     );
+    // 星遇状态**只在需要关注时出现**：锁屏界面极简，绝大多数玩家没连过星遇同频，
+    // 常态下不该多一个与他无关的点。真出问题时它才有用 —— 那种时候界面上什么都
+    // 慢半拍，至少能看出是网络够不着还是站方在歇。
+    const vrccHealth = useVrccHealthStore((state) => state.health);
+    const vrccNeedsAttention = vrccHealthNeedsAttention(vrccHealth);
     const [recovering, setRecovering] = useState(false);
     const [pendingAction, setPendingAction] = useState<
         'background' | 'logout' | null
@@ -116,6 +124,24 @@ function LockedPanel() {
                     <StatusDot active={websocketConnected} />
                     {t('status_bar.realtime_connection')}
                 </span>
+                {vrccNeedsAttention ? (
+                    <span className="flex items-center gap-1.5">
+                        {/* 颜色取自状态栏那套映射，两处不能各说各话。 */}
+                        <StatusDot
+                            active={false}
+                            className={
+                                resolveVrccStatusIndicator(
+                                    vrccHealth,
+                                    null,
+                                    false,
+                                    t,
+                                    () => ''
+                                ).dotClassName
+                            }
+                        />
+                        {t('status_bar.vrcc')}
+                    </span>
+                ) : null}
             </DialogPrimitive.Description>
             <div className="flex justify-center gap-2">
                 <Button

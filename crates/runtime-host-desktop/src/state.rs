@@ -703,6 +703,8 @@ impl DesktopRuntimeHostState {
             vrcc_owner,
             // 服务名要按界面语言取官方译名（`vrcc.title`），所以给它配置仓库。
             runtime.desktop_assembly().config().clone(),
+            // 健康探测要推事件给前端，和 VRChat 那条用同一个总线。
+            runtime.desktop_assembly().event_bus().clone(),
         ));
         // 令牌按账号存，而这里还没登录：登录、换号、登出时都要按新账号重新恢复
         // 会话。作用域只存弱引用，`vrcc` 由宿主状态持有。要先于后台轮询挂上（见
@@ -1776,6 +1778,12 @@ impl DesktopRuntimeHostState {
     {
         self.vrcc
             .install_session_expired_events(Arc::clone(&event_sink));
+        // 可达性探测不看登录态（`GET /status` 不要令牌），所以循环在这里就起，
+        // 不挂在 `vrcc_poll::install` 那条「等登录就绪」的链路上 —— 登录页也要
+        // 读这份结论。和 VRChat 那条的启动时机一致。
+        self.vrcc
+            .health()
+            .start_loop(self.runtime.runtime_tasks().clone());
         crate::vrcc_poll::install(
             Arc::clone(&self.vrcc),
             self.desktop.services.notification_dispatcher(),
@@ -1863,6 +1871,16 @@ impl DesktopRuntimeHostState {
             .vrc_status()
             .refresh()
             .await?)
+    }
+
+    /// 星遇同频服务可达性的当前结论。纯内存读取，不发请求。
+    pub fn vrcc_health_snapshot(&self) -> vrcx_0_application_core::VrccHealthSnapshot {
+        self.vrcc.health().snapshot()
+    }
+
+    /// 立刻探一次星遇同频。并发调用共用同一次请求（应用层单飞）。
+    pub async fn refresh_vrcc_health(&self) -> Result<vrcx_0_application_core::VrccHealthSnapshot> {
+        Ok(self.vrcc.health().refresh().await?)
     }
 
     pub fn presence_automation_rules(
